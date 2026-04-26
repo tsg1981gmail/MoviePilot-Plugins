@@ -257,7 +257,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.4"
+    plugin_version = "4.3.5"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2383,11 +2383,11 @@ class BrushFlowLowFreq(_PluginBase):
                 return False, "其他站点存在尚未下载完成的相同种子"
 
         # 促销条件
-        if brush_config.freeleech and torrent.downloadvolumefactor != 0:
+        if brush_config.freeleech and not self.__is_free_torrent(torrent):
             return False, "非免费种子"
-        if brush_config.freeleech == "2xfree" and torrent.uploadvolumefactor != 2:
+        if brush_config.freeleech == "2xfree" and not self.__is_2x_torrent(torrent):
             return False, "非双倍上传种子"
-        if brush_config.free_remaining_time and torrent.downloadvolumefactor == 0:
+        if brush_config.free_remaining_time and self.__is_free_torrent(torrent):
             free_remaining_minutes = self.__get_free_remaining_minutes(
                 freedate=torrent.freedate,
                 freedate_diff=torrent.freedate_diff
@@ -2460,7 +2460,11 @@ class BrushFlowLowFreq(_PluginBase):
             if not torrent:
                 logger.warning(f"没有通过前置刷流条件校验，原因：{reason}")
             else:
-                logger.debug(f"种子没有通过刷流条件校验，原因：{reason} 种子：{torrent.title}|{torrent.description}")
+                # 免费剩余时间过滤建议默认可见，便于排查“为何仍下载到快到期种子”
+                if reason.startswith("免费剩余时间"):
+                    logger.info(f"种子没有通过刷流条件校验，原因：{reason} 种子：{torrent.title}|{torrent.description}")
+                else:
+                    logger.debug(f"种子没有通过刷流条件校验，原因：{reason} 种子：{torrent.title}|{torrent.description}")
 
     # endregion
 
@@ -3854,6 +3858,33 @@ class BrushFlowLowFreq(_PluginBase):
             return max(0, float(text))
 
         return None
+
+    @staticmethod
+    def __is_free_torrent(torrent: TorrentInfo) -> bool:
+        """
+        兼容不同站点返回格式，判断是否免费种
+        """
+        factor = getattr(torrent, "downloadvolumefactor", None)
+        if factor is None:
+            return bool(getattr(torrent, "freedate", None) or getattr(torrent, "freedate_diff", None))
+
+        try:
+            return float(factor) == 0
+        except (TypeError, ValueError):
+            value = str(factor).strip().lower()
+            return value in {"0", "0.0", "0.00", "free", "免费"}
+
+    @staticmethod
+    def __is_2x_torrent(torrent: TorrentInfo) -> bool:
+        """
+        兼容不同站点返回格式，判断是否双倍上传
+        """
+        factor = getattr(torrent, "uploadvolumefactor", None)
+        try:
+            return float(factor) == 2
+        except (TypeError, ValueError):
+            value = str(factor).strip().lower()
+            return value in {"2", "2.0", "2.00", "2x", "double"}
 
     @classmethod
     def __get_free_remaining_minutes(cls, freedate: str, freedate_diff: Optional[str] = None) -> Optional[float]:
