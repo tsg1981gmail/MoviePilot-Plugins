@@ -1,4 +1,5 @@
 import base64
+import html
 import json
 import random
 import re
@@ -260,7 +261,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.7"
+    plugin_version = "4.3.8"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2408,16 +2409,21 @@ class BrushFlowLowFreq(_PluginBase):
         if brush_config.freeleech == "2xfree" and not self.__is_2x_torrent(torrent):
             return False, "非双倍上传种子"
         if brush_config.free_remaining_time and self.__is_free_torrent(torrent):
+            free_remaining_threshold = float(brush_config.free_remaining_time)
             free_remaining_minutes = self.__get_free_remaining_minutes(
                 freedate=torrent.freedate,
-                freedate_diff=torrent.freedate_diff
+                freedate_diff=torrent.freedate_diff,
+                title=torrent.title,
+                description=torrent.description
             )
             if free_remaining_minutes is None:
                 return False, (f"无法识别免费剩余时间（截止：{torrent.freedate or '未知'}，"
                                f"剩余：{torrent.freedate_diff or '未知'}），按阈值策略跳过")
-            if free_remaining_minutes is not None and free_remaining_minutes < float(brush_config.free_remaining_time):
+            logger.info(f"免费剩余时间校验：剩余 {free_remaining_minutes:.0f} 分钟，"
+                        f"阈值 {free_remaining_threshold:.0f} 分钟，种子：{torrent.title}")
+            if free_remaining_minutes < free_remaining_threshold:
                 return False, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
-                               f"低于设置的 {brush_config.free_remaining_time} 分钟")
+                               f"低于设置的 {free_remaining_threshold:.0f} 分钟")
 
         # H&R
         if brush_config.hr == "yes" and torrent.hit_and_run:
@@ -3844,16 +3850,20 @@ class BrushFlowLowFreq(_PluginBase):
             logger.error(f"发布时间 {pubdate} 获取分钟失败，错误详情: {e}")
             return 0
 
-    @staticmethod
-    def __parse_duration_minutes(time_text: str) -> Optional[float]:
+    @classmethod
+    def __parse_duration_minutes(cls, time_text: str) -> Optional[float]:
         """
         解析常见的剩余时间文本，返回分钟数
         """
         if not time_text:
             return None
-        text = str(time_text).strip().lower()
+        text = html.unescape(str(time_text)).strip().lower()
         if not text:
             return None
+
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        text = cls.__normalize_chinese_duration_text(text)
 
         # 永久免费场景默认放行
         if any(keyword in text for keyword in ["永久", "forever", "long-term", "unlimited", "无限"]):
@@ -3863,7 +3873,7 @@ class BrushFlowLowFreq(_PluginBase):
         matched = False
         patterns = [
             (r"(\d+(?:\.\d+)?)\s*(?:天|日|day|days)", 1440),
-            (r"(\d+(?:\.\d+)?)\s*(?:小时|小時|hour|hours|hr|hrs|h)", 60),
+            (r"(\d+(?:\.\d+)?)\s*(?:小时|小時|时|時|hour|hours|hr|hrs|h)", 60),
             (r"(\d+(?:\.\d+)?)\s*(?:分钟|分鐘|分|min|mins|minute|minutes|m)", 1),
             (r"(\d+(?:\.\d+)?)\s*(?:秒|second|seconds|sec|secs|s)", 1 / 60),
         ]
@@ -3890,6 +3900,76 @@ class BrushFlowLowFreq(_PluginBase):
             return max(0, float(text))
 
         return None
+
+    @classmethod
+    def __normalize_chinese_duration_text(cls, text: str) -> str:
+        """
+        将“free三天”“两小时”等中文数字时长表达标准化为可解析的数字表达
+        """
+        if not text:
+            return text
+
+        pattern = r"([零〇一二两三四五六七八九十百千半]+)(?=\s*(?:天|日|小时|小時|时|時|分钟|分鐘|分|秒))"
+
+        def repl(match):
+            converted = cls.__chinese_number_to_float(match.group(1))
+            if converted is None:
+                return match.group(1)
+            if converted.is_integer():
+                return str(int(converted))
+            return str(converted)
+
+        return re.sub(pattern, repl, text)
+
+    @staticmethod
+    def __chinese_number_to_float(value: str) -> Optional[float]:
+        """
+        支持常见中文数字（含“半”）转换
+        """
+        if not value:
+            return None
+
+        raw = str(value).strip()
+        if not raw:
+            return None
+
+        if re.match(r"^\d+(?:\.\d+)?$", raw):
+            return float(raw)
+
+        digits = {
+            "零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+            "五": 5, "六": 6, "七": 7, "八": 8, "九": 9
+        }
+        units = {"十": 10, "百": 100, "千": 1000}
+
+        if raw == "半":
+            return 0.5
+
+        bonus = 0.0
+        if raw.endswith("半"):
+            bonus = 0.5
+            raw = raw[:-1]
+            if not raw:
+                return bonus
+
+        total = 0
+        current = 0
+        for char in raw:
+            if char in digits:
+                current = digits[char]
+            elif char in units:
+                unit = units[char]
+                if current == 0:
+                    current = 1
+                total += current * unit
+                current = 0
+            else:
+                return None
+        total += current
+
+        if total == 0 and raw:
+            return None
+        return float(total) + bonus
 
     @staticmethod
     def __get_task_elapsed_minutes(task_time: Any) -> Optional[float]:
@@ -3931,45 +4011,66 @@ class BrushFlowLowFreq(_PluginBase):
             value = str(factor).strip().lower()
             return value in {"2", "2.0", "2.00", "2x", "double"}
 
+    @staticmethod
+    def __extract_free_time_snippets(text: Any) -> List[str]:
+        """
+        从标题/副标题等文本中提取与免费剩余时间相关的片段
+        """
+        if not text:
+            return []
+
+        raw_text = html.unescape(str(text))
+        plain_text = re.sub(r"<[^>]+>", " ", raw_text)
+        plain_text = re.sub(r"\s+", " ", plain_text).strip()
+
+        snippets = []
+        keyword_patterns = [
+            r"(?:优惠剩余时间|免费剩余时间|免费剩余|剩余时间)\s*[:：]?\s*[^]\[|；;，,。]{0,60}",
+            r"free\s*[零〇一二两三四五六七八九十百千半\d\.]+\s*(?:天|日|小时|小時|时|時|分钟|分鐘|分|hour|hours|hr|hrs|min|m)"
+        ]
+
+        for pattern in keyword_patterns:
+            for matched in re.findall(pattern, plain_text, re.IGNORECASE):
+                candidate = matched.strip()
+                if candidate:
+                    snippets.append(candidate)
+
+        if re.search(r"(?:天|日|小时|小時|时|時|分钟|分鐘|分|hour|hours|hr|hrs|min|m)", plain_text, re.IGNORECASE):
+            if len(plain_text) <= 32:
+                snippets.append(plain_text)
+
+        for matched in re.findall(r"title\s*=\s*[\"'](\d{4}[-/.]\d{2}[-/.]\d{2}[ T]\d{2}:\d{2}:\d{2})[\"']",
+                                  raw_text, re.IGNORECASE):
+            snippets.append(matched.strip())
+
+        return list(dict.fromkeys([snippet for snippet in snippets if snippet]))
+
     @classmethod
-    def __get_free_remaining_minutes(cls, freedate: str, freedate_diff: Optional[str] = None) -> Optional[float]:
+    def __parse_deadline_to_minutes(cls, deadline_text: Any) -> Optional[float]:
         """
-        获取免费剩余分钟数
+        将截止时间文本解析为剩余分钟数
         """
-        # 优先使用已格式化的剩余时间字段
-        parsed_minutes = cls.__parse_duration_minutes(freedate_diff or "")
-        if parsed_minutes is not None:
-            return parsed_minutes
-
-        # 其次尝试直接解析 freedate 文本
-        parsed_minutes = cls.__parse_duration_minutes(freedate or "")
-        if parsed_minutes is not None:
-            return parsed_minutes
-
-        # 最后按绝对时间戳计算（保守策略：同一字符串按本地/UTC两种可能解析，取更小值）
-        if not freedate:
+        if not deadline_text:
             return None
 
-        text = str(freedate).strip()
+        text = html.unescape(str(deadline_text)).strip()
         if not text:
             return None
 
         timestamps = []
 
-        # 纯数字，兼容秒/毫秒时间戳
         if re.match(r"^\d{10,13}$", text):
             ts_value = float(text)
             if len(text) == 13:
                 ts_value /= 1000
             timestamps.append(ts_value)
 
-        # 先尝试系统时间解析
         ts_from_stringutils = StringUtils.str_to_timestamp(text)
         if ts_from_stringutils:
             timestamps.append(float(ts_from_stringutils))
 
-        # 常见“无时区”时间格式，同时按本地时间与UTC时间解释，取更严格（更小）的剩余时间
         normalized_text = text.replace("T", " ").replace("Z", "").split(".")[0].strip()
+        normalized_text = normalized_text.replace("/", "-").replace(".", "-")
         if re.match(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$", normalized_text):
             try:
                 naive_dt = datetime.strptime(normalized_text, "%Y-%m-%d %H:%M:%S")
@@ -3986,8 +4087,44 @@ class BrushFlowLowFreq(_PluginBase):
         positive_remaining = [minute for minute in remaining_candidates if minute >= 0]
         if positive_remaining:
             return min(positive_remaining)
+        return 0
 
-        # 全部为过去时间，统一按0处理
+    @classmethod
+    def __get_free_remaining_minutes(cls, freedate: Any = None, freedate_diff: Optional[str] = None,
+                                     title: Optional[str] = None, description: Optional[str] = None) \
+            -> Optional[float]:
+        """
+        获取免费剩余分钟数
+        """
+        candidate_texts = []
+
+        if freedate_diff:
+            candidate_texts.append(str(freedate_diff))
+        if freedate:
+            candidate_texts.append(str(freedate))
+
+        candidate_texts.extend(cls.__extract_free_time_snippets(description))
+        candidate_texts.extend(cls.__extract_free_time_snippets(title))
+
+        if not candidate_texts:
+            return None
+
+        minute_candidates = []
+        for candidate_text in candidate_texts:
+            parsed_duration = cls.__parse_duration_minutes(candidate_text)
+            if parsed_duration is not None:
+                minute_candidates.append(parsed_duration)
+
+            parsed_deadline = cls.__parse_deadline_to_minutes(candidate_text)
+            if parsed_deadline is not None:
+                minute_candidates.append(parsed_deadline)
+
+        if not minute_candidates:
+            return None
+
+        positive_remaining = [minute for minute in minute_candidates if minute >= 0]
+        if positive_remaining:
+            return min(positive_remaining)
         return 0
 
     @staticmethod
