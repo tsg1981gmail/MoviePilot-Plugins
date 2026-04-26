@@ -59,6 +59,7 @@ class BrushConfig:
         self.seed_time = self.__parse_number(config.get("seed_time"))
         self.hr_seed_time = self.__parse_number(config.get("hr_seed_time"))
         self.seed_ratio = self.__parse_number(config.get("seed_ratio"))
+        self.seed_ratio_check_minutes = self.__parse_number(config.get("seed_ratio_check_minutes"))
         self.seed_ratio_min_30m = self.__parse_number(config.get("seed_ratio_min_30m"))
         self.seed_size = self.__parse_number(config.get("seed_size"))
         self.download_time = self.__parse_number(config.get("download_time"))
@@ -114,6 +115,7 @@ class BrushConfig:
             "seed_time",
             "hr_seed_time",
             "seed_ratio",
+            "seed_ratio_check_minutes",
             "seed_ratio_min_30m",
             "seed_size",
             "download_time",
@@ -182,6 +184,7 @@ class BrushConfig:
     "seed_time": 120,
     "hr_seed_time": 144,
     "seed_ratio": "",
+    "seed_ratio_check_minutes": 30,
     "seed_ratio_min_30m": "",
     "seed_size": "",
     "download_time": "",
@@ -257,7 +260,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.5"
+    plugin_version = "4.3.6"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1446,6 +1449,23 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_check_minutes',
+                                                            'label': '任务添加后分钟数',
+                                                            'placeholder': '如：30，达到后开始判断低分享率'
+                                                        }
+                                                    }
+                                                ]
                                             }
                                         ]
                                     },
@@ -1463,8 +1483,8 @@ class BrushFlowLowFreq(_PluginBase):
                                                         'component': 'VTextField',
                                                         'props': {
                                                             'model': 'seed_ratio_min_30m',
-                                                            'label': '30分钟最低分享率',
-                                                            'placeholder': '做种30分钟后低于时删除任务'
+                                                            'label': '任务添加后最低分享率',
+                                                            'placeholder': '达到上述分钟数后，低于时删除任务'
                                                         }
                                                     }
                                                 ]
@@ -2696,13 +2716,17 @@ class BrushFlowLowFreq(_PluginBase):
         brush_config = self.__get_brush_config(sitename=site_name)
         seeding_time = torrent_info.get("seeding_time")
         ratio = torrent_info.get("ratio")
+        task_elapsed_minutes = self.__get_task_elapsed_minutes(torrent_task.get("time"))
+        ratio_check_minutes = brush_config.seed_ratio_check_minutes if brush_config.seed_ratio_check_minutes else 30
 
         reason = "未能满足设置的删除条件"
 
         # 当配置了H&R做种时间/分享率时，则H&R种子只有达到预期行为时，才会进行删除，如果没有配置H&R做种时间/分享率，则普通种子的删除规则也适用于H&R种子
         # 判断是否为H&R种子并且是否配置了特定的H&R条件
         hit_and_run = torrent_task.get("hit_and_run", False)
-        hr_specific_conditions_configured = hit_and_run and (brush_config.hr_seed_time or brush_config.seed_ratio)
+        hr_specific_conditions_configured = hit_and_run and (
+                brush_config.hr_seed_time or brush_config.seed_ratio or brush_config.seed_ratio_min_30m
+        )
         if hr_specific_conditions_configured:
             if (brush_config.hr_seed_time and seeding_time
                     >= float(brush_config.hr_seed_time) * 3600):
@@ -2710,9 +2734,10 @@ class BrushFlowLowFreq(_PluginBase):
                               f"大于 {brush_config.hr_seed_time} 小时")
             if brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
                 return True, f"H&R种子，分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
-            if (brush_config.seed_ratio_min_30m and seeding_time and seeding_time >= 30 * 60
+            if (brush_config.seed_ratio_min_30m and task_elapsed_minutes is not None
+                    and task_elapsed_minutes >= float(ratio_check_minutes)
                     and ratio is not None and ratio < float(brush_config.seed_ratio_min_30m)):
-                return True, (f"H&R种子，做种30分钟后分享率 {ratio:.2f}，"
+                return True, (f"H&R种子，任务添加 {task_elapsed_minutes:.0f} 分钟后分享率 {ratio:.2f}，"
                               f"低于 {brush_config.seed_ratio_min_30m}")
             return False, "H&R种子，未能满足设置的H&R删除条件"
 
@@ -2722,9 +2747,11 @@ class BrushFlowLowFreq(_PluginBase):
             reason = f"做种时间 {seeding_time / 3600:.1f} 小时，大于 {brush_config.seed_time} 小时"
         elif brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
             reason = f"分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
-        elif (brush_config.seed_ratio_min_30m and seeding_time and seeding_time >= 30 * 60
+        elif (brush_config.seed_ratio_min_30m and task_elapsed_minutes is not None
+              and task_elapsed_minutes >= float(ratio_check_minutes)
               and ratio is not None and ratio < float(brush_config.seed_ratio_min_30m)):
-            reason = f"做种30分钟后分享率 {ratio:.2f}，低于 {brush_config.seed_ratio_min_30m}"
+            reason = (f"任务添加 {task_elapsed_minutes:.0f} 分钟后分享率 {ratio:.2f}，"
+                      f"低于 {brush_config.seed_ratio_min_30m}")
         elif brush_config.seed_size and torrent_info.get("uploaded") >= float(brush_config.seed_size) * 1024 ** 3:
             reason = f"上传量 {torrent_info.get('uploaded') / 1024 ** 3:.1f} GB，大于 {brush_config.seed_size} GB"
         elif brush_config.download_time and torrent_info.get("downloaded") < torrent_info.get(
@@ -3109,7 +3136,8 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_time": "做种时间",
             "hr_seed_time": "H&R做种时间",
             "seed_ratio": "分享率",
-            "seed_ratio_min_30m": "30分钟最低分享率",
+            "seed_ratio_check_minutes": "任务添加后分钟数",
+            "seed_ratio_min_30m": "任务添加后最低分享率",
             "seed_size": "上传量",
             "download_time": "下载超时时间",
             "seed_avgspeed": "平均上传速度",
@@ -3182,6 +3210,7 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_time": brush_config.seed_time,
             "hr_seed_time": brush_config.hr_seed_time,
             "seed_ratio": brush_config.seed_ratio,
+            "seed_ratio_check_minutes": brush_config.seed_ratio_check_minutes,
             "seed_ratio_min_30m": brush_config.seed_ratio_min_30m,
             "seed_size": brush_config.seed_size,
             "download_time": brush_config.download_time,
@@ -3858,6 +3887,19 @@ class BrushFlowLowFreq(_PluginBase):
             return max(0, float(text))
 
         return None
+
+    @staticmethod
+    def __get_task_elapsed_minutes(task_time: Any) -> Optional[float]:
+        """
+        获取任务从添加到当前的分钟数
+        """
+        if task_time is None:
+            return None
+        try:
+            elapsed_minutes = (time.time() - float(task_time)) / 60
+            return max(0, elapsed_minutes)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def __is_free_torrent(torrent: TorrentInfo) -> bool:
