@@ -6,6 +6,10 @@
 
 ## 版本更新日志
 
+- v4.3.9
+  - 新增“失去免费即删种”开关（更多配置）
+  - 开启后会检查种子详情页；检测到已不免费时直接彻底删除（含文件）
+
 - v4.3.8
   - 修复免费剩余时间解析：支持 `5时40分`、`Free三天` 等格式
   - 增强 HDSky 等站点的免费时间提取：可从标题/副标题中的“优惠剩余时间”文本解析
@@ -89,6 +93,7 @@
 | 分享率                 | `seed_ratio`         | 达到设定分享率后删除任务             |                                                                                                                   |
 | 任务添加后分钟数       | `seed_ratio_check_minutes` | 设置低分享率删除规则的计时阈值       | 示例：30，任务添加30分钟后开始判断低分享率删除                                                                     |
 | 任务添加后最低分享率   | `seed_ratio_min_30m` | 达到“任务添加后分钟数”后，低于设定值时删除任务 | 示例：0.5，任务添加30分钟后若分享率 < 0.5 则删除                                                                  |
+| 失去免费即删种         | `delete_when_no_free` | 检测到种子已不免费后立即删除         | 开启后会访问种子详情页校验免费状态；仅对原本免费加入的种子生效，校验失败时跳过不删                                  |
 | 上传量（GB）           | `seed_size`          | 达到设定上传量后删除任务             |                                                                                                                   |
 | 下载超时时间（小时）   | `download_time`      | 达到指定下载超时时间后删除任务       |                                                                                                                   |
 | 平均上传速度（KB/s）   | `seed_avgspeed`      | 低于设定平均上传速度时删除任务       | 刷流任务做种 30 分钟后生效                                                                                        |
@@ -143,6 +148,7 @@
 - `seed_ratio`：分享率
 - `seed_ratio_check_minutes`：任务添加后分钟数
 - `seed_ratio_min_30m`：任务添加后最低分享率
+- `delete_when_no_free`：失去免费即删种
 - `seed_size`：上传量
 - `download_time`：下载超时时间
 - `seed_avgspeed`：平均上传速度
@@ -188,6 +194,7 @@
     "seed_ratio": "",
     "seed_ratio_check_minutes": 30,
     "seed_ratio_min_30m": "",
+    "delete_when_no_free": false,
     "seed_size": "",
     "download_time": "",
     "seed_avgspeed": "",
