@@ -264,7 +264,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.11"
+    plugin_version = "4.3.12"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2491,9 +2491,30 @@ class BrushFlowLowFreq(_PluginBase):
                 title=torrent.title,
                 description=torrent.description
             )
+
+            detail_parse_reason = ""
             if free_remaining_minutes is None:
-                return False, (f"无法识别免费剩余时间（截止：{torrent.freedate or '未知'}，"
-                               f"剩余：{torrent.freedate_diff or '未知'}），按阈值策略跳过")
+                detail_page_text, detail_parse_reason = self.__get_torrent_detail_page_text(
+                    site_id=getattr(torrent, "site", None),
+                    page_url=torrent.page_url
+                )
+                if detail_page_text:
+                    free_remaining_minutes = self.__get_free_remaining_minutes(
+                        freedate=torrent.freedate,
+                        freedate_diff=torrent.freedate_diff,
+                        title=torrent.title,
+                        description=detail_page_text
+                    )
+                    if free_remaining_minutes is not None:
+                        logger.info(f"免费剩余时间校验：已通过详情页兜底解析，剩余 {free_remaining_minutes:.0f} 分钟，"
+                                    f"种子：{torrent.title}")
+
+            if free_remaining_minutes is None:
+                reason = (f"无法识别免费剩余时间（截止：{torrent.freedate or '未知'}，"
+                          f"剩余：{torrent.freedate_diff or '未知'}）")
+                if detail_parse_reason:
+                    reason = f"{reason}，详情页解析失败：{detail_parse_reason}"
+                return False, f"{reason}，按阈值策略跳过"
             logger.info(f"免费剩余时间校验：剩余 {free_remaining_minutes:.0f} 分钟，"
                         f"阈值 {free_remaining_threshold:.0f} 分钟，种子：{torrent.title}")
             if free_remaining_minutes < free_remaining_threshold:
@@ -2828,8 +2849,22 @@ class BrushFlowLowFreq(_PluginBase):
         """
         检查种子当前是否仍为免费状态
         """
-        site_id = torrent_task.get("site")
-        page_url = torrent_task.get("page_url")
+        page_text, error_reason = self.__get_torrent_detail_page_text(
+            site_id=torrent_task.get("site"),
+            page_url=torrent_task.get("page_url")
+        )
+        if not page_text:
+            return None, error_reason
+
+        page_free_status = self.__parse_free_status_from_page(page_text)
+        if page_free_status is None:
+            return None, "页面内容无法判断免费状态"
+        return page_free_status, "仍为免费种子" if page_free_status else "已失去免费"
+
+    def __get_torrent_detail_page_text(self, site_id: Any, page_url: str) -> Tuple[Optional[str], str]:
+        """
+        获取种子详情页HTML
+        """
         if not site_id or not page_url:
             return None, "缺少站点ID或种子详情地址"
 
@@ -2858,10 +2893,10 @@ class BrushFlowLowFreq(_PluginBase):
             return None, "请求详情页失败"
 
         page_text = response.text if getattr(response, "text", None) else ""
-        page_free_status = self.__parse_free_status_from_page(page_text)
-        if page_free_status is None:
-            return None, "页面内容无法判断免费状态"
-        return page_free_status, "仍为免费种子" if page_free_status else "已失去免费"
+        if not page_text:
+            return None, "详情页内容为空"
+
+        return page_text, ""
 
     @staticmethod
     def __parse_free_status_from_page(page_text: str) -> Optional[bool]:
