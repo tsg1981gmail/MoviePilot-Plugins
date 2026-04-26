@@ -264,7 +264,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.9"
+    plugin_version = "4.3.10"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2509,8 +2509,8 @@ class BrushFlowLowFreq(_PluginBase):
             if not torrent:
                 logger.warning(f"没有通过前置刷流条件校验，原因：{reason}")
             else:
-                # 免费剩余时间过滤建议默认可见，便于排查“为何仍下载到快到期种子”
-                if reason.startswith("免费剩余时间"):
+                # 与免费相关的过滤建议默认可见，便于排查“为何仍下载不到免费种”
+                if any(keyword in reason for keyword in ["免费剩余时间", "无法识别免费", "非免费种子"]):
                     logger.info(f"种子没有通过刷流条件校验，原因：{reason} 种子：{torrent.title}|{torrent.description}")
                 else:
                     logger.debug(f"种子没有通过刷流条件校验，原因：{reason} 种子：{torrent.title}|{torrent.description}")
@@ -4096,7 +4096,28 @@ class BrushFlowLowFreq(_PluginBase):
             return None
 
     @staticmethod
-    def __is_free_torrent(torrent: Any) -> bool:
+    def __has_free_markers(*texts: Any) -> bool:
+        """
+        通过文本特征判断是否存在免费标记（用于兜底）
+        """
+        merged = " ".join([html.unescape(str(text)) for text in texts if text]).strip()
+        if not merged:
+            return False
+
+        patterns = [
+            r"优惠剩余时间",
+            r"免费剩余时间",
+            r"免费剩余",
+            r"2x\s*免费",
+            r"2xfree",
+            r"\bfree\s*(?:\d|[零〇一二两三四五六七八九十百千半])",
+            r"class\s*=\s*[\"']pro_free[\"']",
+            r">\s*免费\s*<"
+        ]
+        return any(re.search(pattern, merged, re.IGNORECASE) for pattern in patterns)
+
+    @classmethod
+    def __is_free_torrent(cls, torrent: Any) -> bool:
         """
         兼容不同站点返回格式，判断是否免费种
         """
@@ -4104,19 +4125,30 @@ class BrushFlowLowFreq(_PluginBase):
             factor = torrent.get("downloadvolumefactor", None)
             freedate = torrent.get("freedate", None)
             freedate_diff = torrent.get("freedate_diff", None)
+            title = torrent.get("title", None)
+            description = torrent.get("description", None)
         else:
             factor = getattr(torrent, "downloadvolumefactor", None)
             freedate = getattr(torrent, "freedate", None)
             freedate_diff = getattr(torrent, "freedate_diff", None)
+            title = getattr(torrent, "title", None)
+            description = getattr(torrent, "description", None)
+
+        marker_free = cls.__has_free_markers(freedate, freedate_diff, title, description)
 
         if factor is None:
-            return bool(freedate or freedate_diff)
+            return bool(freedate or freedate_diff or marker_free)
 
         try:
-            return float(factor) == 0
+            if float(factor) == 0:
+                return True
         except (TypeError, ValueError):
             value = str(factor).strip().lower()
-            return value in {"0", "0.0", "0.00", "free", "免费"}
+            if value in {"0", "0.0", "0.00", "free", "免费"}:
+                return True
+
+        # 兜底：部分站点/版本存在下载因子解析不准，但标题/副标题已明确标注免费
+        return marker_free
 
     @staticmethod
     def __is_2x_torrent(torrent: Any) -> bool:
@@ -4216,10 +4248,13 @@ class BrushFlowLowFreq(_PluginBase):
         """
         获取免费剩余分钟数
         """
+        # 优先使用显式剩余时长字段，避免截止时间时区差异导致误判
+        parsed_from_diff = cls.__parse_duration_minutes(freedate_diff or "")
+        if parsed_from_diff is not None:
+            return parsed_from_diff
+
         candidate_texts = []
 
-        if freedate_diff:
-            candidate_texts.append(str(freedate_diff))
         if freedate:
             candidate_texts.append(str(freedate))
 
@@ -4229,23 +4264,31 @@ class BrushFlowLowFreq(_PluginBase):
         if not candidate_texts:
             return None
 
-        minute_candidates = []
+        duration_candidates = []
+        deadline_candidates = []
         for candidate_text in candidate_texts:
             parsed_duration = cls.__parse_duration_minutes(candidate_text)
             if parsed_duration is not None:
-                minute_candidates.append(parsed_duration)
+                duration_candidates.append(parsed_duration)
 
             parsed_deadline = cls.__parse_deadline_to_minutes(candidate_text)
             if parsed_deadline is not None:
-                minute_candidates.append(parsed_deadline)
+                deadline_candidates.append(parsed_deadline)
 
-        if not minute_candidates:
-            return None
+        if duration_candidates:
+            positive_durations = [minute for minute in duration_candidates if minute >= 0]
+            if positive_durations:
+                # 多个时长候选时，优先取更宽松值，避免因噪声文本误杀
+                return max(positive_durations)
+            return 0
 
-        positive_remaining = [minute for minute in minute_candidates if minute >= 0]
-        if positive_remaining:
-            return min(positive_remaining)
-        return 0
+        if deadline_candidates:
+            positive_deadlines = [minute for minute in deadline_candidates if minute >= 0]
+            if positive_deadlines:
+                return min(positive_deadlines)
+            return 0
+
+        return None
 
     @staticmethod
     def __adjust_site_pubminutes(pub_minutes: float, torrent: TorrentInfo) -> float:
