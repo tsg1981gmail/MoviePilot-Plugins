@@ -59,6 +59,7 @@ class BrushConfig:
         self.seed_time = self.__parse_number(config.get("seed_time"))
         self.hr_seed_time = self.__parse_number(config.get("hr_seed_time"))
         self.seed_ratio = self.__parse_number(config.get("seed_ratio"))
+        self.seed_ratio_min_30m = self.__parse_number(config.get("seed_ratio_min_30m"))
         self.seed_size = self.__parse_number(config.get("seed_size"))
         self.download_time = self.__parse_number(config.get("download_time"))
         self.seed_avgspeed = self.__parse_number(config.get("seed_avgspeed"))
@@ -113,6 +114,7 @@ class BrushConfig:
             "seed_time",
             "hr_seed_time",
             "seed_ratio",
+            "seed_ratio_min_30m",
             "seed_size",
             "download_time",
             "seed_avgspeed",
@@ -180,6 +182,7 @@ class BrushConfig:
     "seed_time": 120,
     "hr_seed_time": 144,
     "seed_ratio": "",
+    "seed_ratio_min_30m": "",
     "seed_size": "",
     "download_time": "",
     "seed_avgspeed": "",
@@ -254,7 +257,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.2"
+    plugin_version = "4.3.3"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1094,29 +1097,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
-                                            }
-                                        ]
-                                    },
-                                    {
-                                        'component': 'VRow',
-                                        'content': [
-                                            {
-                                                'component': 'VCol',
-                                                'props': {
-                                                    "cols": 12,
-                                                    "md": 4
-                                                },
-                                                'content': [
-                                                    {
-                                                        'component': 'VTextField',
-                                                        'props': {
-                                                            'model': 'free_remaining_time',
-                                                            'label': '免费剩余时间（分钟）',
-                                                            'placeholder': '如：120，留空则不限制'
-                                                        }
-                                                    }
-                                                ]
-                                            }
+                                            },
                                         ]
                                     },
                                     {
@@ -1172,7 +1153,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
-                                            }
+                                            },
                                         ]
                                     },
                                     {
@@ -1306,7 +1287,24 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
-                                            }
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'free_remaining_time',
+                                                            'label': '免费剩余时间（分钟）',
+                                                            'placeholder': '如：120，留空则不限制'
+                                                        }
+                                                    }
+                                                ]
+                                            },
                                         ]
                                     },
                                     {
@@ -1445,6 +1443,28 @@ class BrushFlowLowFreq(_PluginBase):
                                                             'model': 'seed_ratio',
                                                             'label': '分享率',
                                                             'placeholder': '达到后删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        'component': 'VRow',
+                                        'content': [
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_min_30m',
+                                                            'label': '30分钟最低分享率',
+                                                            'placeholder': '做种30分钟后低于时删除任务'
                                                         }
                                                     }
                                                 ]
@@ -2667,6 +2687,8 @@ class BrushFlowLowFreq(_PluginBase):
         评估删除条件并返回是否应删除种子及其原因
         """
         brush_config = self.__get_brush_config(sitename=site_name)
+        seeding_time = torrent_info.get("seeding_time")
+        ratio = torrent_info.get("ratio")
 
         reason = "未能满足设置的删除条件"
 
@@ -2675,20 +2697,27 @@ class BrushFlowLowFreq(_PluginBase):
         hit_and_run = torrent_task.get("hit_and_run", False)
         hr_specific_conditions_configured = hit_and_run and (brush_config.hr_seed_time or brush_config.seed_ratio)
         if hr_specific_conditions_configured:
-            if (brush_config.hr_seed_time and torrent_info.get("seeding_time")
+            if (brush_config.hr_seed_time and seeding_time
                     >= float(brush_config.hr_seed_time) * 3600):
-                return True, (f"H&R种子，做种时间 {torrent_info.get('seeding_time') / 3600:.1f} 小时，"
+                return True, (f"H&R种子，做种时间 {seeding_time / 3600:.1f} 小时，"
                               f"大于 {brush_config.hr_seed_time} 小时")
-            if brush_config.seed_ratio and torrent_info.get("ratio") >= float(brush_config.seed_ratio):
-                return True, f"H&R种子，分享率 {torrent_info.get('ratio'):.2f}，大于 {brush_config.seed_ratio}"
+            if brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
+                return True, f"H&R种子，分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
+            if (brush_config.seed_ratio_min_30m and seeding_time and seeding_time >= 30 * 60
+                    and ratio is not None and ratio < float(brush_config.seed_ratio_min_30m)):
+                return True, (f"H&R种子，做种30分钟后分享率 {ratio:.2f}，"
+                              f"低于 {brush_config.seed_ratio_min_30m}")
             return False, "H&R种子，未能满足设置的H&R删除条件"
 
         # 处理其他场景，1. 不是H&R种子；2. 是H&R种子但没有特定条件配置
         reason = reason if not hit_and_run else "H&R种子（未设置H&R条件），未能满足设置的删除条件"
-        if brush_config.seed_time and torrent_info.get("seeding_time") >= float(brush_config.seed_time) * 3600:
-            reason = f"做种时间 {torrent_info.get('seeding_time') / 3600:.1f} 小时，大于 {brush_config.seed_time} 小时"
-        elif brush_config.seed_ratio and torrent_info.get("ratio") >= float(brush_config.seed_ratio):
-            reason = f"分享率 {torrent_info.get('ratio'):.2f}，大于 {brush_config.seed_ratio}"
+        if brush_config.seed_time and seeding_time and seeding_time >= float(brush_config.seed_time) * 3600:
+            reason = f"做种时间 {seeding_time / 3600:.1f} 小时，大于 {brush_config.seed_time} 小时"
+        elif brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
+            reason = f"分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
+        elif (brush_config.seed_ratio_min_30m and seeding_time and seeding_time >= 30 * 60
+              and ratio is not None and ratio < float(brush_config.seed_ratio_min_30m)):
+            reason = f"做种30分钟后分享率 {ratio:.2f}，低于 {brush_config.seed_ratio_min_30m}"
         elif brush_config.seed_size and torrent_info.get("uploaded") >= float(brush_config.seed_size) * 1024 ** 3:
             reason = f"上传量 {torrent_info.get('uploaded') / 1024 ** 3:.1f} GB，大于 {brush_config.seed_size} GB"
         elif brush_config.download_time and torrent_info.get("downloaded") < torrent_info.get(
@@ -3073,6 +3102,7 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_time": "做种时间",
             "hr_seed_time": "H&R做种时间",
             "seed_ratio": "分享率",
+            "seed_ratio_min_30m": "30分钟最低分享率",
             "seed_size": "上传量",
             "download_time": "下载超时时间",
             "seed_avgspeed": "平均上传速度",
@@ -3145,6 +3175,7 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_time": brush_config.seed_time,
             "hr_seed_time": brush_config.hr_seed_time,
             "seed_ratio": brush_config.seed_ratio,
+            "seed_ratio_min_30m": brush_config.seed_ratio_min_30m,
             "seed_size": brush_config.seed_size,
             "download_time": brush_config.download_time,
             "seed_avgspeed": brush_config.seed_avgspeed,
