@@ -55,6 +55,7 @@ class BrushConfig:
         self.size = config.get("size")
         self.seeder = config.get("seeder")
         self.pubtime = config.get("pubtime")
+        self.free_remaining_time = self.__parse_number(config.get("free_remaining_time"))
         self.seed_time = self.__parse_number(config.get("seed_time"))
         self.hr_seed_time = self.__parse_number(config.get("hr_seed_time"))
         self.seed_ratio = self.__parse_number(config.get("seed_ratio"))
@@ -108,6 +109,7 @@ class BrushConfig:
             "size",
             "seeder",
             "pubtime",
+            "free_remaining_time",
             "seed_time",
             "hr_seed_time",
             "seed_ratio",
@@ -174,6 +176,7 @@ class BrushConfig:
     "size": "10-500",
     "seeder": "1",
     "pubtime": "5-120",
+    "free_remaining_time": 120,
     "seed_time": 120,
     "hr_seed_time": 144,
     "seed_ratio": "",
@@ -251,7 +254,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.1"
+    plugin_version = "4.3.2"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1088,6 +1091,28 @@ class BrushFlowLowFreq(_PluginBase):
                                                             'model': 'qb_category',
                                                             'label': '种子分类',
                                                             'placeholder': '仅支持qBittorrent，需提前创建'
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        'component': 'VRow',
+                                        'content': [
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'free_remaining_time',
+                                                            'label': '免费剩余时间（分钟）',
+                                                            'placeholder': '如：120，留空则不限制'
                                                         }
                                                     }
                                                 ]
@@ -2342,6 +2367,11 @@ class BrushFlowLowFreq(_PluginBase):
             return False, "非免费种子"
         if brush_config.freeleech == "2xfree" and torrent.uploadvolumefactor != 2:
             return False, "非双倍上传种子"
+        if brush_config.free_remaining_time and torrent.downloadvolumefactor == 0 and torrent.freedate:
+            free_remaining_minutes = self.__get_free_remaining_minutes(torrent.freedate)
+            if free_remaining_minutes is not None and free_remaining_minutes < float(brush_config.free_remaining_time):
+                return False, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
+                               f"低于设置的 {brush_config.free_remaining_time} 分钟")
 
         # H&R
         if brush_config.hr == "yes" and torrent.hit_and_run:
@@ -3039,6 +3069,7 @@ class BrushFlowLowFreq(_PluginBase):
             "maxupspeed": "总上传带宽",
             "maxdlspeed": "总下载带宽",
             "maxdlcount": "同时下载任务数",
+            "free_remaining_time": "免费剩余时间",
             "seed_time": "做种时间",
             "hr_seed_time": "H&R做种时间",
             "seed_ratio": "分享率",
@@ -3110,6 +3141,7 @@ class BrushFlowLowFreq(_PluginBase):
             "size": brush_config.size,
             "seeder": brush_config.seeder,
             "pubtime": brush_config.pubtime,
+            "free_remaining_time": brush_config.free_remaining_time,
             "seed_time": brush_config.seed_time,
             "hr_seed_time": brush_config.hr_seed_time,
             "seed_ratio": brush_config.seed_ratio,
@@ -3602,6 +3634,7 @@ class BrushFlowLowFreq(_PluginBase):
             "pubdate": "发布时间",
             "seeders": "做种数",
             "volume_factor": "促销",
+            "freedate_diff": "免费剩余",
             "hit_and_run": "Hit&Run"
         }
         for key in label_mapping:
@@ -3740,6 +3773,19 @@ class BrushFlowLowFreq(_PluginBase):
         except Exception as e:
             logger.error(f"发布时间 {pubdate} 获取分钟失败，错误详情: {e}")
             return 0
+
+    @staticmethod
+    def __get_free_remaining_minutes(freedate: str) -> Optional[float]:
+        """
+        获取免费剩余分钟数
+        """
+        if not freedate:
+            return None
+        timestamp = StringUtils.str_to_timestamp(freedate)
+        if not timestamp:
+            return None
+        remaining_minutes = (timestamp - time.time()) / 60
+        return max(0, remaining_minutes)
 
     @staticmethod
     def __adjust_site_pubminutes(pub_minutes: float, torrent: TorrentInfo) -> float:
