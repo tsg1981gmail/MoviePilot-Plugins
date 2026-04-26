@@ -260,7 +260,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.6"
+    plugin_version = "4.3.7"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2412,6 +2412,9 @@ class BrushFlowLowFreq(_PluginBase):
                 freedate=torrent.freedate,
                 freedate_diff=torrent.freedate_diff
             )
+            if free_remaining_minutes is None:
+                return False, (f"无法识别免费剩余时间（截止：{torrent.freedate or '未知'}，"
+                               f"剩余：{torrent.freedate_diff or '未知'}），按阈值策略跳过")
             if free_remaining_minutes is not None and free_remaining_minutes < float(brush_config.free_remaining_time):
                 return False, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
                                f"低于设置的 {brush_config.free_remaining_time} 分钟")
@@ -3943,14 +3946,49 @@ class BrushFlowLowFreq(_PluginBase):
         if parsed_minutes is not None:
             return parsed_minutes
 
-        # 最后按绝对时间戳计算
+        # 最后按绝对时间戳计算（保守策略：同一字符串按本地/UTC两种可能解析，取更小值）
         if not freedate:
             return None
-        timestamp = StringUtils.str_to_timestamp(freedate)
-        if not timestamp:
+
+        text = str(freedate).strip()
+        if not text:
             return None
-        remaining_minutes = (timestamp - time.time()) / 60
-        return max(0, remaining_minutes)
+
+        timestamps = []
+
+        # 纯数字，兼容秒/毫秒时间戳
+        if re.match(r"^\d{10,13}$", text):
+            ts_value = float(text)
+            if len(text) == 13:
+                ts_value /= 1000
+            timestamps.append(ts_value)
+
+        # 先尝试系统时间解析
+        ts_from_stringutils = StringUtils.str_to_timestamp(text)
+        if ts_from_stringutils:
+            timestamps.append(float(ts_from_stringutils))
+
+        # 常见“无时区”时间格式，同时按本地时间与UTC时间解释，取更严格（更小）的剩余时间
+        normalized_text = text.replace("T", " ").replace("Z", "").split(".")[0].strip()
+        if re.match(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$", normalized_text):
+            try:
+                naive_dt = datetime.strptime(normalized_text, "%Y-%m-%d %H:%M:%S")
+                timestamps.append(naive_dt.timestamp())
+                timestamps.append(naive_dt.replace(tzinfo=pytz.UTC).timestamp())
+            except Exception:
+                pass
+
+        if not timestamps:
+            return None
+
+        now_ts = time.time()
+        remaining_candidates = [(ts - now_ts) / 60 for ts in timestamps]
+        positive_remaining = [minute for minute in remaining_candidates if minute >= 0]
+        if positive_remaining:
+            return min(positive_remaining)
+
+        # 全部为过去时间，统一按0处理
+        return 0
 
     @staticmethod
     def __adjust_site_pubminutes(pub_minutes: float, torrent: TorrentInfo) -> float:
