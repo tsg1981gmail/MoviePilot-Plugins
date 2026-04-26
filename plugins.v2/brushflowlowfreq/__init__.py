@@ -248,7 +248,7 @@ class BrushFlowLowFreq(_PluginBase):
     # region 全局定义
 
     # 插件名称
-    plugin_name = "站点刷流（低频版）"
+    plugin_name = "刷流自用版"
     # 插件描述
     plugin_desc = "自动托管刷流，将会提高对应站点的访问频率。（基于官方插件BrushFlow二次开发）"
     # 插件图标
@@ -457,7 +457,7 @@ class BrushFlowLowFreq(_PluginBase):
                 cron_trigger = CronTrigger.from_crontab(cron)
                 services.append({
                     "id": "BrushFlowLowFreq",
-                    "name": "站点刷流（低频版）服务",
+                    "name": "刷流自用版服务",
                     "trigger": cron_trigger,
                     "func": self.brush
                 })
@@ -465,7 +465,7 @@ class BrushFlowLowFreq(_PluginBase):
                 logger.info(f"站点刷流定时服务启动，时间间隔 {self._brush_interval} 分钟")
                 services.append({
                     "id": "BrushFlowLowFreq",
-                    "name": "站点刷流（低频版）服务",
+                    "name": "刷流自用版服务",
                     "trigger": "interval",
                     "func": self.brush,
                     "kwargs": {"minutes": self._brush_interval}
@@ -475,7 +475,7 @@ class BrushFlowLowFreq(_PluginBase):
             logger.info(f"站点刷流检查定时服务启动，时间间隔 {self._check_interval} 分钟")
             services.append({
                 "id": "BrushFlowLowFreqCheck",
-                "name": "站点刷流（低频版）检查服务",
+                "name": "刷流自用版检查服务",
                 "trigger": "interval",
                 "func": self.check,
                 "kwargs": {"minutes": self._check_interval}
@@ -3589,7 +3589,7 @@ class BrushFlowLowFreq(_PluginBase):
         记录错误日志并发送系统通知
         """
         logger.error(message)
-        self.systemmessage.put(message, title="站点刷流（低频版）")
+        self.systemmessage.put(message, title="刷流自用版")
 
     def __send_delete_message(self, site_name: str, torrent_title: str, torrent_desc: str, reason: str,
                               title: str = "【刷流任务种子删除】"):
