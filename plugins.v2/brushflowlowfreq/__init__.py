@@ -264,7 +264,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.10"
+    plugin_version = "4.3.11"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2423,27 +2423,26 @@ class BrushFlowLowFreq(_PluginBase):
                    and not task.get("seed_time") for task in torrent_tasks.values()):
                 return False, "其他站点存在尚未下载完成的相同种子"
 
+        # 发布时间（优先判断，超出后直接排除）
+        pubdate_minutes = self.__get_pubminutes(torrent.pubdate)
+        # 已支持独立站点配置，取消单独适配站点时区逻辑，可通过配置项「pubtime」自行适配
+        # pubdate_minutes = self.__adjust_site_pubminutes(pubdate_minutes, torrent)
+        if brush_config.pubtime:
+            pubtimes = [float(n) for n in brush_config.pubtime.split("-")]
+            if len(pubtimes) == 1:
+                # 单个值：选择发布时间小于等于该值的种子
+                if pubdate_minutes > pubtimes[0]:
+                    return False, f"发布时间 {torrent.pubdate}，{pubdate_minutes:.0f} 分钟前，不符合条件"
+            else:
+                # 范围值：选择发布时间在范围内的种子
+                if not (pubtimes[0] <= pubdate_minutes <= pubtimes[1]):
+                    return False, f"发布时间 {torrent.pubdate}，{pubdate_minutes:.0f} 分钟前，不在指定范围内"
+
         # 促销条件
         if brush_config.freeleech and not self.__is_free_torrent(torrent):
             return False, "非免费种子"
         if brush_config.freeleech == "2xfree" and not self.__is_2x_torrent(torrent):
             return False, "非双倍上传种子"
-        if brush_config.free_remaining_time and self.__is_free_torrent(torrent):
-            free_remaining_threshold = float(brush_config.free_remaining_time)
-            free_remaining_minutes = self.__get_free_remaining_minutes(
-                freedate=torrent.freedate,
-                freedate_diff=torrent.freedate_diff,
-                title=torrent.title,
-                description=torrent.description
-            )
-            if free_remaining_minutes is None:
-                return False, (f"无法识别免费剩余时间（截止：{torrent.freedate or '未知'}，"
-                               f"剩余：{torrent.freedate_diff or '未知'}），按阈值策略跳过")
-            logger.info(f"免费剩余时间校验：剩余 {free_remaining_minutes:.0f} 分钟，"
-                        f"阈值 {free_remaining_threshold:.0f} 分钟，种子：{torrent.title}")
-            if free_remaining_minutes < free_remaining_threshold:
-                return False, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
-                               f"低于设置的 {free_remaining_threshold:.0f} 分钟")
 
         # H&R
         if brush_config.hr == "yes" and torrent.hit_and_run:
@@ -2483,20 +2482,23 @@ class BrushFlowLowFreq(_PluginBase):
                 if not (seeders_range[0] <= torrent.seeders <= seeders_range[1]):
                     return False, f"做种人数 {torrent.seeders}，不在指定范围内"
 
-        # 发布时间
-        pubdate_minutes = self.__get_pubminutes(torrent.pubdate)
-        # 已支持独立站点配置，取消单独适配站点时区逻辑，可通过配置项「pubtime」自行适配
-        # pubdate_minutes = self.__adjust_site_pubminutes(pubdate_minutes, torrent)
-        if brush_config.pubtime:
-            pubtimes = [float(n) for n in brush_config.pubtime.split("-")]
-            if len(pubtimes) == 1:
-                # 单个值：选择发布时间小于等于该值的种子
-                if pubdate_minutes > pubtimes[0]:
-                    return False, f"发布时间 {torrent.pubdate}，{pubdate_minutes:.0f} 分钟前，不符合条件"
-            else:
-                # 范围值：选择发布时间在范围内的种子
-                if not (pubtimes[0] <= pubdate_minutes <= pubtimes[1]):
-                    return False, f"发布时间 {torrent.pubdate}，{pubdate_minutes:.0f} 分钟前，不在指定范围内"
+        # 免费剩余时间（最后判断）
+        if brush_config.free_remaining_time and self.__is_free_torrent(torrent):
+            free_remaining_threshold = float(brush_config.free_remaining_time)
+            free_remaining_minutes = self.__get_free_remaining_minutes(
+                freedate=torrent.freedate,
+                freedate_diff=torrent.freedate_diff,
+                title=torrent.title,
+                description=torrent.description
+            )
+            if free_remaining_minutes is None:
+                return False, (f"无法识别免费剩余时间（截止：{torrent.freedate or '未知'}，"
+                               f"剩余：{torrent.freedate_diff or '未知'}），按阈值策略跳过")
+            logger.info(f"免费剩余时间校验：剩余 {free_remaining_minutes:.0f} 分钟，"
+                        f"阈值 {free_remaining_threshold:.0f} 分钟，种子：{torrent.title}")
+            if free_remaining_minutes < free_remaining_threshold:
+                return False, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
+                               f"低于设置的 {free_remaining_threshold:.0f} 分钟")
 
         return True, None
 
