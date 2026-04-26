@@ -76,6 +76,7 @@ class BrushConfig:
         self.except_subscribe = config.get("except_subscribe", True)
         self.brush_sequential = config.get("brush_sequential", False)
         self.proxy_delete = config.get("proxy_delete", False)
+        self.delete_when_no_free = config.get("delete_when_no_free", False)
         self.active_time_range = config.get("active_time_range")
         self.cron = config.get("cron")
         self.qb_category = config.get("qb_category")
@@ -124,6 +125,7 @@ class BrushConfig:
             "seed_inactivetime",
             "save_path",
             "proxy_delete",
+            "delete_when_no_free",
             "qb_category",
             "site_hr_active",
             "site_skip_tips"
@@ -193,6 +195,7 @@ class BrushConfig:
     "seed_inactivetime": "",
     "save_path": "/downloads/site1",
     "proxy_delete": false,
+    "delete_when_no_free": false,
     "qb_category": "刷流",
     "site_hr_active": true,
     "site_skip_tips": true
@@ -261,7 +264,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.8"
+    plugin_version = "4.3.9"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1661,6 +1664,22 @@ class BrushFlowLowFreq(_PluginBase):
                                                     {
                                                         'component': 'VSwitch',
                                                         'props': {
+                                                            'model': 'delete_when_no_free',
+                                                            'label': '失去免费即删种',
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
                                                             'model': 'clear_task',
                                                             'label': '清除统计数据',
                                                         }
@@ -1915,6 +1934,7 @@ class BrushFlowLowFreq(_PluginBase):
             "except_subscribe": True,
             "brush_sequential": False,
             "proxy_delete": False,
+            "delete_when_no_free": False,
             "freeleech": "free",
             "hr": "yes",
             "enable_site_config": False,
@@ -2723,6 +2743,15 @@ class BrushFlowLowFreq(_PluginBase):
         评估删除条件并返回是否应删除种子及其原因
         """
         brush_config = self.__get_brush_config(sitename=site_name)
+
+        # 规则：检测到种子已失去免费后，直接彻底删除
+        if brush_config.delete_when_no_free and self.__is_free_torrent(torrent_task):
+            is_still_free, free_reason = self.__check_torrent_current_free_status(torrent_task=torrent_task)
+            if is_still_free is False:
+                return True, "检测到种子已不免费，按配置执行彻底删除"
+            if is_still_free is None:
+                logger.debug(f"站点：{site_name}，失去免费删种检测跳过，原因：{free_reason}")
+
         seeding_time = torrent_info.get("seeding_time")
         ratio = torrent_info.get("ratio")
         task_elapsed_minutes = self.__get_task_elapsed_minutes(torrent_task.get("time"))
@@ -2792,6 +2821,87 @@ class BrushFlowLowFreq(_PluginBase):
             return False, reason
 
         return True, reason
+
+    def __check_torrent_current_free_status(self, torrent_task: dict) -> Tuple[Optional[bool], str]:
+        """
+        检查种子当前是否仍为免费状态
+        """
+        site_id = torrent_task.get("site")
+        page_url = torrent_task.get("page_url")
+        if not site_id or not page_url:
+            return None, "缺少站点ID或种子详情地址"
+
+        site_info = self.site_oper.get(site_id)
+        if not site_info:
+            return None, f"未找到站点配置（ID: {site_id}）"
+
+        base_url = getattr(site_info, "url", None)
+        if not base_url:
+            return None, "站点地址为空"
+
+        detail_url = str(page_url).strip()
+        if not detail_url.startswith("http"):
+            detail_url = f"{str(base_url).rstrip('/')}/{detail_url.lstrip('/')}"
+
+        try:
+            response = RequestUtils(
+                ua=getattr(site_info, "ua", None),
+                cookies=getattr(site_info, "cookie", None),
+                proxies=settings.PROXY if bool(getattr(site_info, "proxy", False)) else None
+            ).get_res(url=detail_url)
+        except Exception as e:
+            return None, f"请求详情页异常：{str(e)}"
+
+        if not response or not getattr(response, "ok", False):
+            return None, "请求详情页失败"
+
+        page_text = response.text if getattr(response, "text", None) else ""
+        page_free_status = self.__parse_free_status_from_page(page_text)
+        if page_free_status is None:
+            return None, "页面内容无法判断免费状态"
+        return page_free_status, "仍为免费种子" if page_free_status else "已失去免费"
+
+    @staticmethod
+    def __parse_free_status_from_page(page_text: str) -> Optional[bool]:
+        """
+        从种子详情页中解析免费状态
+        """
+        if not page_text:
+            return None
+
+        text = html.unescape(page_text)
+        text_lower = text.lower()
+
+        # 遇到登录页、验证页等非详情页场景时跳过判断，避免误删
+        challenge_keywords = [
+            "login.php", "name=\"username\"", "name='username'",
+            "cloudflare", "cf-browser-verification", "turnstile", "captcha", "验证"
+        ]
+        if any(keyword in text_lower for keyword in challenge_keywords):
+            return None
+
+        # 基础详情页特征，不满足则不做免费状态判断
+        detail_patterns = [
+            r"download\.php\?id=",
+            r"<h1[^>]*id=[\"']top[\"']",
+            r"rowhead[^>]*>\s*下载"
+        ]
+        if not any(re.search(pattern, text, re.IGNORECASE) for pattern in detail_patterns):
+            return None
+
+        free_patterns = [
+            r"class\s*=\s*[\"']pro_free[\"']",
+            r"class\s*=\s*[\"']free[\"']",
+            r"优惠剩余时间",
+            r"免费剩余时间",
+            r">\s*免费\s*<",
+            r"2x\s*免费",
+            r"2xfree"
+        ]
+        if any(re.search(pattern, text, re.IGNORECASE) for pattern in free_patterns):
+            return True
+
+        return False
 
     def __delete_torrent_for_evaluate_conditions(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                                  proxy_delete: bool = False) -> List:
@@ -3235,6 +3345,7 @@ class BrushFlowLowFreq(_PluginBase):
             "except_subscribe": brush_config.except_subscribe,
             "brush_sequential": brush_config.brush_sequential,
             "proxy_delete": brush_config.proxy_delete,
+            "delete_when_no_free": brush_config.delete_when_no_free,
             "active_time_range": brush_config.active_time_range,
             "cron": brush_config.cron,
             "qb_category": brush_config.qb_category,
@@ -3985,13 +4096,21 @@ class BrushFlowLowFreq(_PluginBase):
             return None
 
     @staticmethod
-    def __is_free_torrent(torrent: TorrentInfo) -> bool:
+    def __is_free_torrent(torrent: Any) -> bool:
         """
         兼容不同站点返回格式，判断是否免费种
         """
-        factor = getattr(torrent, "downloadvolumefactor", None)
+        if isinstance(torrent, dict):
+            factor = torrent.get("downloadvolumefactor", None)
+            freedate = torrent.get("freedate", None)
+            freedate_diff = torrent.get("freedate_diff", None)
+        else:
+            factor = getattr(torrent, "downloadvolumefactor", None)
+            freedate = getattr(torrent, "freedate", None)
+            freedate_diff = getattr(torrent, "freedate_diff", None)
+
         if factor is None:
-            return bool(getattr(torrent, "freedate", None) or getattr(torrent, "freedate_diff", None))
+            return bool(freedate or freedate_diff)
 
         try:
             return float(factor) == 0
@@ -4000,11 +4119,12 @@ class BrushFlowLowFreq(_PluginBase):
             return value in {"0", "0.0", "0.00", "free", "免费"}
 
     @staticmethod
-    def __is_2x_torrent(torrent: TorrentInfo) -> bool:
+    def __is_2x_torrent(torrent: Any) -> bool:
         """
         兼容不同站点返回格式，判断是否双倍上传
         """
-        factor = getattr(torrent, "uploadvolumefactor", None)
+        factor = torrent.get("uploadvolumefactor", None) if isinstance(torrent, dict) \
+            else getattr(torrent, "uploadvolumefactor", None)
         try:
             return float(factor) == 2
         except (TypeError, ValueError):
