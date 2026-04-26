@@ -257,7 +257,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.3"
+    plugin_version = "4.3.4"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2387,8 +2387,11 @@ class BrushFlowLowFreq(_PluginBase):
             return False, "非免费种子"
         if brush_config.freeleech == "2xfree" and torrent.uploadvolumefactor != 2:
             return False, "非双倍上传种子"
-        if brush_config.free_remaining_time and torrent.downloadvolumefactor == 0 and torrent.freedate:
-            free_remaining_minutes = self.__get_free_remaining_minutes(torrent.freedate)
+        if brush_config.free_remaining_time and torrent.downloadvolumefactor == 0:
+            free_remaining_minutes = self.__get_free_remaining_minutes(
+                freedate=torrent.freedate,
+                freedate_diff=torrent.freedate_diff
+            )
             if free_remaining_minutes is not None and free_remaining_minutes < float(brush_config.free_remaining_time):
                 return False, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
                                f"低于设置的 {brush_config.free_remaining_time} 分钟")
@@ -3806,10 +3809,68 @@ class BrushFlowLowFreq(_PluginBase):
             return 0
 
     @staticmethod
-    def __get_free_remaining_minutes(freedate: str) -> Optional[float]:
+    def __parse_duration_minutes(time_text: str) -> Optional[float]:
+        """
+        解析常见的剩余时间文本，返回分钟数
+        """
+        if not time_text:
+            return None
+        text = str(time_text).strip().lower()
+        if not text:
+            return None
+
+        # 永久免费场景默认放行
+        if any(keyword in text for keyword in ["永久", "forever", "long-term", "unlimited", "无限"]):
+            return None
+
+        total_minutes = 0.0
+        matched = False
+        patterns = [
+            (r"(\d+(?:\.\d+)?)\s*(?:天|日|day|days)", 1440),
+            (r"(\d+(?:\.\d+)?)\s*(?:小时|小時|hour|hours|hr|hrs|h)", 60),
+            (r"(\d+(?:\.\d+)?)\s*(?:分钟|分鐘|分|min|mins|minute|minutes|m)", 1),
+            (r"(\d+(?:\.\d+)?)\s*(?:秒|second|seconds|sec|secs|s)", 1 / 60),
+        ]
+
+        for pattern, factor in patterns:
+            values = re.findall(pattern, text, re.IGNORECASE)
+            if not values:
+                continue
+            matched = True
+            total_minutes += sum(float(value) for value in values) * factor
+
+        if matched:
+            return max(0, total_minutes)
+
+        # 兼容 01:20:30 / 12:40 等格式
+        if re.match(r"^\d{1,3}:\d{1,2}(:\d{1,2})?$", text):
+            parts = [int(part) for part in text.split(":")]
+            if len(parts) == 2:
+                return max(0, parts[0] * 60 + parts[1])
+            return max(0, parts[0] * 60 + parts[1] + parts[2] / 60)
+
+        # 纯数字默认按分钟处理
+        if re.match(r"^\d+(?:\.\d+)?$", text):
+            return max(0, float(text))
+
+        return None
+
+    @classmethod
+    def __get_free_remaining_minutes(cls, freedate: str, freedate_diff: Optional[str] = None) -> Optional[float]:
         """
         获取免费剩余分钟数
         """
+        # 优先使用已格式化的剩余时间字段
+        parsed_minutes = cls.__parse_duration_minutes(freedate_diff or "")
+        if parsed_minutes is not None:
+            return parsed_minutes
+
+        # 其次尝试直接解析 freedate 文本
+        parsed_minutes = cls.__parse_duration_minutes(freedate or "")
+        if parsed_minutes is not None:
+            return parsed_minutes
+
+        # 最后按绝对时间戳计算
         if not freedate:
             return None
         timestamp = StringUtils.str_to_timestamp(freedate)
