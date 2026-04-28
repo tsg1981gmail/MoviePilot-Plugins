@@ -65,6 +65,10 @@ class BrushConfig:
         self.seed_size = self.__parse_number(config.get("seed_size"))
         self.download_time = self.__parse_number(config.get("download_time"))
         self.seed_avgspeed = self.__parse_number(config.get("seed_avgspeed"))
+        self.interval_upspeed = self.__parse_number(config.get("interval_upspeed"))
+        self.interval_upspeed_check_count = self.__parse_number(config.get("interval_upspeed_check_count"))
+        self.interval_upspeed_low_count = self.__parse_number(config.get("interval_upspeed_low_count"))
+        self.interval_upspeed_start_minutes = self.__parse_number(config.get("interval_upspeed_start_minutes"))
         self.seed_inactivetime = self.__parse_number(config.get("seed_inactivetime"))
         self.delete_size_range = config.get("delete_size_range")
         self.up_speed = self.__parse_number(config.get("up_speed"))
@@ -122,6 +126,10 @@ class BrushConfig:
             "seed_size",
             "download_time",
             "seed_avgspeed",
+            "interval_upspeed",
+            "interval_upspeed_check_count",
+            "interval_upspeed_low_count",
+            "interval_upspeed_start_minutes",
             "seed_inactivetime",
             "save_path",
             "proxy_delete",
@@ -192,6 +200,10 @@ class BrushConfig:
     "seed_size": "",
     "download_time": "",
     "seed_avgspeed": "",
+    "interval_upspeed": "",
+    "interval_upspeed_check_count": 3,
+    "interval_upspeed_low_count": 2,
+    "interval_upspeed_start_minutes": 30,
     "seed_inactivetime": "",
     "save_path": "/downloads/site1",
     "proxy_delete": false,
@@ -264,7 +276,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.12"
+    plugin_version = "4.3.13"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1470,12 +1482,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
-                                            }
-                                        ]
-                                    },
-                                    {
-                                        'component': 'VRow',
-                                        'content': [
+                                            },
                                             {
                                                 'component': 'VCol',
                                                 'props': {
@@ -1571,6 +1578,74 @@ class BrushFlowLowFreq(_PluginBase):
                                                 'props': {
                                                     "cols": 12,
                                                     "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'interval_upspeed',
+                                                            'label': '检查间上传速度阈值（KB/s）',
+                                                            'placeholder': '低于时计入低速命中'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_check_count',
+                                                            'label': '检查间低速观察次数',
+                                                            'placeholder': '如：3，统计最近3次检查'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_low_count',
+                                                            'label': '检查间低速命中次数',
+                                                            'placeholder': '如：2，达到后删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_start_minutes',
+                                                            'label': '添加后多少分钟开始低速统计',
+                                                            'placeholder': '如：30，达到后开始记录'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 8
                                                 },
                                                 'content': [
                                                     {
@@ -1935,6 +2010,10 @@ class BrushFlowLowFreq(_PluginBase):
             "brush_sequential": False,
             "proxy_delete": False,
             "delete_when_no_free": False,
+            "interval_upspeed": "",
+            "interval_upspeed_check_count": 3,
+            "interval_upspeed_low_count": 2,
+            "interval_upspeed_start_minutes": 30,
             "freeleech": "free",
             "hr": "yes",
             "enable_site_config": False,
@@ -2658,13 +2737,45 @@ class BrushFlowLowFreq(_PluginBase):
                 continue
 
             torrent_info = self.__get_torrent_info(torrent)
+            check_time = int(time.time())
+            uploaded = torrent_info.get("uploaded") or 0
+            last_check_uploaded = torrent_task.get("last_check_uploaded")
+            last_check_time = torrent_task.get("last_check_time")
+
+            interval_speed = None
+            interval_seconds = None
+            interval_uploaded = None
+            interval_valid = False
+            interval_reason = "首次检查，暂不计算检查间上传速度"
+
+            if isinstance(last_check_uploaded, (int, float)) and isinstance(last_check_time, (int, float)):
+                try:
+                    interval_seconds = check_time - int(float(last_check_time))
+                    interval_uploaded = float(uploaded) - float(last_check_uploaded)
+                    if interval_seconds <= 0:
+                        interval_reason = "检查间隔异常，已跳过本次低速统计"
+                    elif interval_uploaded < 0:
+                        interval_reason = "上传量出现回退，已跳过本次低速统计"
+                    else:
+                        interval_speed = float(interval_uploaded) / interval_seconds
+                        interval_valid = True
+                        interval_reason = ""
+                except (TypeError, ValueError):
+                    interval_reason = "检查间基线异常，已跳过本次低速统计"
 
             # 更新上传量、下载量
             torrent_task.update({
                 "downloaded": torrent_info.get("downloaded"),
-                "uploaded": torrent_info.get("uploaded"),
+                "uploaded": uploaded,
                 "ratio": torrent_info.get("ratio"),
                 "seeding_time": torrent_info.get("seeding_time"),
+                "last_check_time": check_time,
+                "last_check_uploaded": uploaded,
+                "last_check_interval_upspeed": interval_speed,
+                "last_check_interval_seconds": interval_seconds,
+                "last_check_interval_uploaded": interval_uploaded,
+                "last_check_interval_upspeed_valid": interval_valid,
+                "last_check_interval_reason": interval_reason
             })
 
     def __update_seeding_tasks_based_on_tags(self, torrent_tasks: Dict[str, dict], unmanaged_tasks: Dict[str, dict],
@@ -2779,6 +2890,12 @@ class BrushFlowLowFreq(_PluginBase):
         ratio = torrent_info.get("ratio")
         task_elapsed_minutes = self.__get_task_elapsed_minutes(torrent_task.get("time"))
         ratio_check_minutes = brush_config.seed_ratio_check_minutes if brush_config.seed_ratio_check_minutes else 30
+        interval_should_delete, interval_reason = self.__evaluate_interval_upspeed_condition_for_delete(
+            site_name=site_name,
+            brush_config=brush_config,
+            torrent_task=torrent_task,
+            task_elapsed_minutes=task_elapsed_minutes
+        )
 
         reason = "未能满足设置的删除条件"
 
@@ -2821,13 +2938,93 @@ class BrushFlowLowFreq(_PluginBase):
         elif brush_config.seed_avgspeed and torrent_info.get("avg_upspeed") <= float(
                 brush_config.seed_avgspeed) * 1024 and torrent_info.get("seeding_time") >= 30 * 60:
             reason = f"平均上传速度 {torrent_info.get('avg_upspeed') / 1024:.1f} KB/s，低于 {brush_config.seed_avgspeed} KB/s"
+        elif interval_should_delete:
+            reason = interval_reason
         elif brush_config.seed_inactivetime and torrent_info.get("iatime") >= float(
                 brush_config.seed_inactivetime) * 60:
             reason = f"未活动时间 {torrent_info.get('iatime') / 60:.0f} 分钟，大于 {brush_config.seed_inactivetime} 分钟"
         else:
-            return False, reason
+            return False, interval_reason if interval_reason else reason
 
         return True, reason if not hit_and_run else "H&R种子（未设置H&R条件），" + reason
+
+    def __evaluate_interval_upspeed_condition_for_delete(self, site_name: str, brush_config: BrushConfig,
+                                                         torrent_task: dict, task_elapsed_minutes: Optional[float]) \
+            -> Tuple[bool, str]:
+        """
+        评估检查间上传速度删除条件
+        """
+        if brush_config.interval_upspeed in (None, ""):
+            return False, ""
+
+        try:
+            threshold_kb = float(brush_config.interval_upspeed)
+        except (TypeError, ValueError):
+            return False, "检查间上传速度阈值配置无效，已跳过低速统计"
+
+        if threshold_kb < 0:
+            return False, "检查间上传速度阈值不能小于0，已跳过低速统计"
+
+        def _to_positive_int(value: Any, default_value: int) -> int:
+            try:
+                if value in (None, ""):
+                    return default_value
+                return max(1, int(float(value)))
+            except (TypeError, ValueError):
+                return default_value
+
+        check_count = _to_positive_int(brush_config.interval_upspeed_check_count, 3)
+        low_count = _to_positive_int(brush_config.interval_upspeed_low_count, 2)
+        low_count = min(low_count, check_count)
+
+        try:
+            start_minutes = float(brush_config.interval_upspeed_start_minutes) \
+                if brush_config.interval_upspeed_start_minutes not in (None, "") else 30.0
+        except (TypeError, ValueError):
+            start_minutes = 30.0
+        start_minutes = max(0.0, start_minutes)
+
+        if task_elapsed_minutes is None:
+            return False, "检查间上传速度：任务添加时间无效，已跳过低速统计"
+
+        if task_elapsed_minutes < start_minutes:
+            return False, (f"检查间上传速度：任务添加 {task_elapsed_minutes:.0f} 分钟，"
+                           f"未到统计起始 {start_minutes:.0f} 分钟")
+
+        interval_valid = bool(torrent_task.get("last_check_interval_upspeed_valid"))
+        if not interval_valid:
+            reason = torrent_task.get("last_check_interval_reason") or "采样尚未就绪"
+            return False, f"检查间上传速度：{reason}"
+
+        interval_speed = torrent_task.get("last_check_interval_upspeed")
+        if not isinstance(interval_speed, (int, float)):
+            return False, "检查间上传速度：采样异常，已跳过低速统计"
+
+        threshold_bytes = threshold_kb * 1024
+        is_low_speed = interval_speed <= threshold_bytes
+
+        records = torrent_task.get("interval_upspeed_hit_records")
+        if not isinstance(records, list):
+            records = []
+        records = [1 if bool(record) else 0 for record in records if isinstance(record, (int, float, bool))]
+        records.append(1 if is_low_speed else 0)
+        max_keep = max(check_count, low_count, 20)
+        if len(records) > max_keep:
+            records = records[-max_keep:]
+        torrent_task["interval_upspeed_hit_records"] = records
+
+        recent_records = records[-check_count:]
+        hit_count = int(sum(recent_records))
+        if len(recent_records) < check_count:
+            return False, (f"检查间上传速度：低速命中 {hit_count}/{len(recent_records)} 次，"
+                           f"等待收集满 {check_count} 次检查后再判定")
+
+        if hit_count >= low_count:
+            return True, (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s，低于阈值 {threshold_kb:.1f} KB/s；"
+                          f"最近 {check_count} 次命中 {hit_count} 次（阈值 {low_count} 次）")
+
+        return False, (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s；最近 {check_count} 次命中 {hit_count} 次，"
+                       f"未达到删除阈值 {low_count} 次")
 
     def __evaluate_proxy_pre_conditions_for_delete(self, site_name: str, torrent_info: dict) -> Tuple[bool, str]:
         """
@@ -3210,6 +3407,14 @@ class BrushFlowLowFreq(_PluginBase):
             "ratio": torrent_info.get("ratio", 0),
             "downloaded": torrent_info.get("downloaded", 0),
             "uploaded": torrent_info.get("uploaded", 0),
+            "last_check_time": None,
+            "last_check_uploaded": None,
+            "last_check_interval_upspeed": None,
+            "last_check_interval_seconds": None,
+            "last_check_interval_uploaded": None,
+            "last_check_interval_upspeed_valid": False,
+            "last_check_interval_reason": "首次检查，暂不计算检查间上传速度",
+            "interval_upspeed_hit_records": [],
             "deleted": False,
             "time": torrent_info.get("add_on", time.time())
         }
@@ -3297,6 +3502,10 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_size": "上传量",
             "download_time": "下载超时时间",
             "seed_avgspeed": "平均上传速度",
+            "interval_upspeed": "检查间上传速度阈值",
+            "interval_upspeed_check_count": "检查间低速观察次数",
+            "interval_upspeed_low_count": "检查间低速命中次数",
+            "interval_upspeed_start_minutes": "添加后开始低速统计分钟数",
             "seed_inactivetime": "未活动时间",
             "up_speed": "单任务上传限速",
             "dl_speed": "单任务下载限速",
@@ -3371,6 +3580,10 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_size": brush_config.seed_size,
             "download_time": brush_config.download_time,
             "seed_avgspeed": brush_config.seed_avgspeed,
+            "interval_upspeed": brush_config.interval_upspeed,
+            "interval_upspeed_check_count": brush_config.interval_upspeed_check_count,
+            "interval_upspeed_low_count": brush_config.interval_upspeed_low_count,
+            "interval_upspeed_start_minutes": brush_config.interval_upspeed_start_minutes,
             "seed_inactivetime": brush_config.seed_inactivetime,
             "delete_size_range": brush_config.delete_size_range,
             "up_speed": brush_config.up_speed,

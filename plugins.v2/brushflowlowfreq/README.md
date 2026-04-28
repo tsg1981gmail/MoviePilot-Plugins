@@ -6,6 +6,11 @@
 
 ## 版本更新日志
 
+- v4.3.13
+  - 新增“检查间上传速度”删种规则：按两次检查之间的上传增量/时间间隔计算速度
+  - 支持低速观察次数与命中次数配置（如 3 次检查命中 2 次低速后删除）
+  - 支持“种子添加后多少分钟开始低速统计”配置，降低新任务误删风险
+
 - v4.3.12
   - 修复免费剩余时间“未知/未知”场景：当列表字段缺失时，自动回源详情页兜底解析
   - 无法解析时日志增加详情页失败原因，便于排查
@@ -109,6 +114,10 @@
 | 上传量（GB）           | `seed_size`          | 达到设定上传量后删除任务             |                                                                                                                   |
 | 下载超时时间（小时）   | `download_time`      | 达到指定下载超时时间后删除任务       |                                                                                                                   |
 | 平均上传速度（KB/s）   | `seed_avgspeed`      | 低于设定平均上传速度时删除任务       | 刷流任务做种 30 分钟后生效                                                                                        |
+| 检查间上传速度阈值（KB/s） | `interval_upspeed` | 低于阈值时计入低速命中               | 按“两次检查间上传增量 ÷ 检查间隔秒数”计算速度                                                                    |
+| 检查间低速观察次数     | `interval_upspeed_check_count` | 统计最近多少次检查记录               | 示例：3，表示统计最近 3 次检查                                                                                    |
+| 检查间低速命中次数     | `interval_upspeed_low_count` | 观察窗口内命中多少次后删除任务       | 示例：2，配合观察次数 3 可实现“3 次中命中 2 次删除”                                                                |
+| 添加后多少分钟开始低速统计 | `interval_upspeed_start_minutes` | 达到设定分钟数后才开始记录低速命中   | 示例：30，添加 30 分钟内仅采样不计入低速命中                                                                      |
 | 未活动时间（分钟）     | `seed_inactivetime`  | 超过设定未活动时间后删除任务         |                                                                                                                   |
 | 删除排除标签           | `delete_except_tags` | 删除任务时排除的种子任务标签         | 默认值为 MOVIEPILOT,H&R，用于联动 H&R 助手或 MoviePilot 任务                                                      |
 | 单任务上传限速（KB/s） | `up_speed`           | 设置每个种子的上传限速               |                                                                                                                   |
@@ -164,6 +173,10 @@
 - `seed_size`：上传量
 - `download_time`：下载超时时间
 - `seed_avgspeed`：平均上传速度
+- `interval_upspeed`：检查间上传速度阈值
+- `interval_upspeed_check_count`：检查间低速观察次数
+- `interval_upspeed_low_count`：检查间低速命中次数
+- `interval_upspeed_start_minutes`：添加后开始低速统计分钟数
 - `seed_inactivetime`：未活动时间
 - `save_path`：保存目录
 - `proxy_delete`：动态删除种子（实验性功能）
@@ -210,6 +223,10 @@
     "seed_size": "",
     "download_time": "",
     "seed_avgspeed": "",
+    "interval_upspeed": "",
+    "interval_upspeed_check_count": 3,
+    "interval_upspeed_low_count": 2,
+    "interval_upspeed_start_minutes": 30,
     "seed_inactivetime": "",
     "save_path": "/downloads/site1",
     "proxy_delete": false,
