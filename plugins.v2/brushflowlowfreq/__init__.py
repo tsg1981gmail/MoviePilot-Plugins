@@ -69,6 +69,8 @@ class BrushConfig:
         self.interval_upspeed_check_count = self.__parse_number(config.get("interval_upspeed_check_count"))
         self.interval_upspeed_low_count = self.__parse_number(config.get("interval_upspeed_low_count"))
         self.interval_upspeed_start_minutes = self.__parse_number(config.get("interval_upspeed_start_minutes"))
+        self.interval_upspeed_continuous = config.get("interval_upspeed_continuous", False)
+        self.interval_upspeed_rehearsal = config.get("interval_upspeed_rehearsal", False)
         self.seed_inactivetime = self.__parse_number(config.get("seed_inactivetime"))
         self.delete_size_range = config.get("delete_size_range")
         self.up_speed = self.__parse_number(config.get("up_speed"))
@@ -130,6 +132,8 @@ class BrushConfig:
             "interval_upspeed_check_count",
             "interval_upspeed_low_count",
             "interval_upspeed_start_minutes",
+            "interval_upspeed_continuous",
+            "interval_upspeed_rehearsal",
             "seed_inactivetime",
             "save_path",
             "proxy_delete",
@@ -204,6 +208,8 @@ class BrushConfig:
     "interval_upspeed_check_count": 3,
     "interval_upspeed_low_count": 2,
     "interval_upspeed_start_minutes": 30,
+    "interval_upspeed_continuous": false,
+    "interval_upspeed_rehearsal": false,
     "seed_inactivetime": "",
     "save_path": "/downloads/site1",
     "proxy_delete": false,
@@ -276,7 +282,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.13"
+    plugin_version = "4.3.14"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1645,7 +1651,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                 'component': 'VCol',
                                                 'props': {
                                                     "cols": 12,
-                                                    "md": 8
+                                                    "md": 4
                                                 },
                                                 'content': [
                                                     {
@@ -1654,6 +1660,38 @@ class BrushFlowLowFreq(_PluginBase):
                                                             'model': 'delete_except_tags',
                                                             'label': '删除排除标签',
                                                             'placeholder': '如：MOVIEPILOT,H&R'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_continuous',
+                                                            'label': '检查间低速按连续命中判定',
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_rehearsal',
+                                                            'label': '检查间低速演练模式（只提醒不删）',
                                                         }
                                                     }
                                                 ]
@@ -2014,6 +2052,8 @@ class BrushFlowLowFreq(_PluginBase):
             "interval_upspeed_check_count": 3,
             "interval_upspeed_low_count": 2,
             "interval_upspeed_start_minutes": 30,
+            "interval_upspeed_continuous": False,
+            "interval_upspeed_rehearsal": False,
             "freeleech": "free",
             "hr": "yes",
             "enable_site_config": False,
@@ -2976,6 +3016,8 @@ class BrushFlowLowFreq(_PluginBase):
         check_count = _to_positive_int(brush_config.interval_upspeed_check_count, 3)
         low_count = _to_positive_int(brush_config.interval_upspeed_low_count, 2)
         low_count = min(low_count, check_count)
+        require_continuous = bool(brush_config.interval_upspeed_continuous)
+        rehearsal_mode = bool(brush_config.interval_upspeed_rehearsal)
 
         try:
             start_minutes = float(brush_config.interval_upspeed_start_minutes) \
@@ -3015,13 +3057,39 @@ class BrushFlowLowFreq(_PluginBase):
 
         recent_records = records[-check_count:]
         hit_count = int(sum(recent_records))
+        consecutive_hit_count = 0
+        for record in reversed(recent_records):
+            if record == 1:
+                consecutive_hit_count += 1
+            else:
+                break
+
+        if require_continuous:
+            required_samples = min(low_count, check_count)
+            if len(recent_records) < required_samples:
+                return False, (f"检查间上传速度：连续低速命中 {consecutive_hit_count}/{required_samples} 次，"
+                               f"等待收集足够检查样本后再判定")
+
+            if consecutive_hit_count >= low_count:
+                reason = (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s，低于阈值 {threshold_kb:.1f} KB/s；"
+                          f"最近连续命中 {consecutive_hit_count} 次（阈值 {low_count} 次）")
+                if rehearsal_mode:
+                    return False, f"演练模式命中删除条件，{reason}"
+                return True, reason
+
+            return False, (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s；"
+                           f"最近连续命中 {consecutive_hit_count} 次，未达到删除阈值 {low_count} 次")
+
         if len(recent_records) < check_count:
             return False, (f"检查间上传速度：低速命中 {hit_count}/{len(recent_records)} 次，"
                            f"等待收集满 {check_count} 次检查后再判定")
 
         if hit_count >= low_count:
-            return True, (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s，低于阈值 {threshold_kb:.1f} KB/s；"
-                          f"最近 {check_count} 次命中 {hit_count} 次（阈值 {low_count} 次）")
+            reason = (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s，低于阈值 {threshold_kb:.1f} KB/s；"
+                      f"最近 {check_count} 次命中 {hit_count} 次（阈值 {low_count} 次）")
+            if rehearsal_mode:
+                return False, f"演练模式命中删除条件，{reason}"
+            return True, reason
 
         return False, (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s；最近 {check_count} 次命中 {hit_count} 次，"
                        f"未达到删除阈值 {low_count} 次")
@@ -3167,7 +3235,13 @@ class BrushFlowLowFreq(_PluginBase):
                                            reason=reason)
                 logger.info(f"站点：{site_name}，{reason}，删除种子：{torrent_title}|{torrent_desc}")
             else:
-                logger.debug(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
+                if reason and reason.startswith("演练模式命中删除条件"):
+                    self.__send_delete_message(site_name=site_name, torrent_title=torrent_title,
+                                               torrent_desc=torrent_desc, reason=reason,
+                                               title="【刷流任务删种演练】")
+                    logger.info(f"站点：{site_name}，{reason}，演练模式不删除种子：{torrent_title}|{torrent_desc}")
+                else:
+                    logger.debug(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
 
         return delete_hashes
 
@@ -3584,6 +3658,8 @@ class BrushFlowLowFreq(_PluginBase):
             "interval_upspeed_check_count": brush_config.interval_upspeed_check_count,
             "interval_upspeed_low_count": brush_config.interval_upspeed_low_count,
             "interval_upspeed_start_minutes": brush_config.interval_upspeed_start_minutes,
+            "interval_upspeed_continuous": brush_config.interval_upspeed_continuous,
+            "interval_upspeed_rehearsal": brush_config.interval_upspeed_rehearsal,
             "seed_inactivetime": brush_config.seed_inactivetime,
             "delete_size_range": brush_config.delete_size_range,
             "up_speed": brush_config.up_speed,

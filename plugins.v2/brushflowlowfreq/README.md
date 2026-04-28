@@ -6,6 +6,10 @@
 
 ## 版本更新日志
 
+- v4.3.14
+  - 新增“检查间低速按连续命中判定”开关，可切换为连续命中删除
+  - 新增“检查间低速演练模式（只提醒不删）”开关，用于先观察命中效果
+
 - v4.3.13
   - 新增“检查间上传速度”删种规则：按两次检查之间的上传增量/时间间隔计算速度
   - 支持低速观察次数与命中次数配置（如 3 次检查命中 2 次低速后删除）
@@ -118,6 +122,8 @@
 | 检查间低速观察次数     | `interval_upspeed_check_count` | 统计最近多少次检查记录               | 示例：3，表示统计最近 3 次检查                                                                                    |
 | 检查间低速命中次数     | `interval_upspeed_low_count` | 观察窗口内命中多少次后删除任务       | 示例：2，配合观察次数 3 可实现“3 次中命中 2 次删除”                                                                |
 | 添加后多少分钟开始低速统计 | `interval_upspeed_start_minutes` | 达到设定分钟数后才开始记录低速命中   | 示例：30，添加 30 分钟内仅采样不计入低速命中                                                                      |
+| 检查间低速按连续命中判定 | `interval_upspeed_continuous` | 是否按连续命中次数判定删除           | 开启后以最近连续低速命中次数判定；关闭则按观察窗口累计命中次数判定                                                 |
+| 检查间低速演练模式（只提醒不删） | `interval_upspeed_rehearsal` | 是否只提醒命中删除条件但不执行删除   | 建议先开启演练观察 24 小时，再关闭演练执行真实删除                                                                  |
 | 未活动时间（分钟）     | `seed_inactivetime`  | 超过设定未活动时间后删除任务         |                                                                                                                   |
 | 删除排除标签           | `delete_except_tags` | 删除任务时排除的种子任务标签         | 默认值为 MOVIEPILOT,H&R，用于联动 H&R 助手或 MoviePilot 任务                                                      |
 | 单任务上传限速（KB/s） | `up_speed`           | 设置每个种子的上传限速               |                                                                                                                   |
@@ -177,6 +183,8 @@
 - `interval_upspeed_check_count`：检查间低速观察次数
 - `interval_upspeed_low_count`：检查间低速命中次数
 - `interval_upspeed_start_minutes`：添加后开始低速统计分钟数
+- `interval_upspeed_continuous`：检查间低速按连续命中判定
+- `interval_upspeed_rehearsal`：检查间低速演练模式（只提醒不删）
 - `seed_inactivetime`：未活动时间
 - `save_path`：保存目录
 - `proxy_delete`：动态删除种子（实验性功能）
@@ -227,6 +235,8 @@
     "interval_upspeed_check_count": 3,
     "interval_upspeed_low_count": 2,
     "interval_upspeed_start_minutes": 30,
+    "interval_upspeed_continuous": false,
+    "interval_upspeed_rehearsal": false,
     "seed_inactivetime": "",
     "save_path": "/downloads/site1",
     "proxy_delete": false,
