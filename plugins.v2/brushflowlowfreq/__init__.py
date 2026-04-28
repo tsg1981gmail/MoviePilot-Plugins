@@ -1,4 +1,5 @@
 import base64
+import html
 import json
 import random
 import re
@@ -59,9 +60,15 @@ class BrushConfig:
         self.seed_time = self.__parse_number(config.get("seed_time"))
         self.hr_seed_time = self.__parse_number(config.get("hr_seed_time"))
         self.seed_ratio = self.__parse_number(config.get("seed_ratio"))
+        self.seed_ratio_check_minutes = self.__parse_number(config.get("seed_ratio_check_minutes"))
+        self.seed_ratio_min_30m = self.__parse_number(config.get("seed_ratio_min_30m"))
         self.seed_size = self.__parse_number(config.get("seed_size"))
         self.download_time = self.__parse_number(config.get("download_time"))
         self.seed_avgspeed = self.__parse_number(config.get("seed_avgspeed"))
+        self.interval_upspeed = self.__parse_number(config.get("interval_upspeed"))
+        self.interval_upspeed_check_count = self.__parse_number(config.get("interval_upspeed_check_count"))
+        self.interval_upspeed_low_count = self.__parse_number(config.get("interval_upspeed_low_count"))
+        self.interval_upspeed_start_minutes = self.__parse_number(config.get("interval_upspeed_start_minutes"))
         self.seed_inactivetime = self.__parse_number(config.get("seed_inactivetime"))
         self.delete_size_range = config.get("delete_size_range")
         self.up_speed = self.__parse_number(config.get("up_speed"))
@@ -73,6 +80,7 @@ class BrushConfig:
         self.except_subscribe = config.get("except_subscribe", True)
         self.brush_sequential = config.get("brush_sequential", False)
         self.proxy_delete = config.get("proxy_delete", False)
+        self.delete_when_no_free = config.get("delete_when_no_free", False)
         self.active_time_range = config.get("active_time_range")
         self.cron = config.get("cron")
         self.qb_category = config.get("qb_category")
@@ -113,12 +121,19 @@ class BrushConfig:
             "seed_time",
             "hr_seed_time",
             "seed_ratio",
+            "seed_ratio_check_minutes",
+            "seed_ratio_min_30m",
             "seed_size",
             "download_time",
             "seed_avgspeed",
+            "interval_upspeed",
+            "interval_upspeed_check_count",
+            "interval_upspeed_low_count",
+            "interval_upspeed_start_minutes",
             "seed_inactivetime",
             "save_path",
             "proxy_delete",
+            "delete_when_no_free",
             "qb_category",
             "site_hr_active",
             "site_skip_tips"
@@ -180,12 +195,19 @@ class BrushConfig:
     "seed_time": 120,
     "hr_seed_time": 144,
     "seed_ratio": "",
+    "seed_ratio_check_minutes": 30,
+    "seed_ratio_min_30m": "",
     "seed_size": "",
     "download_time": "",
     "seed_avgspeed": "",
+    "interval_upspeed": "",
+    "interval_upspeed_check_count": 3,
+    "interval_upspeed_low_count": 2,
+    "interval_upspeed_start_minutes": 30,
     "seed_inactivetime": "",
     "save_path": "/downloads/site1",
     "proxy_delete": false,
+    "delete_when_no_free": false,
     "qb_category": "刷流",
     "site_hr_active": true,
     "site_skip_tips": true
@@ -254,7 +276,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.2"
+    plugin_version = "4.3.13"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1094,29 +1116,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
-                                            }
-                                        ]
-                                    },
-                                    {
-                                        'component': 'VRow',
-                                        'content': [
-                                            {
-                                                'component': 'VCol',
-                                                'props': {
-                                                    "cols": 12,
-                                                    "md": 4
-                                                },
-                                                'content': [
-                                                    {
-                                                        'component': 'VTextField',
-                                                        'props': {
-                                                            'model': 'free_remaining_time',
-                                                            'label': '免费剩余时间（分钟）',
-                                                            'placeholder': '如：120，留空则不限制'
-                                                        }
-                                                    }
-                                                ]
-                                            }
+                                            },
                                         ]
                                     },
                                     {
@@ -1172,7 +1172,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
-                                            }
+                                            },
                                         ]
                                     },
                                     {
@@ -1306,7 +1306,24 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
-                                            }
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'free_remaining_time',
+                                                            'label': '免费剩余时间（分钟）',
+                                                            'placeholder': '如：120，留空则不限制'
+                                                        }
+                                                    }
+                                                ]
+                                            },
                                         ]
                                     },
                                     {
@@ -1448,6 +1465,40 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_check_minutes',
+                                                            'label': '任务添加后分钟数',
+                                                            'placeholder': '如：30，达到后开始判断低分享率'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_min_30m',
+                                                            'label': '任务添加后最低分享率',
+                                                            'placeholder': '达到上述分钟数后，低于时删除任务'
+                                                        }
+                                                    }
+                                                ]
                                             }
                                         ]
                                     },
@@ -1532,6 +1583,74 @@ class BrushFlowLowFreq(_PluginBase):
                                                     {
                                                         'component': 'VTextField',
                                                         'props': {
+                                                            'model': 'interval_upspeed',
+                                                            'label': '检查间上传速度阈值（KB/s）',
+                                                            'placeholder': '低于时计入低速命中'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_check_count',
+                                                            'label': '检查间低速观察次数',
+                                                            'placeholder': '如：3，统计最近3次检查'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_low_count',
+                                                            'label': '检查间低速命中次数',
+                                                            'placeholder': '如：2，达到后删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_start_minutes',
+                                                            'label': '添加后多少分钟开始低速统计',
+                                                            'placeholder': '如：30，达到后开始记录'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 8
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
                                                             'model': 'delete_except_tags',
                                                             'label': '删除排除标签',
                                                             'placeholder': '如：MOVIEPILOT,H&R'
@@ -1610,6 +1729,22 @@ class BrushFlowLowFreq(_PluginBase):
                                     {
                                         'component': 'VRow',
                                         'content': [
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'delete_when_no_free',
+                                                            'label': '失去免费即删种',
+                                                        }
+                                                    }
+                                                ]
+                                            },
                                             {
                                                 'component': 'VCol',
                                                 'props': {
@@ -1874,6 +2009,11 @@ class BrushFlowLowFreq(_PluginBase):
             "except_subscribe": True,
             "brush_sequential": False,
             "proxy_delete": False,
+            "delete_when_no_free": False,
+            "interval_upspeed": "",
+            "interval_upspeed_check_count": 3,
+            "interval_upspeed_low_count": 2,
+            "interval_upspeed_start_minutes": 30,
             "freeleech": "free",
             "hr": "yes",
             "enable_site_config": False,
@@ -2362,16 +2502,26 @@ class BrushFlowLowFreq(_PluginBase):
                    and not task.get("seed_time") for task in torrent_tasks.values()):
                 return False, "其他站点存在尚未下载完成的相同种子"
 
+        # 发布时间（优先判断，超出后直接排除）
+        pubdate_minutes = self.__get_pubminutes(torrent.pubdate)
+        # 已支持独立站点配置，取消单独适配站点时区逻辑，可通过配置项「pubtime」自行适配
+        # pubdate_minutes = self.__adjust_site_pubminutes(pubdate_minutes, torrent)
+        if brush_config.pubtime:
+            pubtimes = [float(n) for n in brush_config.pubtime.split("-")]
+            if len(pubtimes) == 1:
+                # 单个值：选择发布时间小于等于该值的种子
+                if pubdate_minutes > pubtimes[0]:
+                    return False, f"发布时间 {torrent.pubdate}，{pubdate_minutes:.0f} 分钟前，不符合条件"
+            else:
+                # 范围值：选择发布时间在范围内的种子
+                if not (pubtimes[0] <= pubdate_minutes <= pubtimes[1]):
+                    return False, f"发布时间 {torrent.pubdate}，{pubdate_minutes:.0f} 分钟前，不在指定范围内"
+
         # 促销条件
-        if brush_config.freeleech and torrent.downloadvolumefactor != 0:
+        if brush_config.freeleech and not self.__is_free_torrent(torrent):
             return False, "非免费种子"
-        if brush_config.freeleech == "2xfree" and torrent.uploadvolumefactor != 2:
+        if brush_config.freeleech == "2xfree" and not self.__is_2x_torrent(torrent):
             return False, "非双倍上传种子"
-        if brush_config.free_remaining_time and torrent.downloadvolumefactor == 0 and torrent.freedate:
-            free_remaining_minutes = self.__get_free_remaining_minutes(torrent.freedate)
-            if free_remaining_minutes is not None and free_remaining_minutes < float(brush_config.free_remaining_time):
-                return False, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
-                               f"低于设置的 {brush_config.free_remaining_time} 分钟")
 
         # H&R
         if brush_config.hr == "yes" and torrent.hit_and_run:
@@ -2411,20 +2561,44 @@ class BrushFlowLowFreq(_PluginBase):
                 if not (seeders_range[0] <= torrent.seeders <= seeders_range[1]):
                     return False, f"做种人数 {torrent.seeders}，不在指定范围内"
 
-        # 发布时间
-        pubdate_minutes = self.__get_pubminutes(torrent.pubdate)
-        # 已支持独立站点配置，取消单独适配站点时区逻辑，可通过配置项「pubtime」自行适配
-        # pubdate_minutes = self.__adjust_site_pubminutes(pubdate_minutes, torrent)
-        if brush_config.pubtime:
-            pubtimes = [float(n) for n in brush_config.pubtime.split("-")]
-            if len(pubtimes) == 1:
-                # 单个值：选择发布时间小于等于该值的种子
-                if pubdate_minutes > pubtimes[0]:
-                    return False, f"发布时间 {torrent.pubdate}，{pubdate_minutes:.0f} 分钟前，不符合条件"
-            else:
-                # 范围值：选择发布时间在范围内的种子
-                if not (pubtimes[0] <= pubdate_minutes <= pubtimes[1]):
-                    return False, f"发布时间 {torrent.pubdate}，{pubdate_minutes:.0f} 分钟前，不在指定范围内"
+        # 免费剩余时间（最后判断）
+        if brush_config.free_remaining_time and self.__is_free_torrent(torrent):
+            free_remaining_threshold = float(brush_config.free_remaining_time)
+            free_remaining_minutes = self.__get_free_remaining_minutes(
+                freedate=torrent.freedate,
+                freedate_diff=torrent.freedate_diff,
+                title=torrent.title,
+                description=torrent.description
+            )
+
+            detail_parse_reason = ""
+            if free_remaining_minutes is None:
+                detail_page_text, detail_parse_reason = self.__get_torrent_detail_page_text(
+                    site_id=getattr(torrent, "site", None),
+                    page_url=torrent.page_url
+                )
+                if detail_page_text:
+                    free_remaining_minutes = self.__get_free_remaining_minutes(
+                        freedate=torrent.freedate,
+                        freedate_diff=torrent.freedate_diff,
+                        title=torrent.title,
+                        description=detail_page_text
+                    )
+                    if free_remaining_minutes is not None:
+                        logger.info(f"免费剩余时间校验：已通过详情页兜底解析，剩余 {free_remaining_minutes:.0f} 分钟，"
+                                    f"种子：{torrent.title}")
+
+            if free_remaining_minutes is None:
+                reason = (f"无法识别免费剩余时间（截止：{torrent.freedate or '未知'}，"
+                          f"剩余：{torrent.freedate_diff or '未知'}）")
+                if detail_parse_reason:
+                    reason = f"{reason}，详情页解析失败：{detail_parse_reason}"
+                return False, f"{reason}，按阈值策略跳过"
+            logger.info(f"免费剩余时间校验：剩余 {free_remaining_minutes:.0f} 分钟，"
+                        f"阈值 {free_remaining_threshold:.0f} 分钟，种子：{torrent.title}")
+            if free_remaining_minutes < free_remaining_threshold:
+                return False, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
+                               f"低于设置的 {free_remaining_threshold:.0f} 分钟")
 
         return True, None
 
@@ -2437,7 +2611,11 @@ class BrushFlowLowFreq(_PluginBase):
             if not torrent:
                 logger.warning(f"没有通过前置刷流条件校验，原因：{reason}")
             else:
-                logger.debug(f"种子没有通过刷流条件校验，原因：{reason} 种子：{torrent.title}|{torrent.description}")
+                # 与免费相关的过滤建议默认可见，便于排查“为何仍下载不到免费种”
+                if any(keyword in reason for keyword in ["免费剩余时间", "无法识别免费", "非免费种子"]):
+                    logger.info(f"种子没有通过刷流条件校验，原因：{reason} 种子：{torrent.title}|{torrent.description}")
+                else:
+                    logger.debug(f"种子没有通过刷流条件校验，原因：{reason} 种子：{torrent.title}|{torrent.description}")
 
     # endregion
 
@@ -2559,13 +2737,45 @@ class BrushFlowLowFreq(_PluginBase):
                 continue
 
             torrent_info = self.__get_torrent_info(torrent)
+            check_time = int(time.time())
+            uploaded = torrent_info.get("uploaded") or 0
+            last_check_uploaded = torrent_task.get("last_check_uploaded")
+            last_check_time = torrent_task.get("last_check_time")
+
+            interval_speed = None
+            interval_seconds = None
+            interval_uploaded = None
+            interval_valid = False
+            interval_reason = "首次检查，暂不计算检查间上传速度"
+
+            if isinstance(last_check_uploaded, (int, float)) and isinstance(last_check_time, (int, float)):
+                try:
+                    interval_seconds = check_time - int(float(last_check_time))
+                    interval_uploaded = float(uploaded) - float(last_check_uploaded)
+                    if interval_seconds <= 0:
+                        interval_reason = "检查间隔异常，已跳过本次低速统计"
+                    elif interval_uploaded < 0:
+                        interval_reason = "上传量出现回退，已跳过本次低速统计"
+                    else:
+                        interval_speed = float(interval_uploaded) / interval_seconds
+                        interval_valid = True
+                        interval_reason = ""
+                except (TypeError, ValueError):
+                    interval_reason = "检查间基线异常，已跳过本次低速统计"
 
             # 更新上传量、下载量
             torrent_task.update({
                 "downloaded": torrent_info.get("downloaded"),
-                "uploaded": torrent_info.get("uploaded"),
+                "uploaded": uploaded,
                 "ratio": torrent_info.get("ratio"),
                 "seeding_time": torrent_info.get("seeding_time"),
+                "last_check_time": check_time,
+                "last_check_uploaded": uploaded,
+                "last_check_interval_upspeed": interval_speed,
+                "last_check_interval_seconds": interval_seconds,
+                "last_check_interval_uploaded": interval_uploaded,
+                "last_check_interval_upspeed_valid": interval_valid,
+                "last_check_interval_reason": interval_reason
             })
 
     def __update_seeding_tasks_based_on_tags(self, torrent_tasks: Dict[str, dict], unmanaged_tasks: Dict[str, dict],
@@ -2668,27 +2878,58 @@ class BrushFlowLowFreq(_PluginBase):
         """
         brush_config = self.__get_brush_config(sitename=site_name)
 
+        # 规则：检测到种子已失去免费后，直接彻底删除
+        if brush_config.delete_when_no_free and self.__is_free_torrent(torrent_task):
+            is_still_free, free_reason = self.__check_torrent_current_free_status(torrent_task=torrent_task)
+            if is_still_free is False:
+                return True, "检测到种子已不免费，按配置执行彻底删除"
+            if is_still_free is None:
+                logger.debug(f"站点：{site_name}，失去免费删种检测跳过，原因：{free_reason}")
+
+        seeding_time = torrent_info.get("seeding_time")
+        ratio = torrent_info.get("ratio")
+        task_elapsed_minutes = self.__get_task_elapsed_minutes(torrent_task.get("time"))
+        ratio_check_minutes = brush_config.seed_ratio_check_minutes if brush_config.seed_ratio_check_minutes else 30
+        interval_should_delete, interval_reason = self.__evaluate_interval_upspeed_condition_for_delete(
+            site_name=site_name,
+            brush_config=brush_config,
+            torrent_task=torrent_task,
+            task_elapsed_minutes=task_elapsed_minutes
+        )
+
         reason = "未能满足设置的删除条件"
 
         # 当配置了H&R做种时间/分享率时，则H&R种子只有达到预期行为时，才会进行删除，如果没有配置H&R做种时间/分享率，则普通种子的删除规则也适用于H&R种子
         # 判断是否为H&R种子并且是否配置了特定的H&R条件
         hit_and_run = torrent_task.get("hit_and_run", False)
-        hr_specific_conditions_configured = hit_and_run and (brush_config.hr_seed_time or brush_config.seed_ratio)
+        hr_specific_conditions_configured = hit_and_run and (
+                brush_config.hr_seed_time or brush_config.seed_ratio or brush_config.seed_ratio_min_30m
+        )
         if hr_specific_conditions_configured:
-            if (brush_config.hr_seed_time and torrent_info.get("seeding_time")
+            if (brush_config.hr_seed_time and seeding_time
                     >= float(brush_config.hr_seed_time) * 3600):
-                return True, (f"H&R种子，做种时间 {torrent_info.get('seeding_time') / 3600:.1f} 小时，"
+                return True, (f"H&R种子，做种时间 {seeding_time / 3600:.1f} 小时，"
                               f"大于 {brush_config.hr_seed_time} 小时")
-            if brush_config.seed_ratio and torrent_info.get("ratio") >= float(brush_config.seed_ratio):
-                return True, f"H&R种子，分享率 {torrent_info.get('ratio'):.2f}，大于 {brush_config.seed_ratio}"
+            if brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
+                return True, f"H&R种子，分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
+            if (brush_config.seed_ratio_min_30m and task_elapsed_minutes is not None
+                    and task_elapsed_minutes >= float(ratio_check_minutes)
+                    and ratio is not None and ratio < float(brush_config.seed_ratio_min_30m)):
+                return True, (f"H&R种子，任务添加 {task_elapsed_minutes:.0f} 分钟后分享率 {ratio:.2f}，"
+                              f"低于 {brush_config.seed_ratio_min_30m}")
             return False, "H&R种子，未能满足设置的H&R删除条件"
 
         # 处理其他场景，1. 不是H&R种子；2. 是H&R种子但没有特定条件配置
         reason = reason if not hit_and_run else "H&R种子（未设置H&R条件），未能满足设置的删除条件"
-        if brush_config.seed_time and torrent_info.get("seeding_time") >= float(brush_config.seed_time) * 3600:
-            reason = f"做种时间 {torrent_info.get('seeding_time') / 3600:.1f} 小时，大于 {brush_config.seed_time} 小时"
-        elif brush_config.seed_ratio and torrent_info.get("ratio") >= float(brush_config.seed_ratio):
-            reason = f"分享率 {torrent_info.get('ratio'):.2f}，大于 {brush_config.seed_ratio}"
+        if brush_config.seed_time and seeding_time and seeding_time >= float(brush_config.seed_time) * 3600:
+            reason = f"做种时间 {seeding_time / 3600:.1f} 小时，大于 {brush_config.seed_time} 小时"
+        elif brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
+            reason = f"分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
+        elif (brush_config.seed_ratio_min_30m and task_elapsed_minutes is not None
+              and task_elapsed_minutes >= float(ratio_check_minutes)
+              and ratio is not None and ratio < float(brush_config.seed_ratio_min_30m)):
+            reason = (f"任务添加 {task_elapsed_minutes:.0f} 分钟后分享率 {ratio:.2f}，"
+                      f"低于 {brush_config.seed_ratio_min_30m}")
         elif brush_config.seed_size and torrent_info.get("uploaded") >= float(brush_config.seed_size) * 1024 ** 3:
             reason = f"上传量 {torrent_info.get('uploaded') / 1024 ** 3:.1f} GB，大于 {brush_config.seed_size} GB"
         elif brush_config.download_time and torrent_info.get("downloaded") < torrent_info.get(
@@ -2697,13 +2938,93 @@ class BrushFlowLowFreq(_PluginBase):
         elif brush_config.seed_avgspeed and torrent_info.get("avg_upspeed") <= float(
                 brush_config.seed_avgspeed) * 1024 and torrent_info.get("seeding_time") >= 30 * 60:
             reason = f"平均上传速度 {torrent_info.get('avg_upspeed') / 1024:.1f} KB/s，低于 {brush_config.seed_avgspeed} KB/s"
+        elif interval_should_delete:
+            reason = interval_reason
         elif brush_config.seed_inactivetime and torrent_info.get("iatime") >= float(
                 brush_config.seed_inactivetime) * 60:
             reason = f"未活动时间 {torrent_info.get('iatime') / 60:.0f} 分钟，大于 {brush_config.seed_inactivetime} 分钟"
         else:
-            return False, reason
+            return False, interval_reason if interval_reason else reason
 
         return True, reason if not hit_and_run else "H&R种子（未设置H&R条件），" + reason
+
+    def __evaluate_interval_upspeed_condition_for_delete(self, site_name: str, brush_config: BrushConfig,
+                                                         torrent_task: dict, task_elapsed_minutes: Optional[float]) \
+            -> Tuple[bool, str]:
+        """
+        评估检查间上传速度删除条件
+        """
+        if brush_config.interval_upspeed in (None, ""):
+            return False, ""
+
+        try:
+            threshold_kb = float(brush_config.interval_upspeed)
+        except (TypeError, ValueError):
+            return False, "检查间上传速度阈值配置无效，已跳过低速统计"
+
+        if threshold_kb < 0:
+            return False, "检查间上传速度阈值不能小于0，已跳过低速统计"
+
+        def _to_positive_int(value: Any, default_value: int) -> int:
+            try:
+                if value in (None, ""):
+                    return default_value
+                return max(1, int(float(value)))
+            except (TypeError, ValueError):
+                return default_value
+
+        check_count = _to_positive_int(brush_config.interval_upspeed_check_count, 3)
+        low_count = _to_positive_int(brush_config.interval_upspeed_low_count, 2)
+        low_count = min(low_count, check_count)
+
+        try:
+            start_minutes = float(brush_config.interval_upspeed_start_minutes) \
+                if brush_config.interval_upspeed_start_minutes not in (None, "") else 30.0
+        except (TypeError, ValueError):
+            start_minutes = 30.0
+        start_minutes = max(0.0, start_minutes)
+
+        if task_elapsed_minutes is None:
+            return False, "检查间上传速度：任务添加时间无效，已跳过低速统计"
+
+        if task_elapsed_minutes < start_minutes:
+            return False, (f"检查间上传速度：任务添加 {task_elapsed_minutes:.0f} 分钟，"
+                           f"未到统计起始 {start_minutes:.0f} 分钟")
+
+        interval_valid = bool(torrent_task.get("last_check_interval_upspeed_valid"))
+        if not interval_valid:
+            reason = torrent_task.get("last_check_interval_reason") or "采样尚未就绪"
+            return False, f"检查间上传速度：{reason}"
+
+        interval_speed = torrent_task.get("last_check_interval_upspeed")
+        if not isinstance(interval_speed, (int, float)):
+            return False, "检查间上传速度：采样异常，已跳过低速统计"
+
+        threshold_bytes = threshold_kb * 1024
+        is_low_speed = interval_speed <= threshold_bytes
+
+        records = torrent_task.get("interval_upspeed_hit_records")
+        if not isinstance(records, list):
+            records = []
+        records = [1 if bool(record) else 0 for record in records if isinstance(record, (int, float, bool))]
+        records.append(1 if is_low_speed else 0)
+        max_keep = max(check_count, low_count, 20)
+        if len(records) > max_keep:
+            records = records[-max_keep:]
+        torrent_task["interval_upspeed_hit_records"] = records
+
+        recent_records = records[-check_count:]
+        hit_count = int(sum(recent_records))
+        if len(recent_records) < check_count:
+            return False, (f"检查间上传速度：低速命中 {hit_count}/{len(recent_records)} 次，"
+                           f"等待收集满 {check_count} 次检查后再判定")
+
+        if hit_count >= low_count:
+            return True, (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s，低于阈值 {threshold_kb:.1f} KB/s；"
+                          f"最近 {check_count} 次命中 {hit_count} 次（阈值 {low_count} 次）")
+
+        return False, (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s；最近 {check_count} 次命中 {hit_count} 次，"
+                       f"未达到删除阈值 {low_count} 次")
 
     def __evaluate_proxy_pre_conditions_for_delete(self, site_name: str, torrent_info: dict) -> Tuple[bool, str]:
         """
@@ -2720,6 +3041,101 @@ class BrushFlowLowFreq(_PluginBase):
             return False, reason
 
         return True, reason
+
+    def __check_torrent_current_free_status(self, torrent_task: dict) -> Tuple[Optional[bool], str]:
+        """
+        检查种子当前是否仍为免费状态
+        """
+        page_text, error_reason = self.__get_torrent_detail_page_text(
+            site_id=torrent_task.get("site"),
+            page_url=torrent_task.get("page_url")
+        )
+        if not page_text:
+            return None, error_reason
+
+        page_free_status = self.__parse_free_status_from_page(page_text)
+        if page_free_status is None:
+            return None, "页面内容无法判断免费状态"
+        return page_free_status, "仍为免费种子" if page_free_status else "已失去免费"
+
+    def __get_torrent_detail_page_text(self, site_id: Any, page_url: str) -> Tuple[Optional[str], str]:
+        """
+        获取种子详情页HTML
+        """
+        if not site_id or not page_url:
+            return None, "缺少站点ID或种子详情地址"
+
+        site_info = self.site_oper.get(site_id)
+        if not site_info:
+            return None, f"未找到站点配置（ID: {site_id}）"
+
+        base_url = getattr(site_info, "url", None)
+        if not base_url:
+            return None, "站点地址为空"
+
+        detail_url = str(page_url).strip()
+        if not detail_url.startswith("http"):
+            detail_url = f"{str(base_url).rstrip('/')}/{detail_url.lstrip('/')}"
+
+        try:
+            response = RequestUtils(
+                ua=getattr(site_info, "ua", None),
+                cookies=getattr(site_info, "cookie", None),
+                proxies=settings.PROXY if bool(getattr(site_info, "proxy", False)) else None
+            ).get_res(url=detail_url)
+        except Exception as e:
+            return None, f"请求详情页异常：{str(e)}"
+
+        if not response or not getattr(response, "ok", False):
+            return None, "请求详情页失败"
+
+        page_text = response.text if getattr(response, "text", None) else ""
+        if not page_text:
+            return None, "详情页内容为空"
+
+        return page_text, ""
+
+    @staticmethod
+    def __parse_free_status_from_page(page_text: str) -> Optional[bool]:
+        """
+        从种子详情页中解析免费状态
+        """
+        if not page_text:
+            return None
+
+        text = html.unescape(page_text)
+        text_lower = text.lower()
+
+        # 遇到登录页、验证页等非详情页场景时跳过判断，避免误删
+        challenge_keywords = [
+            "login.php", "name=\"username\"", "name='username'",
+            "cloudflare", "cf-browser-verification", "turnstile", "captcha", "验证"
+        ]
+        if any(keyword in text_lower for keyword in challenge_keywords):
+            return None
+
+        # 基础详情页特征，不满足则不做免费状态判断
+        detail_patterns = [
+            r"download\.php\?id=",
+            r"<h1[^>]*id=[\"']top[\"']",
+            r"rowhead[^>]*>\s*下载"
+        ]
+        if not any(re.search(pattern, text, re.IGNORECASE) for pattern in detail_patterns):
+            return None
+
+        free_patterns = [
+            r"class\s*=\s*[\"']pro_free[\"']",
+            r"class\s*=\s*[\"']free[\"']",
+            r"优惠剩余时间",
+            r"免费剩余时间",
+            r">\s*免费\s*<",
+            r"2x\s*免费",
+            r"2xfree"
+        ]
+        if any(re.search(pattern, text, re.IGNORECASE) for pattern in free_patterns):
+            return True
+
+        return False
 
     def __delete_torrent_for_evaluate_conditions(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                                  proxy_delete: bool = False) -> List:
@@ -2991,6 +3407,14 @@ class BrushFlowLowFreq(_PluginBase):
             "ratio": torrent_info.get("ratio", 0),
             "downloaded": torrent_info.get("downloaded", 0),
             "uploaded": torrent_info.get("uploaded", 0),
+            "last_check_time": None,
+            "last_check_uploaded": None,
+            "last_check_interval_upspeed": None,
+            "last_check_interval_seconds": None,
+            "last_check_interval_uploaded": None,
+            "last_check_interval_upspeed_valid": False,
+            "last_check_interval_reason": "首次检查，暂不计算检查间上传速度",
+            "interval_upspeed_hit_records": [],
             "deleted": False,
             "time": torrent_info.get("add_on", time.time())
         }
@@ -3073,9 +3497,15 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_time": "做种时间",
             "hr_seed_time": "H&R做种时间",
             "seed_ratio": "分享率",
+            "seed_ratio_check_minutes": "任务添加后分钟数",
+            "seed_ratio_min_30m": "任务添加后最低分享率",
             "seed_size": "上传量",
             "download_time": "下载超时时间",
             "seed_avgspeed": "平均上传速度",
+            "interval_upspeed": "检查间上传速度阈值",
+            "interval_upspeed_check_count": "检查间低速观察次数",
+            "interval_upspeed_low_count": "检查间低速命中次数",
+            "interval_upspeed_start_minutes": "添加后开始低速统计分钟数",
             "seed_inactivetime": "未活动时间",
             "up_speed": "单任务上传限速",
             "dl_speed": "单任务下载限速",
@@ -3145,9 +3575,15 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_time": brush_config.seed_time,
             "hr_seed_time": brush_config.hr_seed_time,
             "seed_ratio": brush_config.seed_ratio,
+            "seed_ratio_check_minutes": brush_config.seed_ratio_check_minutes,
+            "seed_ratio_min_30m": brush_config.seed_ratio_min_30m,
             "seed_size": brush_config.seed_size,
             "download_time": brush_config.download_time,
             "seed_avgspeed": brush_config.seed_avgspeed,
+            "interval_upspeed": brush_config.interval_upspeed,
+            "interval_upspeed_check_count": brush_config.interval_upspeed_check_count,
+            "interval_upspeed_low_count": brush_config.interval_upspeed_low_count,
+            "interval_upspeed_start_minutes": brush_config.interval_upspeed_start_minutes,
             "seed_inactivetime": brush_config.seed_inactivetime,
             "delete_size_range": brush_config.delete_size_range,
             "up_speed": brush_config.up_speed,
@@ -3159,6 +3595,7 @@ class BrushFlowLowFreq(_PluginBase):
             "except_subscribe": brush_config.except_subscribe,
             "brush_sequential": brush_config.brush_sequential,
             "proxy_delete": brush_config.proxy_delete,
+            "delete_when_no_free": brush_config.delete_when_no_free,
             "active_time_range": brush_config.active_time_range,
             "cron": brush_config.cron,
             "qb_category": brush_config.qb_category,
@@ -3774,18 +4211,334 @@ class BrushFlowLowFreq(_PluginBase):
             logger.error(f"发布时间 {pubdate} 获取分钟失败，错误详情: {e}")
             return 0
 
+    @classmethod
+    def __parse_duration_minutes(cls, time_text: str) -> Optional[float]:
+        """
+        解析常见的剩余时间文本，返回分钟数
+        """
+        if not time_text:
+            return None
+        text = html.unescape(str(time_text)).strip().lower()
+        if not text:
+            return None
+
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        text = cls.__normalize_chinese_duration_text(text)
+
+        # 永久免费场景默认放行
+        if any(keyword in text for keyword in ["永久", "forever", "long-term", "unlimited", "无限"]):
+            return None
+
+        total_minutes = 0.0
+        matched = False
+        patterns = [
+            (r"(\d+(?:\.\d+)?)\s*(?:天|日|day|days)", 1440),
+            (r"(\d+(?:\.\d+)?)\s*(?:小时|小時|时|時|hour|hours|hr|hrs|h)", 60),
+            (r"(\d+(?:\.\d+)?)\s*(?:分钟|分鐘|分|min|mins|minute|minutes|m)", 1),
+            (r"(\d+(?:\.\d+)?)\s*(?:秒|second|seconds|sec|secs|s)", 1 / 60),
+        ]
+
+        for pattern, factor in patterns:
+            values = re.findall(pattern, text, re.IGNORECASE)
+            if not values:
+                continue
+            matched = True
+            total_minutes += sum(float(value) for value in values) * factor
+
+        if matched:
+            return max(0, total_minutes)
+
+        # 兼容 01:20:30 / 12:40 等格式
+        if re.match(r"^\d{1,3}:\d{1,2}(:\d{1,2})?$", text):
+            parts = [int(part) for part in text.split(":")]
+            if len(parts) == 2:
+                return max(0, parts[0] * 60 + parts[1])
+            return max(0, parts[0] * 60 + parts[1] + parts[2] / 60)
+
+        # 纯数字默认按分钟处理
+        if re.match(r"^\d+(?:\.\d+)?$", text):
+            return max(0, float(text))
+
+        return None
+
+    @classmethod
+    def __normalize_chinese_duration_text(cls, text: str) -> str:
+        """
+        将“free三天”“两小时”等中文数字时长表达标准化为可解析的数字表达
+        """
+        if not text:
+            return text
+
+        pattern = r"([零〇一二两三四五六七八九十百千半]+)(?=\s*(?:天|日|小时|小時|时|時|分钟|分鐘|分|秒))"
+
+        def repl(match):
+            converted = cls.__chinese_number_to_float(match.group(1))
+            if converted is None:
+                return match.group(1)
+            if converted.is_integer():
+                return str(int(converted))
+            return str(converted)
+
+        return re.sub(pattern, repl, text)
+
     @staticmethod
-    def __get_free_remaining_minutes(freedate: str) -> Optional[float]:
+    def __chinese_number_to_float(value: str) -> Optional[float]:
+        """
+        支持常见中文数字（含“半”）转换
+        """
+        if not value:
+            return None
+
+        raw = str(value).strip()
+        if not raw:
+            return None
+
+        if re.match(r"^\d+(?:\.\d+)?$", raw):
+            return float(raw)
+
+        digits = {
+            "零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+            "五": 5, "六": 6, "七": 7, "八": 8, "九": 9
+        }
+        units = {"十": 10, "百": 100, "千": 1000}
+
+        if raw == "半":
+            return 0.5
+
+        bonus = 0.0
+        if raw.endswith("半"):
+            bonus = 0.5
+            raw = raw[:-1]
+            if not raw:
+                return bonus
+
+        total = 0
+        current = 0
+        for char in raw:
+            if char in digits:
+                current = digits[char]
+            elif char in units:
+                unit = units[char]
+                if current == 0:
+                    current = 1
+                total += current * unit
+                current = 0
+            else:
+                return None
+        total += current
+
+        if total == 0 and raw:
+            return None
+        return float(total) + bonus
+
+    @staticmethod
+    def __get_task_elapsed_minutes(task_time: Any) -> Optional[float]:
+        """
+        获取任务从添加到当前的分钟数
+        """
+        if task_time is None:
+            return None
+        try:
+            elapsed_minutes = (time.time() - float(task_time)) / 60
+            return max(0, elapsed_minutes)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def __has_free_markers(*texts: Any) -> bool:
+        """
+        通过文本特征判断是否存在免费标记（用于兜底）
+        """
+        merged = " ".join([html.unescape(str(text)) for text in texts if text]).strip()
+        if not merged:
+            return False
+
+        patterns = [
+            r"优惠剩余时间",
+            r"免费剩余时间",
+            r"免费剩余",
+            r"2x\s*免费",
+            r"2xfree",
+            r"\bfree\s*(?:\d|[零〇一二两三四五六七八九十百千半])",
+            r"class\s*=\s*[\"']pro_free[\"']",
+            r">\s*免费\s*<"
+        ]
+        return any(re.search(pattern, merged, re.IGNORECASE) for pattern in patterns)
+
+    @classmethod
+    def __is_free_torrent(cls, torrent: Any) -> bool:
+        """
+        兼容不同站点返回格式，判断是否免费种
+        """
+        if isinstance(torrent, dict):
+            factor = torrent.get("downloadvolumefactor", None)
+            freedate = torrent.get("freedate", None)
+            freedate_diff = torrent.get("freedate_diff", None)
+            title = torrent.get("title", None)
+            description = torrent.get("description", None)
+        else:
+            factor = getattr(torrent, "downloadvolumefactor", None)
+            freedate = getattr(torrent, "freedate", None)
+            freedate_diff = getattr(torrent, "freedate_diff", None)
+            title = getattr(torrent, "title", None)
+            description = getattr(torrent, "description", None)
+
+        marker_free = cls.__has_free_markers(freedate, freedate_diff, title, description)
+
+        if factor is None:
+            return bool(freedate or freedate_diff or marker_free)
+
+        try:
+            if float(factor) == 0:
+                return True
+        except (TypeError, ValueError):
+            value = str(factor).strip().lower()
+            if value in {"0", "0.0", "0.00", "free", "免费"}:
+                return True
+
+        # 兜底：部分站点/版本存在下载因子解析不准，但标题/副标题已明确标注免费
+        return marker_free
+
+    @staticmethod
+    def __is_2x_torrent(torrent: Any) -> bool:
+        """
+        兼容不同站点返回格式，判断是否双倍上传
+        """
+        factor = torrent.get("uploadvolumefactor", None) if isinstance(torrent, dict) \
+            else getattr(torrent, "uploadvolumefactor", None)
+        try:
+            return float(factor) == 2
+        except (TypeError, ValueError):
+            value = str(factor).strip().lower()
+            return value in {"2", "2.0", "2.00", "2x", "double"}
+
+    @staticmethod
+    def __extract_free_time_snippets(text: Any) -> List[str]:
+        """
+        从标题/副标题等文本中提取与免费剩余时间相关的片段
+        """
+        if not text:
+            return []
+
+        raw_text = html.unescape(str(text))
+        plain_text = re.sub(r"<[^>]+>", " ", raw_text)
+        plain_text = re.sub(r"\s+", " ", plain_text).strip()
+
+        snippets = []
+        keyword_patterns = [
+            r"(?:优惠剩余时间|免费剩余时间|免费剩余|剩余时间)\s*[:：]?\s*[^]\[|；;，,。]{0,60}",
+            r"free\s*[零〇一二两三四五六七八九十百千半\d\.]+\s*(?:天|日|小时|小時|时|時|分钟|分鐘|分|hour|hours|hr|hrs|min|m)"
+        ]
+
+        for pattern in keyword_patterns:
+            for matched in re.findall(pattern, plain_text, re.IGNORECASE):
+                candidate = matched.strip()
+                if candidate:
+                    snippets.append(candidate)
+
+        if re.search(r"(?:天|日|小时|小時|时|時|分钟|分鐘|分|hour|hours|hr|hrs|min|m)", plain_text, re.IGNORECASE):
+            if len(plain_text) <= 32:
+                snippets.append(plain_text)
+
+        for matched in re.findall(r"title\s*=\s*[\"'](\d{4}[-/.]\d{2}[-/.]\d{2}[ T]\d{2}:\d{2}:\d{2})[\"']",
+                                  raw_text, re.IGNORECASE):
+            snippets.append(matched.strip())
+
+        return list(dict.fromkeys([snippet for snippet in snippets if snippet]))
+
+    @classmethod
+    def __parse_deadline_to_minutes(cls, deadline_text: Any) -> Optional[float]:
+        """
+        将截止时间文本解析为剩余分钟数
+        """
+        if not deadline_text:
+            return None
+
+        text = html.unescape(str(deadline_text)).strip()
+        if not text:
+            return None
+
+        timestamps = []
+
+        if re.match(r"^\d{10,13}$", text):
+            ts_value = float(text)
+            if len(text) == 13:
+                ts_value /= 1000
+            timestamps.append(ts_value)
+
+        ts_from_stringutils = StringUtils.str_to_timestamp(text)
+        if ts_from_stringutils:
+            timestamps.append(float(ts_from_stringutils))
+
+        normalized_text = text.replace("T", " ").replace("Z", "").split(".")[0].strip()
+        normalized_text = normalized_text.replace("/", "-").replace(".", "-")
+        if re.match(r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}$", normalized_text):
+            try:
+                naive_dt = datetime.strptime(normalized_text, "%Y-%m-%d %H:%M:%S")
+                timestamps.append(naive_dt.timestamp())
+                timestamps.append(naive_dt.replace(tzinfo=pytz.UTC).timestamp())
+            except Exception:
+                pass
+
+        if not timestamps:
+            return None
+
+        now_ts = time.time()
+        remaining_candidates = [(ts - now_ts) / 60 for ts in timestamps]
+        positive_remaining = [minute for minute in remaining_candidates if minute >= 0]
+        if positive_remaining:
+            return min(positive_remaining)
+        return 0
+
+    @classmethod
+    def __get_free_remaining_minutes(cls, freedate: Any = None, freedate_diff: Optional[str] = None,
+                                     title: Optional[str] = None, description: Optional[str] = None) \
+            -> Optional[float]:
         """
         获取免费剩余分钟数
         """
-        if not freedate:
+        # 优先使用显式剩余时长字段，避免截止时间时区差异导致误判
+        parsed_from_diff = cls.__parse_duration_minutes(freedate_diff or "")
+        if parsed_from_diff is not None:
+            return parsed_from_diff
+
+        candidate_texts = []
+
+        if freedate:
+            candidate_texts.append(str(freedate))
+
+        candidate_texts.extend(cls.__extract_free_time_snippets(description))
+        candidate_texts.extend(cls.__extract_free_time_snippets(title))
+
+        if not candidate_texts:
             return None
-        timestamp = StringUtils.str_to_timestamp(freedate)
-        if not timestamp:
-            return None
-        remaining_minutes = (timestamp - time.time()) / 60
-        return max(0, remaining_minutes)
+
+        duration_candidates = []
+        deadline_candidates = []
+        for candidate_text in candidate_texts:
+            parsed_duration = cls.__parse_duration_minutes(candidate_text)
+            if parsed_duration is not None:
+                duration_candidates.append(parsed_duration)
+
+            parsed_deadline = cls.__parse_deadline_to_minutes(candidate_text)
+            if parsed_deadline is not None:
+                deadline_candidates.append(parsed_deadline)
+
+        if duration_candidates:
+            positive_durations = [minute for minute in duration_candidates if minute >= 0]
+            if positive_durations:
+                # 多个时长候选时，优先取更宽松值，避免因噪声文本误杀
+                return max(positive_durations)
+            return 0
+
+        if deadline_candidates:
+            positive_deadlines = [minute for minute in deadline_candidates if minute >= 0]
+            if positive_deadlines:
+                return min(positive_deadlines)
+            return 0
+
+        return None
 
     @staticmethod
     def __adjust_site_pubminutes(pub_minutes: float, torrent: TorrentInfo) -> float:
