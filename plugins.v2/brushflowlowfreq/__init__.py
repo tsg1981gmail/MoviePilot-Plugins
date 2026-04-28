@@ -282,7 +282,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.14"
+    plugin_version = "4.3.15"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2732,29 +2732,67 @@ class BrushFlowLowFreq(_PluginBase):
                 logger.info("没有需要检查的任务，跳过")
             else:
                 need_delete_hashes = []
+                delete_message_map = {}
+                delete_summary_messages = []
 
                 # 如果配置了动态删除以及删种阈值，则根据动态删种进行分组处理
                 if brush_config.proxy_delete and brush_config.delete_size_range:
                     logger.info("已开启动态删种，按系统默认动态删种条件开始检查任务")
                     proxy_delete_hashes = self.__delete_torrent_for_proxy(torrents=check_torrents,
-                                                                          torrent_tasks=torrent_tasks) or []
+                                                                          torrent_tasks=torrent_tasks,
+                                                                          delete_message_map=delete_message_map,
+                                                                          delete_summary_messages=delete_summary_messages) or []
                     need_delete_hashes.extend(proxy_delete_hashes)
                 # 否则均认为是没有开启动态删种
                 else:
                     logger.info("没有开启动态删种，按用户设置删种条件开始检查任务")
                     not_proxy_delete_hashes = self.__delete_torrent_for_evaluate_conditions(torrents=check_torrents,
-                                                                                            torrent_tasks=torrent_tasks) or []
+                                                                                            torrent_tasks=torrent_tasks,
+                                                                                            delete_message_map=delete_message_map) or []
                     need_delete_hashes.extend(not_proxy_delete_hashes)
 
                 if need_delete_hashes:
+                    need_delete_hashes = list(dict.fromkeys([hash_value for hash_value in need_delete_hashes if hash_value]))
                     # 如果是QB，则重新汇报Tracker
                     if self.downloader_helper.is_downloader("qbittorrent", service=self.service_info):
                         self.__qb_torrents_reannounce(torrent_hashes=need_delete_hashes)
                     # 删除种子
+                    deleted_hashes = []
+                    failed_hashes = []
                     if downloader.delete_torrents(ids=need_delete_hashes, delete_file=True):
-                        for torrent_hash in need_delete_hashes:
-                            torrent_tasks[torrent_hash]["deleted"] = True
-                            torrent_tasks[torrent_hash]["deleted_time"] = time.time()
+                        deleted_hashes = list(need_delete_hashes)
+                        latest_torrents, latest_error = downloader.get_torrents()
+                        if latest_torrents is not None:
+                            latest_hash_set = set(self.__get_all_hashes(latest_torrents))
+                            failed_hashes = [torrent_hash for torrent_hash in need_delete_hashes
+                                             if torrent_hash in latest_hash_set]
+                            deleted_hashes = [torrent_hash for torrent_hash in need_delete_hashes
+                                              if torrent_hash not in latest_hash_set]
+                            if failed_hashes:
+                                logger.error(
+                                    f"删种后校验发现仍有 {len(failed_hashes)} 个种子残留（应删除含文件），"
+                                    f"hash={','.join(failed_hashes[:10])}")
+                        elif latest_error:
+                            logger.warning(f"删种后校验失败：{latest_error}，将按删除接口返回结果处理")
+                    else:
+                        failed_hashes = list(need_delete_hashes)
+                        logger.error(
+                            f"下载器返回删种失败，删除目标（含文件）共 {len(failed_hashes)} 个，"
+                            f"hash={','.join(failed_hashes[:10])}")
+
+                    if deleted_hashes:
+                        for torrent_hash in deleted_hashes:
+                            if torrent_hash in torrent_tasks:
+                                torrent_tasks[torrent_hash]["deleted"] = True
+                                torrent_tasks[torrent_hash]["deleted_time"] = time.time()
+                        self.__send_delete_messages_after_success(delete_hashes=deleted_hashes,
+                                                                  delete_message_map=delete_message_map,
+                                                                  torrent_tasks=torrent_tasks)
+                        self.__send_delete_summary_messages_after_success(delete_hashes=deleted_hashes,
+                                                                          delete_summary_messages=delete_summary_messages)
+
+                    if failed_hashes:
+                        self.__send_delete_failed_message(failed_hashes=failed_hashes, torrent_tasks=torrent_tasks)
 
             # 归档数据
             self.__auto_archive_tasks(torrent_tasks=torrent_tasks)
@@ -3206,7 +3244,8 @@ class BrushFlowLowFreq(_PluginBase):
         return False
 
     def __delete_torrent_for_evaluate_conditions(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
-                                                 proxy_delete: bool = False) -> List:
+                                                 proxy_delete: bool = False,
+                                                 delete_message_map: Optional[Dict[str, List[dict]]] = None) -> List:
         """
         根据条件删除种子并获取已删除列表
         """
@@ -3231,9 +3270,10 @@ class BrushFlowLowFreq(_PluginBase):
             if should_delete:
                 delete_hashes.append(torrent_hash)
                 reason = "触发动态删除阈值，" + reason if proxy_delete else reason
-                self.__send_delete_message(site_name=site_name, torrent_title=torrent_title, torrent_desc=torrent_desc,
-                                           reason=reason)
-                logger.info(f"站点：{site_name}，{reason}，删除种子：{torrent_title}|{torrent_desc}")
+                self.__append_delete_message(delete_message_map=delete_message_map, torrent_hash=torrent_hash,
+                                             site_name=site_name, torrent_title=torrent_title,
+                                             torrent_desc=torrent_desc, reason=reason)
+                logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
             else:
                 if reason and reason.startswith("演练模式命中删除条件"):
                     self.__send_delete_message(site_name=site_name, torrent_title=torrent_title,
@@ -3246,7 +3286,8 @@ class BrushFlowLowFreq(_PluginBase):
         return delete_hashes
 
     def __delete_torrent_for_evaluate_proxy_pre_conditions(self, torrents: List[Any],
-                                                           torrent_tasks: Dict[str, dict]) -> List:
+                                                           torrent_tasks: Dict[str, dict],
+                                                           delete_message_map: Optional[Dict[str, List[dict]]] = None) -> List:
         """
         根据动态删除前置条件排除H&R种子后删除种子并获取已删除列表
         """
@@ -3274,15 +3315,18 @@ class BrushFlowLowFreq(_PluginBase):
                                                                                     torrent_info=torrent_info)
             if should_delete:
                 delete_hashes.append(torrent_hash)
-                self.__send_delete_message(site_name=site_name, torrent_title=torrent_title, torrent_desc=torrent_desc,
-                                           reason=reason)
-                logger.info(f"站点：{site_name}，{reason}，删除种子：{torrent_title}|{torrent_desc}")
+                self.__append_delete_message(delete_message_map=delete_message_map, torrent_hash=torrent_hash,
+                                             site_name=site_name, torrent_title=torrent_title,
+                                             torrent_desc=torrent_desc, reason=reason)
+                logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
             else:
                 logger.debug(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
 
         return delete_hashes
 
-    def __delete_torrent_for_proxy(self, torrents: List[Any], torrent_tasks: Dict[str, dict]) -> List:
+    def __delete_torrent_for_proxy(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
+                                   delete_message_map: Optional[Dict[str, List[dict]]] = None,
+                                   delete_summary_messages: Optional[List[dict]] = None) -> List:
         """
         动态删除种子，删除规则如下；
         - 不管做种体积是否超过设定的动态删除阈值，默认优先执行排除H&R种子后满足「下载超时时间」的种子
@@ -3309,7 +3353,8 @@ class BrushFlowLowFreq(_PluginBase):
 
         # 执行排除H&R种子后满足前置删除条件的种子
         pre_delete_hashes = self.__delete_torrent_for_evaluate_proxy_pre_conditions(torrents=torrents,
-                                                                                    torrent_tasks=torrent_tasks) or []
+                                                                                    torrent_tasks=torrent_tasks,
+                                                                                    delete_message_map=delete_message_map) or []
 
         # 如果存在前置删除种子，这里进行额外判断，总做种体积排除前置删除种子的体积
         if pre_delete_hashes:
@@ -3351,7 +3396,8 @@ class BrushFlowLowFreq(_PluginBase):
         logger.info(f"托管种子数 {len(proxy_delete_torrents)}，未托管种子数 {len(not_proxy_delete_torrents)}")
         if not_proxy_delete_torrents:
             not_proxy_delete_hashes = self.__delete_torrent_for_evaluate_conditions(torrents=not_proxy_delete_torrents,
-                                                                                    torrent_tasks=torrent_tasks) or []
+                                                                                    torrent_tasks=torrent_tasks,
+                                                                                    delete_message_map=delete_message_map) or []
             need_delete_hashes.extend(not_proxy_delete_hashes)
             total_torrent_size -= sum(
                 torrent_info_map[self.__get_hash(torrent)].get("total_size", 0) for torrent in not_proxy_delete_torrents
@@ -3361,7 +3407,8 @@ class BrushFlowLowFreq(_PluginBase):
         if total_torrent_size > min_size and proxy_delete_torrents:
             proxy_delete_hashes = self.__delete_torrent_for_evaluate_conditions(torrents=proxy_delete_torrents,
                                                                                 torrent_tasks=torrent_tasks,
-                                                                                proxy_delete=True) or []
+                                                                                proxy_delete=True,
+                                                                                delete_message_map=delete_message_map) or []
             need_delete_hashes.extend(proxy_delete_hashes)
             total_torrent_size -= sum(
                 torrent_info_map[self.__get_hash(torrent)].get("total_size", 0) for torrent in proxy_delete_torrents if
@@ -3402,25 +3449,125 @@ class BrushFlowLowFreq(_PluginBase):
                 if seeding_time:
                     reason = (f"触发动态删除阈值，系统自动删除，做种时间 {seeding_time / 3600:.1f} 小时，"
                               f"当前做种体积 {self.__bytes_to_gb(total_torrent_size):.1f} GB")
-                    # 如果是区间删除，一次性删除的数据过多，取消消息推送
-                    if not proxy_size_range:
-                        self.__send_delete_message(site_name=site_name, torrent_title=torrent_title,
-                                                   torrent_desc=torrent_desc,
-                                                   reason=reason)
-                    logger.info(f"站点：{site_name}，{reason}，删除种子：{torrent_title}|{torrent_desc}")
+                    self.__append_delete_message(delete_message_map=delete_message_map, torrent_hash=torrent_hash,
+                                                 site_name=site_name, torrent_title=torrent_title,
+                                                 torrent_desc=torrent_desc, reason=reason)
+                    logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
+
+        need_delete_hashes = list(dict.fromkeys([hash_value for hash_value in need_delete_hashes if hash_value]))
 
         delete_sites = {torrent_tasks[hash_key].get('site_name', '') for hash_key in need_delete_hashes if
                         hash_key in torrent_tasks}
-        msg = (f"站点：{'，'.join(delete_sites)}\n内容：已完成 {len(need_delete_hashes)} 个种子删除，"
-               f"当前做种体积 {self.__bytes_to_gb(total_torrent_size):.1f} GB\n原因：触发动态删除阈值，系统自动删除")
+        msg = (f"站点：{'，'.join(delete_sites)}\n内容：已命中 {len(need_delete_hashes)} 个待删种子，"
+               f"当前做种体积 {self.__bytes_to_gb(total_torrent_size):.1f} GB\n原因：触发动态删除阈值，等待下载器执行删除")
         logger.info(msg)
 
-        # 如果是区间删除，这里则进行统一推送
+        # 如果是区间删除，这里记录统一推送，待删种成功后再发送
         if proxy_size_range:
-            self.__send_message(title="【刷流任务种子删除】", text=msg)
+            if delete_summary_messages is not None:
+                delete_summary_messages.append({
+                    "title": "【刷流任务种子删除】",
+                    "text": msg,
+                    "hashes": list(dict.fromkeys(need_delete_hashes))
+                })
+            else:
+                self.__send_message(title="【刷流任务种子删除】", text=msg)
 
         # 返回所有需要删除的种子的哈希列表
         return need_delete_hashes
+
+    @staticmethod
+    def __append_delete_message(delete_message_map: Optional[Dict[str, List[dict]]], torrent_hash: str,
+                                site_name: str, torrent_title: str, torrent_desc: str, reason: str,
+                                title: str = "【刷流任务种子删除】"):
+        """
+        追加待发送的删种消息（仅在真正删种成功后发送）
+        """
+        if delete_message_map is None or not torrent_hash:
+            return
+        payload = {
+            "site_name": site_name,
+            "torrent_title": torrent_title,
+            "torrent_desc": torrent_desc,
+            "reason": reason,
+            "title": title
+        }
+        delete_message_map.setdefault(torrent_hash, []).append(payload)
+
+    def __send_delete_messages_after_success(self, delete_hashes: List[str],
+                                             delete_message_map: Optional[Dict[str, List[dict]]],
+                                             torrent_tasks: Dict[str, dict]):
+        """
+        仅对真实删除成功的种子发送删种消息
+        """
+        if not delete_hashes:
+            return
+        sent_messages = set()
+        for torrent_hash in delete_hashes:
+            payloads = (delete_message_map or {}).get(torrent_hash) or []
+            if not payloads and torrent_hash in torrent_tasks:
+                torrent_task = torrent_tasks.get(torrent_hash, {})
+                payloads = [{
+                    "site_name": torrent_task.get("site_name", ""),
+                    "torrent_title": torrent_task.get("title", ""),
+                    "torrent_desc": torrent_task.get("description", ""),
+                    "reason": "满足删除条件并已执行彻底删除（含下载文件）",
+                    "title": "【刷流任务种子删除】"
+                }]
+
+            for payload in payloads:
+                title = payload.get("title") or "【刷流任务种子删除】"
+                reason = payload.get("reason") or "满足删除条件并已执行彻底删除（含下载文件）"
+                message_key = f"{torrent_hash}|{title}|{reason}"
+                if message_key in sent_messages:
+                    continue
+                sent_messages.add(message_key)
+                self.__send_delete_message(site_name=payload.get("site_name", ""),
+                                           torrent_title=payload.get("torrent_title", ""),
+                                           torrent_desc=payload.get("torrent_desc", ""),
+                                           reason=reason,
+                                           title=title)
+
+    def __send_delete_summary_messages_after_success(self, delete_hashes: List[str],
+                                                     delete_summary_messages: Optional[List[dict]]):
+        """
+        仅在真实删除成功后发送汇总消息
+        """
+        if not delete_hashes or not delete_summary_messages:
+            return
+        deleted_hash_set = set(delete_hashes)
+        for summary_message in delete_summary_messages:
+            related_hashes = set(summary_message.get("hashes", []))
+            if not related_hashes:
+                continue
+            success_count = len(deleted_hash_set.intersection(related_hashes))
+            if success_count <= 0:
+                continue
+            summary_text = summary_message.get("text", "")
+            summary_text = f"{summary_text}\n结果：下载器已完成 {success_count} 个种子彻底删除（含下载文件）"
+            self.__send_message(title=summary_message.get("title", "【刷流任务种子删除】"), text=summary_text)
+
+    def __send_delete_failed_message(self, failed_hashes: List[str], torrent_tasks: Dict[str, dict]):
+        """
+        发送删种失败消息，明确提示“删除种子并删除文件”失败
+        """
+        if not failed_hashes:
+            return
+        failed_hashes = list(dict.fromkeys([hash_value for hash_value in failed_hashes if hash_value]))
+        if not failed_hashes:
+            return
+
+        failed_tasks = [torrent_tasks.get(hash_value, {}) for hash_value in failed_hashes]
+        site_names = sorted({task.get("site_name", "") for task in failed_tasks if task.get("site_name", "")})
+        titles = [task.get("title", "") for task in failed_tasks if task.get("title", "")]
+        title_preview = "；".join(titles[:3]) if titles else ""
+        msg_text = (f"站点：{'，'.join(site_names) if site_names else '未知'}\n"
+                    f"内容：共 {len(failed_hashes)} 个种子未能完成彻底删除（含下载文件）")
+        if title_preview:
+            msg_text = f"{msg_text}\n示例：{title_preview}"
+        msg_text = (f"{msg_text}\n原因：下载器未成功执行“删除种子并删除文件”，"
+                    f"请检查下载器权限、保存路径权限或连接状态后重试")
+        self.__send_message(title="【刷流任务删种失败】", text=msg_text)
 
     def __update_undeleted_torrents_missing_in_downloader(self, torrent_tasks, torrent_check_hashes, torrents):
         """
