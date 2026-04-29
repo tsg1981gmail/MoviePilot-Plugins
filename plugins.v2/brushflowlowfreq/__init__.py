@@ -282,7 +282,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.15"
+    plugin_version = "4.3.16"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2738,7 +2738,16 @@ class BrushFlowLowFreq(_PluginBase):
                 # 如果配置了动态删除以及删种阈值，则根据动态删种进行分组处理
                 if brush_config.proxy_delete and brush_config.delete_size_range:
                     logger.info("已开启动态删种，按系统默认动态删种条件开始检查任务")
-                    proxy_delete_hashes = self.__delete_torrent_for_proxy(torrents=check_torrents,
+                    # 在动态删种模式下，先执行“失去免费即删种”，避免受动态阈值影响而漏删
+                    no_free_delete_hashes = self.__delete_torrent_for_no_free(torrents=check_torrents,
+                                                                              torrent_tasks=torrent_tasks,
+                                                                              delete_message_map=delete_message_map) or []
+                    need_delete_hashes.extend(no_free_delete_hashes)
+                    no_free_delete_hash_set = set(no_free_delete_hashes)
+                    proxy_check_torrents = [torrent for torrent in check_torrents
+                                            if self.__get_hash(torrent) not in no_free_delete_hash_set]
+
+                    proxy_delete_hashes = self.__delete_torrent_for_proxy(torrents=proxy_check_torrents,
                                                                           torrent_tasks=torrent_tasks,
                                                                           delete_message_map=delete_message_map,
                                                                           delete_summary_messages=delete_summary_messages) or []
@@ -2957,12 +2966,14 @@ class BrushFlowLowFreq(_PluginBase):
         brush_config = self.__get_brush_config(sitename=site_name)
 
         # 规则：检测到种子已失去免费后，直接彻底删除
-        if brush_config.delete_when_no_free and self.__is_free_torrent(torrent_task):
-            is_still_free, free_reason = self.__check_torrent_current_free_status(torrent_task=torrent_task)
-            if is_still_free is False:
-                return True, "检测到种子已不免费，按配置执行彻底删除"
-            if is_still_free is None:
-                logger.debug(f"站点：{site_name}，失去免费删种检测跳过，原因：{free_reason}")
+        no_free_should_delete, no_free_reason = self.__evaluate_no_free_condition_for_delete(
+            site_name=site_name,
+            torrent_task=torrent_task
+        )
+        if no_free_should_delete:
+            return True, no_free_reason
+        if no_free_reason and no_free_reason.startswith("失去免费删种检测跳过"):
+            logger.debug(f"站点：{site_name}，{no_free_reason}")
 
         seeding_time = torrent_info.get("seeding_time")
         ratio = torrent_info.get("ratio")
@@ -3025,6 +3036,55 @@ class BrushFlowLowFreq(_PluginBase):
             return False, interval_reason if interval_reason else reason
 
         return True, reason if not hit_and_run else "H&R种子（未设置H&R条件），" + reason
+
+    def __evaluate_no_free_condition_for_delete(self, site_name: str, torrent_task: dict) -> Tuple[bool, str]:
+        """
+        评估“失去免费即删种”规则
+        """
+        brush_config = self.__get_brush_config(sitename=site_name)
+        if not brush_config.delete_when_no_free:
+            return False, ""
+
+        # 仅对原本免费加入的任务生效
+        if not self.__is_free_torrent(torrent_task):
+            return False, ""
+
+        is_still_free, free_reason = self.__check_torrent_current_free_status(torrent_task=torrent_task)
+        if is_still_free is False:
+            return True, "检测到种子已不免费，按配置执行彻底删除"
+        if is_still_free is None:
+            return False, f"失去免费删种检测跳过，原因：{free_reason}"
+        return False, "仍为免费种子"
+
+    def __delete_torrent_for_no_free(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
+                                     delete_message_map: Optional[Dict[str, List[dict]]] = None) -> List:
+        """
+        根据“失去免费即删种”规则删除种子并获取已删除列表
+        """
+        delete_hashes = []
+
+        for torrent in torrents:
+            torrent_hash = self.__get_hash(torrent)
+            torrent_task = torrent_tasks.get(torrent_hash, None)
+            # 如果找不到种子任务，说明不在管理的种子范围内，直接跳过
+            if not torrent_task:
+                continue
+
+            site_name = torrent_task.get("site_name", "")
+            torrent_title = torrent_task.get("title", "")
+            torrent_desc = torrent_task.get("description", "")
+            should_delete, reason = self.__evaluate_no_free_condition_for_delete(site_name=site_name,
+                                                                                  torrent_task=torrent_task)
+            if should_delete:
+                delete_hashes.append(torrent_hash)
+                self.__append_delete_message(delete_message_map=delete_message_map, torrent_hash=torrent_hash,
+                                             site_name=site_name, torrent_title=torrent_title,
+                                             torrent_desc=torrent_desc, reason=reason)
+                logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
+            elif reason and reason.startswith("失去免费删种检测跳过"):
+                logger.debug(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
+
+        return delete_hashes
 
     def __evaluate_interval_upspeed_condition_for_delete(self, site_name: str, brush_config: BrushConfig,
                                                          torrent_task: dict, task_elapsed_minutes: Optional[float]) \
