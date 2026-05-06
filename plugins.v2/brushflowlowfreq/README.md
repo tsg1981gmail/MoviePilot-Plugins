@@ -6,6 +6,10 @@
 
 ## 版本更新日志
 
+- v4.3.17
+  - 新增“免费时间过滤例外时段”：命中该时段时，跳过免费剩余时间下载过滤，其它选种规则照常生效
+  - 优化“失去免费即删种”：开启后支持按“免费临期删种阈值（分钟）”提前删除，默认 5 分钟；已失去免费仍会删除
+
 - v4.3.16
   - 修复“动态删种”场景下的失去免费漏删：即使未触发动态阈值，也会优先执行“失去免费即删种”检查
   - 保持原有保护逻辑：详情页获取失败/无法判定时仍跳过不删，避免误删
@@ -115,6 +119,7 @@
 | 做种人数               | `seeder`             | 设置做种人数过滤                     | 示例：<br>5，做种人数 ≤ 5 <br> 5-10，5 ≤ 做种人数 ≤ 10                                                            |
 | 发布时间（分钟）       | `pubtime`            | 设置任务的发布时间过滤               | 示例：<br>5，发布时间 ≤ 5 <br> 5-10，5 ≤ 发布时间 ≤ 10                                                            |
 | 免费剩余时间（分钟）   | `free_remaining_time` | 设置免费种子的剩余免费时间过滤       | 示例：120，仅下载免费剩余时间 ≥ 120 分钟的免费种子；若免费时间无法识别，则按阈值策略跳过该免费种                   |
+| 免费时间过滤例外时段   | `free_remaining_time_skip_range` | 设置免费剩余时间过滤的例外时段       | 格式：`HH:MM-HH:MM`，支持跨午夜；命中时跳过 `free_remaining_time` 检查，其它规则照常生效                           |
 | 站点全局 H&R           | `site_hr_active`     | 标记站点是否开启全局 H&R             | 开启后新增的刷流任务会标记为 H&R 种子，仅联动删种规则，不会联动「排除 H&R」选项和消息推送                         |
 | 忽略站点提示           | `site_skip_tips`     | 是否忽略站点下载提示                 | 开启后，支持部分 NexusPHP 站点忽略下载提示，如低分享率等场景                                                      |
 | 做种时间（小时）       | `seed_time`          | 达到指定做种时间后删除任务           |                                                                                                                   |
@@ -123,7 +128,8 @@
 | 分享率                 | `seed_ratio`         | 达到设定分享率后删除任务             |                                                                                                                   |
 | 任务添加后分钟数       | `seed_ratio_check_minutes` | 设置低分享率删除规则的计时阈值       | 示例：30，任务添加30分钟后开始判断低分享率删除                                                                     |
 | 任务添加后最低分享率   | `seed_ratio_min_30m` | 达到“任务添加后分钟数”后，低于设定值时删除任务 | 示例：0.5，任务添加30分钟后若分享率 < 0.5 则删除                                                                  |
-| 失去免费即删种         | `delete_when_no_free` | 检测到种子已不免费后立即删除         | 开启后会访问种子详情页校验免费状态；仅对原本免费加入的种子生效，校验失败时跳过不删                                  |
+| 失去免费即删种         | `delete_when_no_free` | 检测到种子已不免费或免费临期后立即删除 | 开启后会访问种子详情页校验免费状态；仅对原本免费加入的种子生效，校验失败时跳过不删                                  |
+| 免费临期删种阈值（分钟） | `delete_free_remaining_minutes` | 设置免费剩余不足多少分钟时删种       | 默认 5；仅在 `delete_when_no_free` 开启时生效；已失去免费按 0 分钟处理                                             |
 | 上传量（GB）           | `seed_size`          | 达到设定上传量后删除任务             |                                                                                                                   |
 | 下载超时时间（小时）   | `download_time`      | 达到指定下载超时时间后删除任务       |                                                                                                                   |
 | 平均上传速度（KB/s）   | `seed_avgspeed`      | 低于设定平均上传速度时删除任务       | 刷流任务做种 30 分钟后生效                                                                                        |
@@ -180,11 +186,13 @@
 - `seeder`：做种人数
 - `pubtime`：发布时间
 - `free_remaining_time`：免费剩余时间
+- `free_remaining_time_skip_range`：免费时间过滤例外时段
 - `seed_time`：做种时间
 - `seed_ratio`：分享率
 - `seed_ratio_check_minutes`：任务添加后分钟数
 - `seed_ratio_min_30m`：任务添加后最低分享率
 - `delete_when_no_free`：失去免费即删种
+- `delete_free_remaining_minutes`：免费临期删种阈值
 - `seed_size`：上传量
 - `download_time`：下载超时时间
 - `seed_avgspeed`：平均上传速度
@@ -231,12 +239,14 @@
     "seeder": "1",
     "pubtime": "5-120",
     "free_remaining_time": 120,
+    "free_remaining_time_skip_range": "00:00-08:00",
     "seed_time": 120,
     "hr_seed_time": 144,
     "seed_ratio": "",
     "seed_ratio_check_minutes": 30,
     "seed_ratio_min_30m": "",
     "delete_when_no_free": false,
+    "delete_free_remaining_minutes": 5,
     "seed_size": "",
     "download_time": "",
     "seed_avgspeed": "",

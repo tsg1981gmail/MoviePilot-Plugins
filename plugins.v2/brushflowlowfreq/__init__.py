@@ -57,6 +57,7 @@ class BrushConfig:
         self.seeder = config.get("seeder")
         self.pubtime = config.get("pubtime")
         self.free_remaining_time = self.__parse_number(config.get("free_remaining_time"))
+        self.free_remaining_time_skip_range = config.get("free_remaining_time_skip_range")
         self.seed_time = self.__parse_number(config.get("seed_time"))
         self.hr_seed_time = self.__parse_number(config.get("hr_seed_time"))
         self.seed_ratio = self.__parse_number(config.get("seed_ratio"))
@@ -83,6 +84,7 @@ class BrushConfig:
         self.brush_sequential = config.get("brush_sequential", False)
         self.proxy_delete = config.get("proxy_delete", False)
         self.delete_when_no_free = config.get("delete_when_no_free", False)
+        self.delete_free_remaining_minutes = self.__parse_number(config.get("delete_free_remaining_minutes", 5))
         self.active_time_range = config.get("active_time_range")
         self.cron = config.get("cron")
         self.qb_category = config.get("qb_category")
@@ -120,6 +122,7 @@ class BrushConfig:
             "seeder",
             "pubtime",
             "free_remaining_time",
+            "free_remaining_time_skip_range",
             "seed_time",
             "hr_seed_time",
             "seed_ratio",
@@ -138,6 +141,7 @@ class BrushConfig:
             "save_path",
             "proxy_delete",
             "delete_when_no_free",
+            "delete_free_remaining_minutes",
             "qb_category",
             "site_hr_active",
             "site_skip_tips"
@@ -196,6 +200,7 @@ class BrushConfig:
     "seeder": "1",
     "pubtime": "5-120",
     "free_remaining_time": 120,
+    "free_remaining_time_skip_range": "",
     "seed_time": 120,
     "hr_seed_time": 144,
     "seed_ratio": "",
@@ -214,6 +219,7 @@ class BrushConfig:
     "save_path": "/downloads/site1",
     "proxy_delete": false,
     "delete_when_no_free": false,
+    "delete_free_remaining_minutes": 5,
     "qb_category": "刷流",
     "site_hr_active": true,
     "site_skip_tips": true
@@ -282,7 +288,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.16"
+    plugin_version = "4.3.17"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1123,6 +1129,23 @@ class BrushFlowLowFreq(_PluginBase):
                                                     }
                                                 ]
                                             },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'free_remaining_time_skip_range',
+                                                            'label': '免费时间过滤例外时段',
+                                                            'placeholder': '如：00:00-08:00，留空不跳过'
+                                                        }
+                                                    }
+                                                ]
+                                            },
                                         ]
                                     },
                                     {
@@ -1271,6 +1294,23 @@ class BrushFlowLowFreq(_PluginBase):
                                                                 {'title': '是', 'value': 'yes'},
                                                                 {'title': '否', 'value': 'no'},
                                                             ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'delete_free_remaining_minutes',
+                                                            'label': '免费临期删种阈值（分钟）',
+                                                            'placeholder': '默认5，开启失去免费即删种后生效'
                                                         }
                                                     }
                                                 ]
@@ -2048,6 +2088,8 @@ class BrushFlowLowFreq(_PluginBase):
             "brush_sequential": False,
             "proxy_delete": False,
             "delete_when_no_free": False,
+            "delete_free_remaining_minutes": 5,
+            "free_remaining_time_skip_range": "",
             "interval_upspeed": "",
             "interval_upspeed_check_count": 3,
             "interval_upspeed_low_count": 2,
@@ -2603,6 +2645,11 @@ class BrushFlowLowFreq(_PluginBase):
 
         # 免费剩余时间（最后判断）
         if brush_config.free_remaining_time and self.__is_free_torrent(torrent):
+            if self.__should_skip_free_remaining_time_filter(brush_config=brush_config):
+                logger.info(f"免费剩余时间校验：当前处于例外时段 {brush_config.free_remaining_time_skip_range}，"
+                            f"跳过该条件，种子：{torrent.title}")
+                return True, None
+
             free_remaining_threshold = float(brush_config.free_remaining_time)
             free_remaining_minutes = self.__get_free_remaining_minutes(
                 freedate=torrent.freedate,
@@ -3049,12 +3096,22 @@ class BrushFlowLowFreq(_PluginBase):
         if not self.__is_free_torrent(torrent_task):
             return False, ""
 
-        is_still_free, free_reason = self.__check_torrent_current_free_status(torrent_task=torrent_task)
+        is_still_free, free_reason, free_remaining_minutes = self.__check_torrent_current_free_status(
+            torrent_task=torrent_task
+        )
         if is_still_free is False:
             return True, "检测到种子已不免费，按配置执行彻底删除"
         if is_still_free is None:
             return False, f"失去免费删种检测跳过，原因：{free_reason}"
-        return False, "仍为免费种子"
+
+        threshold_minutes = self.__get_delete_free_remaining_threshold(brush_config=brush_config)
+        if free_remaining_minutes is None:
+            return False, "仍为免费种子"
+        if free_remaining_minutes < threshold_minutes:
+            return True, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，不足 "
+                          f"{threshold_minutes:.0f} 分钟，按配置执行彻底删除")
+        return False, (f"仍为免费种子，免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
+                       f"不低于 {threshold_minutes:.0f} 分钟")
 
     def __delete_torrent_for_no_free(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                      delete_message_map: Optional[Dict[str, List[dict]]] = None) -> List:
@@ -3208,7 +3265,7 @@ class BrushFlowLowFreq(_PluginBase):
 
         return True, reason
 
-    def __check_torrent_current_free_status(self, torrent_task: dict) -> Tuple[Optional[bool], str]:
+    def __check_torrent_current_free_status(self, torrent_task: dict) -> Tuple[Optional[bool], str, Optional[float]]:
         """
         检查种子当前是否仍为免费状态
         """
@@ -3217,12 +3274,22 @@ class BrushFlowLowFreq(_PluginBase):
             page_url=torrent_task.get("page_url")
         )
         if not page_text:
-            return None, error_reason
+            return None, error_reason, None
 
         page_free_status = self.__parse_free_status_from_page(page_text)
         if page_free_status is None:
-            return None, "页面内容无法判断免费状态"
-        return page_free_status, "仍为免费种子" if page_free_status else "已失去免费"
+            return None, "页面内容无法判断免费状态", None
+
+        if not page_free_status:
+            return False, "已失去免费", 0
+
+        free_remaining_minutes = self.__get_free_remaining_minutes(
+            freedate=torrent_task.get("freedate"),
+            freedate_diff=torrent_task.get("freedate_diff"),
+            title=torrent_task.get("title"),
+            description=page_text
+        )
+        return True, "仍为免费种子", free_remaining_minutes
 
     def __get_torrent_detail_page_text(self, site_id: Any, page_url: str) -> Tuple[Optional[str], str]:
         """
@@ -3775,6 +3842,7 @@ class BrushFlowLowFreq(_PluginBase):
             "maxdlspeed": "总下载带宽",
             "maxdlcount": "同时下载任务数",
             "free_remaining_time": "免费剩余时间",
+            "delete_free_remaining_minutes": "免费临期删种阈值",
             "seed_time": "做种时间",
             "hr_seed_time": "H&R做种时间",
             "seed_ratio": "分享率",
@@ -3821,6 +3889,13 @@ class BrushFlowLowFreq(_PluginBase):
             config["active_time_range"] = None
             found_error = True  # 更新错误标志
 
+        free_remaining_time_skip_range = config.get("free_remaining_time_skip_range")
+        if (free_remaining_time_skip_range
+                and not self.__is_valid_time_range(time_range=free_remaining_time_skip_range)):
+            self.__log_and_notify_error(f"站点刷流任务出错，免费时间过滤例外时段设置错误：{free_remaining_time_skip_range}")
+            config["free_remaining_time_skip_range"] = None
+            found_error = True  # 更新错误标志
+
         # 如果发现任何错误，返回False；否则返回True
         return not found_error
 
@@ -3853,6 +3928,7 @@ class BrushFlowLowFreq(_PluginBase):
             "seeder": brush_config.seeder,
             "pubtime": brush_config.pubtime,
             "free_remaining_time": brush_config.free_remaining_time,
+            "free_remaining_time_skip_range": brush_config.free_remaining_time_skip_range,
             "seed_time": brush_config.seed_time,
             "hr_seed_time": brush_config.hr_seed_time,
             "seed_ratio": brush_config.seed_ratio,
@@ -3879,6 +3955,7 @@ class BrushFlowLowFreq(_PluginBase):
             "brush_sequential": brush_config.brush_sequential,
             "proxy_delete": brush_config.proxy_delete,
             "delete_when_no_free": brush_config.delete_when_no_free,
+            "delete_free_remaining_minutes": brush_config.delete_free_remaining_minutes,
             "active_time_range": brush_config.active_time_range,
             "cron": brush_config.cron,
             "qb_category": brush_config.qb_category,
@@ -4982,6 +5059,17 @@ class BrushFlowLowFreq(_PluginBase):
             return False
 
     @staticmethod
+    def __get_delete_free_remaining_threshold(brush_config: BrushConfig) -> float:
+        """
+        获取失去免费/临期删种阈值，未配置或配置异常时使用默认5分钟。
+        """
+        try:
+            threshold = float(brush_config.delete_free_remaining_minutes)
+        except (TypeError, ValueError):
+            return 5.0
+        return threshold if threshold >= 0 else 5.0
+
+    @staticmethod
     def __calculate_seeding_torrents_size(torrent_tasks: Dict[str, dict]) -> float:
         """
         计算保种种子体积
@@ -5074,17 +5162,13 @@ class BrushFlowLowFreq(_PluginBase):
 
         return True
 
-    def __is_current_time_in_range(self) -> bool:
-        """判断当前时间是否在开启时间区间内"""
+    @classmethod
+    def __is_now_in_time_range(cls, time_range: str) -> bool:
+        """判断当前时间是否在指定时间区间内"""
+        if not cls.__is_valid_time_range(time_range):
+            return False
 
-        brush_config = self.__get_brush_config()
-        active_time_range = brush_config.active_time_range
-
-        if not self.__is_valid_time_range(active_time_range):
-            # 如果时间范围格式不正确或不存在，说明当前没有开启时间段，返回True
-            return True
-
-        start_str, end_str = active_time_range.split('-')
+        start_str, end_str = time_range.split('-')
         start_time = datetime.strptime(start_str, '%H:%M').time()
         end_time = datetime.strptime(end_str, '%H:%M').time()
         now = datetime.now().time()
@@ -5095,6 +5179,22 @@ class BrushFlowLowFreq(_PluginBase):
         else:
             # 情况2: 时间段跨越午夜
             return now >= start_time or now <= end_time
+
+    def __is_current_time_in_range(self) -> bool:
+        """判断当前时间是否在开启时间区间内"""
+
+        brush_config = self.__get_brush_config()
+        active_time_range = brush_config.active_time_range
+
+        if not self.__is_valid_time_range(active_time_range):
+            # 如果时间范围格式不正确或不存在，说明当前没有开启时间段，返回True
+            return True
+
+        return self.__is_now_in_time_range(active_time_range)
+
+    def __should_skip_free_remaining_time_filter(self, brush_config: BrushConfig) -> bool:
+        """判断当前是否处于免费剩余时间过滤例外时段"""
+        return self.__is_now_in_time_range(brush_config.free_remaining_time_skip_range)
 
     def __get_site_by_torrent(self, torrent: Any) -> Tuple[int, str]:
         """
