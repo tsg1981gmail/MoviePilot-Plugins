@@ -227,6 +227,25 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 self.assertFalse(should_delete, reason)
                 self.assertTrue(reason.startswith("失去免费删种检测跳过"), reason)
 
+    def test_no_free_delete_removes_detail_page_without_free_marker(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+        })
+
+        def fake_detail_page(*, site_id, page_url):
+            return "<a href='download.php?id=1'>下载</a><h1 id='top'>normal torrent</h1>", ""
+
+        plugin._BrushFlowLowFreq__get_torrent_detail_page_text = fake_detail_page
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete(
+            site_name="站点1",
+            torrent_task=self._free_torrent_task(),
+        )
+
+        self.assertTrue(should_delete, reason)
+        self.assertIn("已不免费", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
