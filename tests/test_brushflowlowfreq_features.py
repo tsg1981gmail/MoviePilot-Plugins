@@ -140,6 +140,19 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         plugin._brush_config = self.module.BrushConfig(config)
         return plugin
 
+    @staticmethod
+    def _free_torrent_task():
+        return {
+            "site": 1,
+            "page_url": "details.php?id=1",
+            "site_name": "站点1",
+            "title": "free torrent",
+            "description": "free",
+            "downloadvolumefactor": 0,
+            "freedate": "",
+            "freedate_diff": "",
+        }
+
     def test_free_remaining_skip_range_bypasses_download_filter(self):
         now = datetime.now()
         start = now - timedelta(minutes=1)
@@ -177,16 +190,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             return "<a href='download.php?id=1'>下载</a>优惠剩余时间：4分钟", ""
 
         plugin._BrushFlowLowFreq__get_torrent_detail_page_text = fake_detail_page
-        torrent_task = {
-            "site": 1,
-            "page_url": "details.php?id=1",
-            "site_name": "站点1",
-            "title": "free torrent",
-            "description": "free",
-            "downloadvolumefactor": 0,
-            "freedate": "",
-            "freedate_diff": "",
-        }
+        torrent_task = self._free_torrent_task()
 
         should_delete, reason = plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete(
             site_name="站点1",
@@ -195,6 +199,33 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertTrue(should_delete, reason)
         self.assertIn("不足 5", reason)
+
+    def test_no_free_delete_skips_when_detail_page_cannot_be_judged(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+        })
+        cases = [
+            ("request_failed", None, "请求详情页失败"),
+            ("login_page", "<form action='login.php'><input name='username'></form>", ""),
+            ("captcha_page", "<html><body>captcha 验证</body></html>", ""),
+            ("not_detail_page", "<html><body>ordinary page</body></html>", ""),
+        ]
+
+        for case_name, page_text, error_reason in cases:
+            with self.subTest(case_name=case_name):
+                plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+                    lambda *, site_id, page_url, page_text=page_text, error_reason=error_reason:
+                    (page_text, error_reason)
+                )
+
+                should_delete, reason = plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete(
+                    site_name="站点1",
+                    torrent_task=self._free_torrent_task(),
+                )
+
+                self.assertFalse(should_delete, reason)
+                self.assertTrue(reason.startswith("失去免费删种检测跳过"), reason)
 
 
 if __name__ == "__main__":
