@@ -83,6 +83,7 @@ class BrushConfig:
         self.except_subscribe = config.get("except_subscribe", True)
         self.brush_sequential = config.get("brush_sequential", False)
         self.proxy_delete = config.get("proxy_delete", False)
+        self.filter_seeding_torrents = config.get("filter_seeding_torrents", True)
         self.delete_when_no_free = config.get("delete_when_no_free", False)
         self.delete_free_remaining_minutes = self.__parse_number(config.get("delete_free_remaining_minutes", 5))
         self.active_time_range = config.get("active_time_range")
@@ -140,6 +141,7 @@ class BrushConfig:
             "seed_inactivetime",
             "save_path",
             "proxy_delete",
+            "filter_seeding_torrents",
             "delete_when_no_free",
             "delete_free_remaining_minutes",
             "qb_category",
@@ -218,6 +220,7 @@ class BrushConfig:
     "seed_inactivetime": "",
     "save_path": "/downloads/site1",
     "proxy_delete": false,
+    "filter_seeding_torrents": true,
     "delete_when_no_free": false,
     "delete_free_remaining_minutes": 5,
     "qb_category": "刷流",
@@ -288,7 +291,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.17"
+    plugin_version = "4.3.18"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1545,6 +1548,22 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'filter_seeding_torrents',
+                                                            'label': '是否筛选已做种？',
+                                                        }
+                                                    }
+                                                ]
                                             }
                                         ]
                                     },
@@ -2087,6 +2106,7 @@ class BrushFlowLowFreq(_PluginBase):
             "except_subscribe": True,
             "brush_sequential": False,
             "proxy_delete": False,
+            "filter_seeding_torrents": True,
             "delete_when_no_free": False,
             "delete_free_remaining_minutes": 5,
             "free_remaining_time_skip_range": "",
@@ -3005,12 +3025,43 @@ class BrushFlowLowFreq(_PluginBase):
 
         return proxy_delete_torrents, not_proxy_delete_torrents
 
+    @staticmethod
+    def __number_or_none(value) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def __is_torrent_seeding_or_completed(self, torrent_info: dict) -> bool:
+        """
+        判断下载器中的任务是否已进入做种/完成状态。
+        """
+        seeding_time = self.__number_or_none(torrent_info.get("seeding_time")) or 0
+        if seeding_time > 0:
+            return True
+
+        downloaded = self.__number_or_none(torrent_info.get("downloaded"))
+        total_size = self.__number_or_none(torrent_info.get("total_size"))
+        return downloaded is not None and total_size is not None and total_size > 0 and downloaded >= total_size
+
     def __evaluate_conditions_for_delete(self, site_name: str, torrent_info: dict, torrent_task: dict) \
             -> Tuple[bool, str]:
         """
         评估删除条件并返回是否应删除种子及其原因
         """
         brush_config = self.__get_brush_config(sitename=site_name)
+        seeding_time = torrent_info.get("seeding_time")
+        ratio = torrent_info.get("ratio")
+
+        if (not brush_config.filter_seeding_torrents
+                and self.__is_torrent_seeding_or_completed(torrent_info=torrent_info)):
+            seeding_seconds = self.__number_or_none(seeding_time)
+            if (brush_config.seed_time and seeding_seconds is not None
+                    and seeding_seconds >= float(brush_config.seed_time) * 3600):
+                return True, f"做种时间 {seeding_seconds / 3600:.1f} 小时，大于 {brush_config.seed_time} 小时"
+            return False, "已做种种子仅按做种时间筛选，跳过其它删种规则"
 
         # 规则：检测到种子已失去免费后，直接彻底删除
         no_free_should_delete, no_free_reason = self.__evaluate_no_free_condition_for_delete(
@@ -3022,8 +3073,6 @@ class BrushFlowLowFreq(_PluginBase):
         if no_free_reason and no_free_reason.startswith("失去免费删种检测跳过"):
             logger.debug(f"站点：{site_name}，{no_free_reason}")
 
-        seeding_time = torrent_info.get("seeding_time")
-        ratio = torrent_info.get("ratio")
         task_elapsed_minutes = self.__get_task_elapsed_minutes(torrent_task.get("time"))
         ratio_check_minutes = brush_config.seed_ratio_check_minutes if brush_config.seed_ratio_check_minutes else 30
         interval_should_delete, interval_reason = self.__evaluate_interval_upspeed_condition_for_delete(
@@ -3954,6 +4003,7 @@ class BrushFlowLowFreq(_PluginBase):
             "except_subscribe": brush_config.except_subscribe,
             "brush_sequential": brush_config.brush_sequential,
             "proxy_delete": brush_config.proxy_delete,
+            "filter_seeding_torrents": brush_config.filter_seeding_torrents,
             "delete_when_no_free": brush_config.delete_when_no_free,
             "delete_free_remaining_minutes": brush_config.delete_free_remaining_minutes,
             "active_time_range": brush_config.active_time_range,

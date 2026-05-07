@@ -246,6 +246,138 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(should_delete, reason)
         self.assertIn("已不免费", reason)
 
+    def test_filter_seeding_torrents_on_keeps_all_delete_rules(self):
+        plugin = self._new_plugin({
+            "filter_seeding_torrents": True,
+            "seed_ratio": 1.0,
+        })
+        torrent_info = {
+            "seeding_time": 3600,
+            "ratio": 2.0,
+            "uploaded": 0,
+            "downloaded": 100,
+            "total_size": 100,
+            "dltime": 0,
+            "avg_upspeed": 0,
+            "iatime": 0,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_conditions_for_delete(
+            site_name="站点1",
+            torrent_info=torrent_info,
+            torrent_task={"site_name": "站点1", "time": 0},
+        )
+
+        self.assertTrue(should_delete, reason)
+        self.assertIn("分享率", reason)
+
+    def test_filter_seeding_torrents_off_only_seed_time_for_seeding_torrents(self):
+        plugin = self._new_plugin({
+            "filter_seeding_torrents": False,
+            "seed_ratio": 1.0,
+        })
+        torrent_info = {
+            "seeding_time": 3600,
+            "ratio": 2.0,
+            "uploaded": 0,
+            "downloaded": 100,
+            "total_size": 100,
+            "dltime": 0,
+            "avg_upspeed": 0,
+            "iatime": 0,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_conditions_for_delete(
+            site_name="站点1",
+            torrent_info=torrent_info,
+            torrent_task={"site_name": "站点1", "time": 0},
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("已做种", reason)
+
+    def test_filter_seeding_torrents_off_skips_no_free_delete_for_seeding_torrents(self):
+        plugin = self._new_plugin({
+            "filter_seeding_torrents": False,
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+        })
+
+        def fake_detail_page(*, site_id, page_url):
+            return "<a href='download.php?id=1'>下载</a><h1 id='top'>normal torrent</h1>", ""
+
+        plugin._BrushFlowLowFreq__get_torrent_detail_page_text = fake_detail_page
+        torrent_info = {
+            "seeding_time": 3600,
+            "ratio": 0,
+            "uploaded": 0,
+            "downloaded": 100,
+            "total_size": 100,
+            "dltime": 0,
+            "avg_upspeed": 0,
+            "iatime": 0,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_conditions_for_delete(
+            site_name="站点1",
+            torrent_info=torrent_info,
+            torrent_task=self._free_torrent_task(),
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("已做种", reason)
+
+    def test_filter_seeding_torrents_off_allows_seed_time_for_seeding_torrents(self):
+        plugin = self._new_plugin({
+            "filter_seeding_torrents": False,
+            "seed_time": 1,
+            "seed_ratio": 1.0,
+        })
+        torrent_info = {
+            "seeding_time": 7200,
+            "ratio": 0,
+            "uploaded": 0,
+            "downloaded": 100,
+            "total_size": 100,
+            "dltime": 0,
+            "avg_upspeed": 0,
+            "iatime": 0,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_conditions_for_delete(
+            site_name="站点1",
+            torrent_info=torrent_info,
+            torrent_task={"site_name": "站点1", "time": 0},
+        )
+
+        self.assertTrue(should_delete, reason)
+        self.assertIn("做种时间", reason)
+
+    def test_filter_seeding_torrents_off_keeps_download_timeout_for_incomplete_torrents(self):
+        plugin = self._new_plugin({
+            "filter_seeding_torrents": False,
+            "download_time": 1,
+        })
+        torrent_info = {
+            "seeding_time": 0,
+            "ratio": 0,
+            "uploaded": 0,
+            "downloaded": 50,
+            "total_size": 100,
+            "dltime": 7200,
+            "avg_upspeed": 0,
+            "iatime": 0,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_conditions_for_delete(
+            site_name="站点1",
+            torrent_info=torrent_info,
+            torrent_task={"site_name": "站点1", "time": 0},
+        )
+
+        self.assertTrue(should_delete, reason)
+        self.assertIn("下载耗时", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
