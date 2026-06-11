@@ -321,7 +321,7 @@ class BrushFlowLowFreq(_PluginBase):
     # Brush定时
     _brush_interval = 10
     # Check定时
-    _check_interval = 5
+    _check_interval = 150
     # 退出事件
     _event = threading.Event()
     _scheduler = None
@@ -512,13 +512,13 @@ class BrushFlowLowFreq(_PluginBase):
                 })
 
         if brush_config.enabled:
-            logger.info(f"站点刷流检查定时服务启动，时间间隔 {self._check_interval} 分钟")
+            logger.info(f"站点刷流检查定时服务启动，时间间隔 {self._check_interval} 秒")
             services.append({
                 "id": "BrushFlowLowFreqCheck",
                 "name": "shualiu检查服务",
                 "trigger": "interval",
                 "func": self.check,
-                "kwargs": {"minutes": self._check_interval}
+                "kwargs": {"seconds": self._check_interval}
             })
 
         if not services:
