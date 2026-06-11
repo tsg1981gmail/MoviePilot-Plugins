@@ -91,6 +91,7 @@ class BrushConfig:
         self.qb_category = config.get("qb_category")
         self.site_hr_active = config.get("site_hr_active", False)
         self.site_skip_tips = config.get("site_skip_tips", False)
+        self.include_second_page = config.get("include_second_page", False)
 
         self.brush_tag = "刷流"
         # 站点独立配置
@@ -146,7 +147,8 @@ class BrushConfig:
             "delete_free_remaining_minutes",
             "qb_category",
             "site_hr_active",
-            "site_skip_tips"
+            "site_skip_tips",
+            "include_second_page"
             # 当新增支持字段时，仅在此处添加字段名
         }
         try:
@@ -225,7 +227,8 @@ class BrushConfig:
     "delete_free_remaining_minutes": 5,
     "qb_category": "刷流",
     "site_hr_active": true,
-    "site_skip_tips": true
+    "site_skip_tips": true,
+    "include_second_page": false
 }]"""
         return desc + config
 
@@ -291,7 +294,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.18"
+    plugin_version = "4.3.19"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1820,6 +1823,22 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'include_second_page',
+                                                            'label': '选种包含第二页',
+                                                        }
+                                                    }
+                                                ]
                                             }
                                         ]
                                     },
@@ -2109,6 +2128,7 @@ class BrushFlowLowFreq(_PluginBase):
             "filter_seeding_torrents": True,
             "delete_when_no_free": False,
             "delete_free_remaining_minutes": 5,
+            "include_second_page": False,
             "free_remaining_time_skip_range": "",
             "interval_upspeed": "",
             "interval_upspeed_check_count": 3,
@@ -2397,13 +2417,23 @@ class BrushFlowLowFreq(_PluginBase):
             logger.warning(f"站点不存在：{siteid}")
             return True
 
+        brush_config = self.__get_brush_config(sitename=siteinfo.name)
+
         logger.info(f"开始获取站点 {siteinfo.name} 的新种子 ...")
-        torrents = self.torrents_chain.browse(domain=siteinfo.domain)
+        if brush_config.include_second_page:
+            torrents = []
+            for page in range(2):
+                page_torrents = self.torrents_chain.browse(domain=siteinfo.domain, page=page)
+                if page_torrents:
+                    torrents.extend(page_torrents)
+                    logger.info(f"站点 {siteinfo.name} 第{page + 1}页获取到 {len(page_torrents)} 个种子")
+                else:
+                    break
+        else:
+            torrents = self.torrents_chain.browse(domain=siteinfo.domain)
         if not torrents:
             logger.info(f"站点 {siteinfo.name} 没有获取到种子")
             return True
-
-        brush_config = self.__get_brush_config(sitename=siteinfo.name)
 
         if brush_config.site_hr_active:
             logger.info(f"站点 {siteinfo.name} 已开启全站H&R选项，所有种子设置为H&R种子")
@@ -4004,6 +4034,7 @@ class BrushFlowLowFreq(_PluginBase):
             "brush_sequential": brush_config.brush_sequential,
             "proxy_delete": brush_config.proxy_delete,
             "filter_seeding_torrents": brush_config.filter_seeding_torrents,
+            "include_second_page": brush_config.include_second_page,
             "delete_when_no_free": brush_config.delete_when_no_free,
             "delete_free_remaining_minutes": brush_config.delete_free_remaining_minutes,
             "active_time_range": brush_config.active_time_range,

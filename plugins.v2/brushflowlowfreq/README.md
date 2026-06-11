@@ -154,6 +154,7 @@
 | 执行周期               | `cron`               | 设置插件刷流的活动周期               | 执行周期固定为 10 分钟，配置项仅用于设置活动周期。例如：`0 0-1 * * FRI,SUN`，建议使用标准缩写（如 `FRI`）表示星期 |
 | 站点顺序刷流           | `brush_sequential`   | 是否按站点顺序刷流                   | 关闭选项时，按站点随机顺序刷流                                                                                    |
 | 排除订阅               | `except_subscribe`   | 刷流时排除订阅内容相关的种子         | **实验性功能**，开启后可能导致刷流时无法正常下载种子                                                              |
+| 选种包含第二页         | `include_second_page` | 是否获取站点第二页种子扩大选种范围   | 默认关闭（仅获取前100个种子）；开启后获取前两页（最多200个种子），提供更大的选种池                                |
 | 动态删除种子           | `proxy_delete`       | 是否启用动态删除种子                 | **实验性功能**，可能导致刷流数据异常，甚至清空数据，请慎重开启。详情见[动态删除规则](#动态删除规则)               |
 | 清除统计数据           | `clear_task`         | 是否清除统计数据                     | 一次性任务，自动重置插件数据页中的所有数据                                                                        |
 | 站点独立配置           | `enable_site_config` | 是否启用站点独立配置                 | 详情见[站点独立配置](#站点独立配置)                                                                               |
@@ -194,6 +195,7 @@
 - `free_remaining_time_skip_range`：免费时间过滤例外时段
 - `seed_time`：做种时间
 - `filter_seeding_torrents`：是否筛选已做种
+- `include_second_page`：选种包含第二页
 - `seed_ratio`：分享率
 - `seed_ratio_check_minutes`：任务添加后分钟数
 - `seed_ratio_min_30m`：任务添加后最低分享率
@@ -266,6 +268,7 @@
     "save_path": "/downloads/site1",
     "proxy_delete": false,
     "filter_seeding_torrents": true,
+    "include_second_page": false,
     "qb_category": "刷流",
     "site_hr_active": true,
     "site_skip_tips": true
