@@ -2872,13 +2872,18 @@ class BrushFlowLowFreq(_PluginBase):
                 delete_message_map = {}
                 delete_summary_messages = []
 
-                # 从下载器实时数据统计正在下载的种子数（用于下载保护）
+                # 统计托管种子中正在下载的个数（用下载器实时数据，不用缓存）
                 downloading_count = 0
                 if brush_config.skip_rules_downloading_threshold > 0:
-                    for torrent in seeding_torrents:
-                        torrent_info = self.__get_torrent_info(torrent)
-                        t_total = torrent_info.get("total_size") or 0
-                        t_downloaded = torrent_info.get("downloaded") or 0
+                    for torrent_hash, task in torrent_tasks.items():
+                        if task.get("deleted"):
+                            continue
+                        live = seeding_torrents_dict.get(torrent_hash)
+                        if not live:
+                            continue
+                        live_info = self.__get_torrent_info(live)
+                        t_total = live_info.get("total_size") or 0
+                        t_downloaded = live_info.get("downloaded") or 0
                         if t_total > 0 and t_downloaded < t_total:
                             downloading_count += 1
 
