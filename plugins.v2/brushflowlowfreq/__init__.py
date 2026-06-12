@@ -2999,6 +2999,7 @@ class BrushFlowLowFreq(_PluginBase):
             # 更新上传量、下载量
             torrent_task.update({
                 "downloaded": torrent_info.get("downloaded"),
+                "total_size": torrent_info.get("total_size"),
                 "uploaded": uploaded,
                 "ratio": torrent_info.get("ratio"),
                 "seeding_time": torrent_info.get("seeding_time"),
@@ -3926,6 +3927,7 @@ class BrushFlowLowFreq(_PluginBase):
             "freedate_diff": None,  # 假设无法从torrent_info直接获取
             "ratio": torrent_info.get("ratio", 0),
             "downloaded": torrent_info.get("downloaded", 0),
+            "total_size": torrent_info.get("total_size", 0),
             "uploaded": torrent_info.get("uploaded", 0),
             "last_check_time": None,
             "last_check_uploaded": None,
