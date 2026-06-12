@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import html
 import json
 import random
@@ -92,8 +93,8 @@ class BrushConfig:
         self.site_hr_active = config.get("site_hr_active", False)
         self.site_skip_tips = config.get("site_skip_tips", False)
         self.include_second_page = config.get("include_second_page", False)
-        self.skip_rules_downloading_threshold = self.__parse_number(config.get("skip_rules_downloading_threshold", 0))
-        self.seed_ratio_speed_protect = self.__parse_number(config.get("seed_ratio_speed_protect", 0))
+        self.skip_rules_downloading_threshold = self.__parse_number(config.get("skip_rules_downloading_threshold", 0)) or 0
+        self.seed_ratio_speed_protect = self.__parse_number(config.get("seed_ratio_speed_protect", 0)) or 0
 
         self.brush_tag = "刷流"
         # 站点独立配置
@@ -300,7 +301,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.24"
+    plugin_version = "4.3.25"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2176,6 +2177,8 @@ class BrushFlowLowFreq(_PluginBase):
             "interval_upspeed_start_minutes": 30,
             "interval_upspeed_continuous": False,
             "interval_upspeed_rehearsal": False,
+            "skip_rules_downloading_threshold": 0,
+            "seed_ratio_speed_protect": 0,
             "freeleech": "free",
             "hr": "yes",
             "enable_site_config": False,
@@ -2396,6 +2399,7 @@ class BrushFlowLowFreq(_PluginBase):
             logger.info(f"开始执行刷流任务 ...")
 
             torrent_tasks: Dict[str, dict] = self.get_data("torrents") or {}
+            self.__normalize_task_hash_keys(torrent_tasks)
             torrents_size = self.__calculate_seeding_torrents_size(torrent_tasks=torrent_tasks)
 
             # 判断能否通过保种体积前置条件
@@ -2518,6 +2522,7 @@ class BrushFlowLowFreq(_PluginBase):
             if not hash_string:
                 logger.warning(f"{torrent.title} 添加刷流任务失败！")
                 continue
+            hash_string = self.__normalize_hash(hash_string)
 
             # 触发刷流下载时间并保存任务信息
             torrent_task = {
@@ -2549,8 +2554,19 @@ class BrushFlowLowFreq(_PluginBase):
                 # "category": torrent.category,
                 "ratio": 0,
                 "downloaded": 0,
+                "total_size": torrent.size,
                 "uploaded": 0,
                 "seeding_time": 0,
+                "last_check_time": None,
+                "last_check_uploaded": None,
+                "last_check_interval_upspeed": None,
+                "last_check_interval_seconds": None,
+                "last_check_interval_uploaded": None,
+                "last_check_interval_upspeed_valid": False,
+                "last_check_interval_reason": "首次检查，暂不计算检查间上传速度",
+                "interval_upspeed_hit_records": [],
+                "first_downloaded_time": None,
+                "first_uploaded_time": None,
                 "deleted": False,
                 "time": time.time()
             }
@@ -2814,6 +2830,8 @@ class BrushFlowLowFreq(_PluginBase):
             logger.info("开始检查刷流下载任务 ...")
             torrent_tasks: Dict[str, dict] = self.get_data("torrents") or {}
             unmanaged_tasks: Dict[str, dict] = self.get_data("unmanaged") or {}
+            self.__normalize_task_hash_keys(torrent_tasks)
+            self.__normalize_task_hash_keys(unmanaged_tasks)
 
             downloader = self.downloader
             seeding_torrents, error = downloader.get_torrents()
@@ -2822,10 +2840,14 @@ class BrushFlowLowFreq(_PluginBase):
                 return
 
             seeding_torrents_dict = {self.__get_hash(torrent): torrent for torrent in seeding_torrents}
+            seeding_torrents_dict = {hash_value: torrent for hash_value, torrent in seeding_torrents_dict.items()
+                                     if hash_value}
 
             # 检查种子刷流标签变更情况
             self.__update_seeding_tasks_based_on_tags(torrent_tasks=torrent_tasks, unmanaged_tasks=unmanaged_tasks,
                                                       seeding_torrents_dict=seeding_torrents_dict)
+            self.__normalize_task_hash_keys(torrent_tasks)
+            self.__normalize_task_hash_keys(unmanaged_tasks)
 
             torrent_check_hashes = list(torrent_tasks.keys())
             if not torrent_tasks or not torrent_check_hashes:
@@ -2841,7 +2863,7 @@ class BrushFlowLowFreq(_PluginBase):
             self.__update_torrent_tasks_state(torrents=check_torrents, torrent_tasks=torrent_tasks)
 
             # 更新刷流任务列表中在下载器中删除的种子为删除状态
-            self.__update_undeleted_torrents_missing_in_downloader(torrent_tasks, torrent_check_hashes, check_torrents)
+            self.__update_undeleted_torrents_missing_in_downloader(torrent_tasks, torrent_check_hashes, seeding_torrents)
 
             # 根据配置的标签进行种子排除
             if check_torrents:
@@ -2873,19 +2895,10 @@ class BrushFlowLowFreq(_PluginBase):
                 delete_summary_messages = []
 
                 # 统计托管种子中正在下载的个数（用下载器实时数据，不用缓存）
-                downloading_count = 0
-                if brush_config.skip_rules_downloading_threshold > 0:
-                    for torrent_hash, task in torrent_tasks.items():
-                        if task.get("deleted"):
-                            continue
-                        live = seeding_torrents_dict.get(torrent_hash)
-                        if not live:
-                            continue
-                        live_info = self.__get_torrent_info(live)
-                        t_total = live_info.get("total_size") or 0
-                        t_downloaded = live_info.get("downloaded") or 0
-                        if t_total > 0 and t_downloaded < t_total:
-                            downloading_count += 1
+                downloading_count = self.__count_managed_downloading_torrents(
+                    torrent_tasks=torrent_tasks,
+                    seeding_torrents_dict=seeding_torrents_dict
+                )
 
                 # 如果配置了动态删除以及删种阈值，则根据动态删种进行分组处理
                 if brush_config.proxy_delete and brush_config.delete_size_range:
@@ -3028,6 +3041,249 @@ class BrushFlowLowFreq(_PluginBase):
                 "last_check_interval_upspeed_valid": interval_valid,
                 "last_check_interval_reason": interval_reason
             })
+
+    @classmethod
+    def __normalize_hash(cls, hash_value: Any) -> str:
+        """
+        统一种子hash格式，避免下载器返回大小写不同导致任务匹配失败。
+        """
+        return str(hash_value).strip().lower() if hash_value else ""
+
+    @classmethod
+    def __extract_hash_from_magnet(cls, magnet_url: str) -> str:
+        """
+        从磁力链接中提取BTIH v1 hash，作为qB标签反查失败时的确定性兜底。
+        """
+        if not magnet_url or not str(magnet_url).startswith("magnet:"):
+            return ""
+        try:
+            query_params = parse_qs(urlparse(str(magnet_url)).query)
+            xt_values = query_params.get("xt") or []
+            for xt_value in xt_values:
+                match = re.search(r"urn:btih:([a-fA-F0-9]{40})", xt_value)
+                if match:
+                    return cls.__normalize_hash(match.group(1))
+                match = re.search(r"urn:btih:([a-zA-Z2-7]{32})", xt_value)
+                if match:
+                    return base64.b32decode(match.group(1).upper()).hex()
+        except Exception:
+            return ""
+        return ""
+
+    @classmethod
+    def __bencoded_value_end(cls, data: bytes, start: int) -> int:
+        """
+        返回从 start 开始的 bencode 值结束位置，用于提取 .torrent info 字典原始字节。
+        """
+        if start < 0 or start >= len(data):
+            return -1
+
+        token = data[start:start + 1]
+        if token == b"i":
+            end = data.find(b"e", start + 1)
+            return end + 1 if end != -1 else -1
+
+        if token in (b"l", b"d"):
+            index = start + 1
+            while index < len(data) and data[index:index + 1] != b"e":
+                index = cls.__bencoded_value_end(data, index)
+                if index == -1:
+                    return -1
+            return index + 1 if index < len(data) else -1
+
+        if token.isdigit():
+            colon = data.find(b":", start)
+            if colon == -1:
+                return -1
+            try:
+                length = int(data[start:colon])
+            except ValueError:
+                return -1
+            end = colon + 1 + length
+            return end if end <= len(data) else -1
+
+        return -1
+
+    @classmethod
+    def __extract_info_hash_from_torrent_content(cls, torrent_content: Any) -> str:
+        """
+        从 .torrent bencode 内容中提取 v1 infohash。
+        """
+        if not isinstance(torrent_content, (bytes, bytearray)):
+            return ""
+
+        data = bytes(torrent_content)
+        if not data.startswith(b"d"):
+            return ""
+
+        index = 1
+        while index < len(data) and data[index:index + 1] != b"e":
+            if not data[index:index + 1].isdigit():
+                return ""
+
+            colon = data.find(b":", index)
+            if colon == -1:
+                return ""
+            try:
+                key_length = int(data[index:colon])
+            except ValueError:
+                return ""
+
+            key_start = colon + 1
+            key_end = key_start + key_length
+            if key_end > len(data):
+                return ""
+
+            key = data[key_start:key_end]
+            value_start = key_end
+            value_end = cls.__bencoded_value_end(data, value_start)
+            if value_end == -1:
+                return ""
+
+            if key == b"info":
+                return hashlib.sha1(data[value_start:value_end]).hexdigest()
+
+            index = value_end
+
+        return ""
+
+    @classmethod
+    def __extract_hash_from_download_content(cls, torrent_content: Any) -> str:
+        """
+        从添加给下载器的内容中提取可确定的 hash。磁力链接和 .torrent 文件均可兜底。
+        """
+        magnet_hash = cls.__extract_hash_from_magnet(torrent_content) if isinstance(torrent_content, str) else ""
+        if magnet_hash:
+            return magnet_hash
+        return cls.__extract_info_hash_from_torrent_content(torrent_content)
+
+    @classmethod
+    def __merge_torrent_task(cls, existing_task: dict, incoming_task: dict) -> dict:
+        """
+        合并大小写不同但实际相同hash的任务记录。保留原任务的站点/详情页等元数据，
+        同时吸收新记录中的实时统计字段。
+        """
+        if not existing_task:
+            return incoming_task or {}
+        if not incoming_task:
+            return existing_task
+
+        merged_task = dict(existing_task)
+        for key, value in incoming_task.items():
+            if value in (None, ""):
+                continue
+            if key == "deleted":
+                merged_task[key] = bool(existing_task.get("deleted")) and bool(value)
+                continue
+            if key == "deleted_time" and not merged_task.get("deleted"):
+                continue
+            if merged_task.get(key) in (None, "", 0, [], {}):
+                merged_task[key] = value
+                continue
+            if key in {
+                "downloaded", "uploaded", "ratio", "seeding_time", "total_size",
+                "last_check_time", "last_check_uploaded", "last_check_interval_upspeed",
+                "last_check_interval_seconds", "last_check_interval_uploaded",
+                "last_check_interval_upspeed_valid", "last_check_interval_reason",
+                "interval_upspeed_hit_records", "first_downloaded_time",
+                "first_uploaded_time"
+            }:
+                merged_task[key] = value
+        return merged_task
+
+    def __normalize_task_hash_keys(self, torrent_tasks: Dict[str, dict]) -> None:
+        """
+        就地规范化任务字典的hash键，并合并大小写不同的重复任务。
+        """
+        if not torrent_tasks:
+            return
+
+        normalized_tasks = {}
+        for hash_value, task in list(torrent_tasks.items()):
+            normalized_hash = self.__normalize_hash(hash_value)
+            if not normalized_hash:
+                continue
+            if normalized_hash in normalized_tasks:
+                normalized_tasks[normalized_hash] = self.__merge_torrent_task(
+                    normalized_tasks[normalized_hash],
+                    task
+                )
+            else:
+                normalized_tasks[normalized_hash] = task
+
+        torrent_tasks.clear()
+        torrent_tasks.update(normalized_tasks)
+
+    def __count_managed_downloading_torrents(self, torrent_tasks: Dict[str, dict],
+                                             seeding_torrents_dict: Dict[str, Any]) -> int:
+        """
+        从下载器实时数据中统计插件托管且未完成下载的任务数量。
+        """
+        if not torrent_tasks or not seeding_torrents_dict:
+            return 0
+
+        downloading_count = 0
+        for torrent_hash, task in torrent_tasks.items():
+            if task.get("deleted"):
+                continue
+            live = seeding_torrents_dict.get(self.__normalize_hash(torrent_hash))
+            if not live:
+                continue
+            live_info = self.__get_torrent_info(live)
+            total_size = live_info.get("total_size") or 0
+            downloaded = live_info.get("downloaded") or 0
+            if total_size > 0 and downloaded < total_size:
+                downloading_count += 1
+        return downloading_count
+
+    def __get_downloader_hash_snapshot(self, downloader) -> Optional[Set[str]]:
+        """
+        获取下载器当前 hash 集。下载器不支持或连接异常时返回 None。
+        """
+        if not downloader or not hasattr(downloader, "get_torrents"):
+            return None
+
+        try:
+            torrents_result = downloader.get_torrents()
+            if isinstance(torrents_result, tuple):
+                torrents = torrents_result[0] if len(torrents_result) > 0 else []
+                error = torrents_result[1] if len(torrents_result) > 1 else None
+                if error:
+                    logger.warning(f"获取下载器种子列表失败，无法通过新增hash差集定位任务：{error}")
+                    return None
+            else:
+                torrents = torrents_result
+
+            return set(self.__get_all_hashes(torrents or []))
+        except Exception as e:
+            logger.warning(f"获取下载器种子列表异常，无法通过新增hash差集定位任务：{str(e)}")
+            return None
+
+    def __get_added_hash_by_snapshot_diff(self, downloader, before_hashes: Optional[Set[str]],
+                                          retries: int = 5, interval: int = 1) -> str:
+        """
+        qB 标签异步未刷新时，通过添加前后下载器全量 hash 差集定位新增任务。
+        """
+        if before_hashes is None:
+            return ""
+
+        for retry_index in range(retries):
+            after_hashes = self.__get_downloader_hash_snapshot(downloader=downloader)
+            if after_hashes is None:
+                return ""
+
+            added_hashes = sorted(hash_value for hash_value in after_hashes - before_hashes if hash_value)
+            if len(added_hashes) == 1:
+                return added_hashes[0]
+            if len(added_hashes) > 1:
+                logger.warning(
+                    f"qB添加任务后发现多个新增hash，无法唯一定位刷流任务：{','.join(added_hashes[:10])}"
+                )
+                return ""
+            if retry_index < retries - 1:
+                time.sleep(interval)
+
+        return ""
 
     def __update_seeding_tasks_based_on_tags(self, torrent_tasks: Dict[str, dict], unmanaged_tasks: Dict[str, dict],
                                              seeding_torrents_dict: Dict[str, Any]):
@@ -3883,9 +4139,12 @@ class BrushFlowLowFreq(_PluginBase):
         处理已经被删除，但是任务记录中还没有被标记删除的种子
         """
         # 先通过获取的全量种子，判断已经被删除，但是任务记录中还没有被标记删除的种子
-        torrent_all_hashes = self.__get_all_hashes(torrents)
-        missing_hashes = [hash_value for hash_value in torrent_check_hashes if hash_value not in torrent_all_hashes]
-        undeleted_hashes = [hash_value for hash_value in missing_hashes if not torrent_tasks[hash_value].get("deleted")]
+        torrent_all_hashes = set(self.__get_all_hashes(torrents))
+        missing_hashes = [hash_value for hash_value in torrent_check_hashes
+                          if self.__normalize_hash(hash_value) not in torrent_all_hashes]
+        undeleted_hashes = [hash_value for hash_value in missing_hashes if
+                            self.__normalize_hash(hash_value) in torrent_tasks
+                            and not torrent_tasks[self.__normalize_hash(hash_value)].get("deleted")]
 
         if not undeleted_hashes:
             return
@@ -3893,6 +4152,7 @@ class BrushFlowLowFreq(_PluginBase):
         # 初始化汇总信息
         delete_tasks = []
         for hash_value in undeleted_hashes:
+            hash_value = self.__normalize_hash(hash_value)
             # 获取对应的任务信息
             torrent_task = torrent_tasks[hash_value]
             # 标记为已删除
@@ -4040,6 +4300,8 @@ class BrushFlowLowFreq(_PluginBase):
             "interval_upspeed_check_count": "检查间低速观察次数",
             "interval_upspeed_low_count": "检查间低速命中次数",
             "interval_upspeed_start_minutes": "有上传数据后开始低速统计分钟数",
+            "skip_rules_downloading_threshold": "下载保护阈值",
+            "seed_ratio_speed_protect": "分享率保护速度阈值",
             "seed_inactivetime": "未活动时间",
             "up_speed": "单任务上传限速",
             "dl_speed": "单任务下载限速",
@@ -4301,6 +4563,8 @@ class BrushFlowLowFreq(_PluginBase):
                 else:
                     logger.error("尝试通过MP下载种子失败，继续尝试传递种子地址到下载器进行下载")
             if torrent_content:
+                before_hashes = self.__get_downloader_hash_snapshot(downloader=downloader)
+                content_hash = self.__extract_hash_from_download_content(torrent_content=torrent_content)
                 state = downloader.add_torrent(content=torrent_content,
                                                download_dir=download_dir,
                                                cookie=cookies,
@@ -4312,11 +4576,24 @@ class BrushFlowLowFreq(_PluginBase):
                     return None
                 else:
                     # 获取种子Hash
-                    torrent_hash = downloader.get_torrent_id_by_tag(tags=tag)
+                    torrent_hash = None
+                    for retry_index in range(5):
+                        torrent_hash = downloader.get_torrent_id_by_tag(tags=tag)
+                        if torrent_hash:
+                            break
+                        if retry_index < 4:
+                            time.sleep(1)
+                    if not torrent_hash:
+                        torrent_hash = self.__get_added_hash_by_snapshot_diff(
+                            downloader=downloader,
+                            before_hashes=before_hashes
+                        )
+                    if not torrent_hash:
+                        torrent_hash = content_hash
                     if not torrent_hash:
                         logger.error(f"{brush_config.downloader} 获取种子Hash失败，详细信息请查看 README")
                         return None
-                    return torrent_hash
+                    return self.__normalize_hash(torrent_hash)
             return None
 
         elif self.downloader_helper.is_downloader("transmission", service=self.service_info):
@@ -4341,7 +4618,7 @@ class BrushFlowLowFreq(_PluginBase):
                         downloader.change_torrent(hash_string=torrent.hashString,
                                                   upload_limit=up_speed,
                                                   download_limit=down_speed)
-                    return torrent.hashString
+                    return self.__normalize_hash(torrent.hashString)
         return None
 
     def __qb_torrents_reannounce(self, torrent_hashes: List[str]):
@@ -4367,8 +4644,9 @@ class BrushFlowLowFreq(_PluginBase):
         获取种子hash
         """
         try:
-            return torrent.get("hash") if self.downloader_helper.is_downloader("qbittorrent", service=self.service_info) \
+            hash_value = torrent.get("hash") if self.downloader_helper.is_downloader("qbittorrent", service=self.service_info) \
                 else torrent.hashString
+            return self.__normalize_hash(hash_value)
         except Exception as e:
             print(str(e))
             return ""
@@ -4387,6 +4665,7 @@ class BrushFlowLowFreq(_PluginBase):
                 hash_value = torrent.get("hash") if self.downloader_helper.is_downloader("qbittorrent",
                                                                                          service=self.service_info) \
                     else torrent.hashString
+                hash_value = self.__normalize_hash(hash_value)
                 if hash_value:
                     all_hashes.append(hash_value)
             return all_hashes
