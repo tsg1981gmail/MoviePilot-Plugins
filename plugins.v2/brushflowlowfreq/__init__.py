@@ -300,7 +300,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.23"
+    plugin_version = "4.3.24"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2872,6 +2872,16 @@ class BrushFlowLowFreq(_PluginBase):
                 delete_message_map = {}
                 delete_summary_messages = []
 
+                # 从下载器实时数据统计正在下载的种子数（用于下载保护）
+                downloading_count = 0
+                if brush_config.skip_rules_downloading_threshold > 0:
+                    for torrent in seeding_torrents:
+                        torrent_info = self.__get_torrent_info(torrent)
+                        t_total = torrent_info.get("total_size") or 0
+                        t_downloaded = torrent_info.get("downloaded") or 0
+                        if t_total > 0 and t_downloaded < t_total:
+                            downloading_count += 1
+
                 # 如果配置了动态删除以及删种阈值，则根据动态删种进行分组处理
                 if brush_config.proxy_delete and brush_config.delete_size_range:
                     logger.info("已开启动态删种，按系统默认动态删种条件开始检查任务")
@@ -2887,7 +2897,8 @@ class BrushFlowLowFreq(_PluginBase):
                     proxy_delete_hashes = self.__delete_torrent_for_proxy(torrents=proxy_check_torrents,
                                                                           torrent_tasks=torrent_tasks,
                                                                           delete_message_map=delete_message_map,
-                                                                          delete_summary_messages=delete_summary_messages) or []
+                                                                          delete_summary_messages=delete_summary_messages,
+                                                                          downloading_count=downloading_count) or []
                     need_delete_hashes.extend(proxy_delete_hashes)
                 # 否则均认为是没有开启动态删种
                 else:
@@ -2895,7 +2906,7 @@ class BrushFlowLowFreq(_PluginBase):
                     not_proxy_delete_hashes = self.__delete_torrent_for_evaluate_conditions(torrents=check_torrents,
                                                                                             torrent_tasks=torrent_tasks,
                                                                                             delete_message_map=delete_message_map,
-                                                                                            all_torrent_tasks=torrent_tasks) or []
+                                                                                            downloading_count=downloading_count) or []
                     need_delete_hashes.extend(not_proxy_delete_hashes)
 
                 if need_delete_hashes:
@@ -3128,7 +3139,7 @@ class BrushFlowLowFreq(_PluginBase):
         return downloaded is not None and total_size is not None and total_size > 0 and downloaded >= total_size
 
     def __evaluate_conditions_for_delete(self, site_name: str, torrent_info: dict, torrent_task: dict,
-                                          all_torrent_tasks: Dict[str, dict] = None) \
+                                          downloading_count: int = 0) \
             -> Tuple[bool, str]:
         """
         评估删除条件并返回是否应删除种子及其原因
@@ -3163,17 +3174,8 @@ class BrushFlowLowFreq(_PluginBase):
         # 基于首次有上传数据的时间计算已过分钟数（无上传数据时返回 0，规则不触发）
         first_uploaded_time = torrent_task.get("first_uploaded_time")
         uploaded_elapsed_minutes = self.__get_task_elapsed_minutes(first_uploaded_time) if first_uploaded_time else 0
-        # 下载保护：统计当前下载中的种子数
-        downloading_count = 0
+        # 下载保护：使用 check() 中从下载器实时数据统计的下载中种子数
         if brush_config.skip_rules_downloading_threshold > 0:
-            managed_tasks = all_torrent_tasks if all_torrent_tasks else (self.get_data("torrents") or {})
-            for task_hash, task in managed_tasks.items():
-                if task.get("deleted"):
-                    continue
-                task_downloaded = task.get("downloaded") or 0
-                task_total = task.get("total_size") or 0
-                if task_total > 0 and task_downloaded < task_total:
-                    downloading_count += 1
             download_protection_active = downloading_count <= brush_config.skip_rules_downloading_threshold
         else:
             download_protection_active = False
@@ -3543,7 +3545,7 @@ class BrushFlowLowFreq(_PluginBase):
     def __delete_torrent_for_evaluate_conditions(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                                  proxy_delete: bool = False,
                                                  delete_message_map: Optional[Dict[str, List[dict]]] = None,
-                                                 all_torrent_tasks: Dict[str, dict] = None) -> List:
+                                                 downloading_count: int = 0) -> List:
         """
         根据条件删除种子并获取已删除列表
         """
@@ -3565,7 +3567,7 @@ class BrushFlowLowFreq(_PluginBase):
             should_delete, reason = self.__evaluate_conditions_for_delete(site_name=site_name,
                                                                           torrent_info=torrent_info,
                                                                           torrent_task=torrent_task,
-                                                                          all_torrent_tasks=all_torrent_tasks)
+                                                                          downloading_count=downloading_count)
             if should_delete:
                 delete_hashes.append(torrent_hash)
                 reason = "触发动态删除阈值，" + reason if proxy_delete else reason
@@ -3625,7 +3627,8 @@ class BrushFlowLowFreq(_PluginBase):
 
     def __delete_torrent_for_proxy(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                    delete_message_map: Optional[Dict[str, List[dict]]] = None,
-                                   delete_summary_messages: Optional[List[dict]] = None) -> List:
+                                   delete_summary_messages: Optional[List[dict]] = None,
+                                   downloading_count: int = 0) -> List:
         """
         动态删除种子，删除规则如下；
         - 不管做种体积是否超过设定的动态删除阈值，默认优先执行排除H&R种子后满足「下载超时时间」的种子
@@ -3697,7 +3700,7 @@ class BrushFlowLowFreq(_PluginBase):
             not_proxy_delete_hashes = self.__delete_torrent_for_evaluate_conditions(torrents=not_proxy_delete_torrents,
                                                                                     torrent_tasks=torrent_tasks,
                                                                                     delete_message_map=delete_message_map,
-                                                                                    all_torrent_tasks=torrent_tasks) or []
+                                                                                    downloading_count=downloading_count) or []
             need_delete_hashes.extend(not_proxy_delete_hashes)
             total_torrent_size -= sum(
                 torrent_info_map[self.__get_hash(torrent)].get("total_size", 0) for torrent in not_proxy_delete_torrents
@@ -3709,7 +3712,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                                                 torrent_tasks=torrent_tasks,
                                                                                 proxy_delete=True,
                                                                                 delete_message_map=delete_message_map,
-                                                                                all_torrent_tasks=torrent_tasks) or []
+                                                                                downloading_count=downloading_count) or []
             need_delete_hashes.extend(proxy_delete_hashes)
             total_torrent_size -= sum(
                 torrent_info_map[self.__get_hash(torrent)].get("total_size", 0) for torrent in proxy_delete_torrents if
