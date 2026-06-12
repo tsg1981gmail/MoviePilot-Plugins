@@ -3155,16 +3155,12 @@ class BrushFlowLowFreq(_PluginBase):
 
         task_elapsed_minutes = self.__get_task_elapsed_minutes(torrent_task.get("time"))
         ratio_check_minutes = brush_config.seed_ratio_check_minutes if brush_config.seed_ratio_check_minutes else 30
-        # 基于首次有下载数据的时间计算已过分钟数（存量无记录时回退到任务添加时间）
+        # 基于首次有下载数据的时间计算已过分钟数（无下载数据时返回 0，规则不触发）
         first_downloaded_time = torrent_task.get("first_downloaded_time")
-        downloaded_elapsed_minutes = self.__get_task_elapsed_minutes(
-            first_downloaded_time if first_downloaded_time else torrent_task.get("time")
-        )
-        # 基于首次有上传数据的时间计算已过分钟数（存量无记录时回退到任务添加时间）
+        downloaded_elapsed_minutes = self.__get_task_elapsed_minutes(first_downloaded_time) if first_downloaded_time else 0
+        # 基于首次有上传数据的时间计算已过分钟数（无上传数据时返回 0，规则不触发）
         first_uploaded_time = torrent_task.get("first_uploaded_time")
-        uploaded_elapsed_minutes = self.__get_task_elapsed_minutes(
-            first_uploaded_time if first_uploaded_time else torrent_task.get("time")
-        )
+        uploaded_elapsed_minutes = self.__get_task_elapsed_minutes(first_uploaded_time) if first_uploaded_time else 0
         # 下载保护：统计当前下载中的种子数
         downloading_count = 0
         if brush_config.skip_rules_downloading_threshold > 0:
@@ -3199,8 +3195,7 @@ class BrushFlowLowFreq(_PluginBase):
         )
         if download_protection_active:
             interval_should_delete = False
-            if not interval_reason:
-                interval_reason = "下载保护已跳过检查间上传速度规则"
+            interval_reason = "下载保护已跳过检查间上传速度规则"
 
         reason = "未能满足设置的删除条件"
 
