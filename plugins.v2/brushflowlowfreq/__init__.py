@@ -92,6 +92,8 @@ class BrushConfig:
         self.site_hr_active = config.get("site_hr_active", False)
         self.site_skip_tips = config.get("site_skip_tips", False)
         self.include_second_page = config.get("include_second_page", False)
+        self.skip_rules_downloading_threshold = self.__parse_number(config.get("skip_rules_downloading_threshold", 0))
+        self.seed_ratio_speed_protect = self.__parse_number(config.get("seed_ratio_speed_protect", 0))
 
         self.brush_tag = "刷流"
         # 站点独立配置
@@ -148,7 +150,9 @@ class BrushConfig:
             "qb_category",
             "site_hr_active",
             "site_skip_tips",
-            "include_second_page"
+            "include_second_page",
+            "skip_rules_downloading_threshold",
+            "seed_ratio_speed_protect"
             # 当新增支持字段时，仅在此处添加字段名
         }
         try:
@@ -228,7 +232,9 @@ class BrushConfig:
     "qb_category": "刷流",
     "site_hr_active": true,
     "site_skip_tips": true,
-    "include_second_page": false
+    "include_second_page": false,
+    "skip_rules_downloading_threshold": 0,
+    "seed_ratio_speed_protect": 0
 }]"""
         return desc + config
 
@@ -294,7 +300,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.20"
+    plugin_version = "4.3.21"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1529,8 +1535,8 @@ class BrushFlowLowFreq(_PluginBase):
                                                         'component': 'VTextField',
                                                         'props': {
                                                             'model': 'seed_ratio_check_minutes',
-                                                            'label': '任务添加后分钟数',
-                                                            'placeholder': '如：30，达到后开始判断低分享率'
+                                                            'label': '有下载数据后分钟数',
+                                                            'placeholder': '如：30，首次有下载数据后开始判断低分享率'
                                                         }
                                                     }
                                                 ]
@@ -1548,6 +1554,23 @@ class BrushFlowLowFreq(_PluginBase):
                                                             'model': 'seed_ratio_min_30m',
                                                             'label': '任务添加后最低分享率',
                                                             'placeholder': '达到上述分钟数后，低于时删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_speed_protect',
+                                                            'label': '分享率保护速度阈值（KB/s）',
+                                                            'placeholder': '如：100，平均上传速度≥100KB/s时即使分享率低也不删，0=关闭'
                                                         }
                                                     }
                                                 ]
@@ -1703,8 +1726,8 @@ class BrushFlowLowFreq(_PluginBase):
                                                         'component': 'VTextField',
                                                         'props': {
                                                             'model': 'interval_upspeed_start_minutes',
-                                                            'label': '添加后多少分钟开始低速统计',
-                                                            'placeholder': '如：30，达到后开始记录'
+                                                            'label': '有上传数据后开始低速统计分钟数',
+                                                            'placeholder': '如：30，首次有上传数据后开始记录'
                                                         }
                                                     }
                                                 ]
@@ -1754,6 +1777,23 @@ class BrushFlowLowFreq(_PluginBase):
                                                         'props': {
                                                             'model': 'interval_upspeed_rehearsal',
                                                             'label': '检查间低速演练模式（只提醒不删）',
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'skip_rules_downloading_threshold',
+                                                            'label': '下载保护阈值',
+                                                            'placeholder': '如：3，下载中种子数≤3时跳过分享率和上传速度检查，0=关闭'
                                                         }
                                                     }
                                                 ]
@@ -2923,6 +2963,15 @@ class BrushFlowLowFreq(_PluginBase):
             torrent_info = self.__get_torrent_info(torrent)
             check_time = int(time.time())
             uploaded = torrent_info.get("uploaded") or 0
+            downloaded = torrent_info.get("downloaded") or 0
+
+            # 记录首次有下载数据的时间（存量迁移 + 新种子追踪）
+            if torrent_task.get("first_downloaded_time") is None and downloaded > 0:
+                torrent_task["first_downloaded_time"] = check_time
+            # 记录首次有上传数据的时间（存量迁移 + 新种子追踪）
+            if torrent_task.get("first_uploaded_time") is None and uploaded > 0:
+                torrent_task["first_uploaded_time"] = check_time
+
             last_check_uploaded = torrent_task.get("last_check_uploaded")
             last_check_time = torrent_task.get("last_check_time")
 
@@ -3105,12 +3154,52 @@ class BrushFlowLowFreq(_PluginBase):
 
         task_elapsed_minutes = self.__get_task_elapsed_minutes(torrent_task.get("time"))
         ratio_check_minutes = brush_config.seed_ratio_check_minutes if brush_config.seed_ratio_check_minutes else 30
+        # 基于首次有下载数据的时间计算已过分钟数（存量无记录时回退到任务添加时间）
+        first_downloaded_time = torrent_task.get("first_downloaded_time")
+        downloaded_elapsed_minutes = self.__get_task_elapsed_minutes(
+            first_downloaded_time if first_downloaded_time else torrent_task.get("time")
+        )
+        # 基于首次有上传数据的时间计算已过分钟数（存量无记录时回退到任务添加时间）
+        first_uploaded_time = torrent_task.get("first_uploaded_time")
+        uploaded_elapsed_minutes = self.__get_task_elapsed_minutes(
+            first_uploaded_time if first_uploaded_time else torrent_task.get("time")
+        )
+        # 下载保护：统计当前下载中的种子数
+        downloading_count = 0
+        if brush_config.skip_rules_downloading_threshold > 0:
+            managed_tasks = self.get_data("torrents") or {}
+            for task_hash, task in managed_tasks.items():
+                if task.get("deleted"):
+                    continue
+                task_downloaded = task.get("downloaded") or 0
+                task_total = task.get("total_size") or 0
+                if task_total > 0 and task_downloaded < task_total:
+                    downloading_count += 1
+            download_protection_active = downloading_count <= brush_config.skip_rules_downloading_threshold
+        else:
+            download_protection_active = False
+        if download_protection_active:
+            logger.info(
+                f"下载中种子数 {downloading_count} ≤ 阈值 {brush_config.skip_rules_downloading_threshold}，"
+                f"最低分享率/检查间上传速度规则已跳过（站点：{site_name}）"
+            )
+        # 分享率速度保护：avg_upspeed 达标时豁免最低分享率规则
+        speed_protection_active = False
+        if (brush_config.seed_ratio_speed_protect and brush_config.seed_ratio_speed_protect > 0
+                and torrent_info.get("avg_upspeed") is not None):
+            avg_upspeed_kb = float(torrent_info.get("avg_upspeed")) / 1024
+            if avg_upspeed_kb >= float(brush_config.seed_ratio_speed_protect):
+                speed_protection_active = True
         interval_should_delete, interval_reason = self.__evaluate_interval_upspeed_condition_for_delete(
             site_name=site_name,
             brush_config=brush_config,
             torrent_task=torrent_task,
-            task_elapsed_minutes=task_elapsed_minutes
+            task_elapsed_minutes=uploaded_elapsed_minutes if not download_protection_active else 0
         )
+        if download_protection_active:
+            interval_should_delete = False
+            if not interval_reason:
+                interval_reason = "下载保护已跳过检查间上传速度规则"
 
         reason = "未能满足设置的删除条件"
 
@@ -3127,10 +3216,12 @@ class BrushFlowLowFreq(_PluginBase):
                               f"大于 {brush_config.hr_seed_time} 小时")
             if brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
                 return True, f"H&R种子，分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
-            if (brush_config.seed_ratio_min_30m and task_elapsed_minutes is not None
-                    and task_elapsed_minutes >= float(ratio_check_minutes)
+            if (brush_config.seed_ratio_min_30m and not download_protection_active
+                    and not speed_protection_active
+                    and downloaded_elapsed_minutes is not None
+                    and downloaded_elapsed_minutes >= float(ratio_check_minutes)
                     and ratio is not None and ratio < float(brush_config.seed_ratio_min_30m)):
-                return True, (f"H&R种子，任务添加 {task_elapsed_minutes:.0f} 分钟后分享率 {ratio:.2f}，"
+                return True, (f"H&R种子，有下载数据 {downloaded_elapsed_minutes:.0f} 分钟后分享率 {ratio:.2f}，"
                               f"低于 {brush_config.seed_ratio_min_30m}")
             return False, "H&R种子，未能满足设置的H&R删除条件"
 
@@ -3140,10 +3231,12 @@ class BrushFlowLowFreq(_PluginBase):
             reason = f"做种时间 {seeding_time / 3600:.1f} 小时，大于 {brush_config.seed_time} 小时"
         elif brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
             reason = f"分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
-        elif (brush_config.seed_ratio_min_30m and task_elapsed_minutes is not None
-              and task_elapsed_minutes >= float(ratio_check_minutes)
+        elif (brush_config.seed_ratio_min_30m and not download_protection_active
+              and not speed_protection_active
+              and downloaded_elapsed_minutes is not None
+              and downloaded_elapsed_minutes >= float(ratio_check_minutes)
               and ratio is not None and ratio < float(brush_config.seed_ratio_min_30m)):
-            reason = (f"任务添加 {task_elapsed_minutes:.0f} 分钟后分享率 {ratio:.2f}，"
+            reason = (f"有下载数据 {downloaded_elapsed_minutes:.0f} 分钟后分享率 {ratio:.2f}，"
                       f"低于 {brush_config.seed_ratio_min_30m}")
         elif brush_config.seed_size and torrent_info.get("uploaded") >= float(brush_config.seed_size) * 1024 ** 3:
             reason = f"上传量 {torrent_info.get('uploaded') / 1024 ** 3:.1f} GB，大于 {brush_config.seed_size} GB"
@@ -3261,10 +3354,10 @@ class BrushFlowLowFreq(_PluginBase):
         start_minutes = max(0.0, start_minutes)
 
         if task_elapsed_minutes is None:
-            return False, "检查间上传速度：任务添加时间无效，已跳过低速统计"
+            return False, "检查间上传速度：有上传数据时间无效，已跳过低速统计"
 
         if task_elapsed_minutes < start_minutes:
-            return False, (f"检查间上传速度：任务添加 {task_elapsed_minutes:.0f} 分钟，"
+            return False, (f"检查间上传速度：有上传数据 {task_elapsed_minutes:.0f} 分钟，"
                            f"未到统计起始 {start_minutes:.0f} 分钟")
 
         interval_valid = bool(torrent_task.get("last_check_interval_upspeed_valid"))
@@ -3842,6 +3935,8 @@ class BrushFlowLowFreq(_PluginBase):
             "last_check_interval_upspeed_valid": False,
             "last_check_interval_reason": "首次检查，暂不计算检查间上传速度",
             "interval_upspeed_hit_records": [],
+            "first_downloaded_time": None,
+            "first_uploaded_time": None,
             "deleted": False,
             "time": torrent_info.get("add_on", time.time())
         }
@@ -3933,7 +4028,7 @@ class BrushFlowLowFreq(_PluginBase):
             "interval_upspeed": "检查间上传速度阈值",
             "interval_upspeed_check_count": "检查间低速观察次数",
             "interval_upspeed_low_count": "检查间低速命中次数",
-            "interval_upspeed_start_minutes": "添加后开始低速统计分钟数",
+            "interval_upspeed_start_minutes": "有上传数据后开始低速统计分钟数",
             "seed_inactivetime": "未活动时间",
             "up_speed": "单任务上传限速",
             "dl_speed": "单任务下载限速",
@@ -4012,6 +4107,8 @@ class BrushFlowLowFreq(_PluginBase):
             "hr_seed_time": brush_config.hr_seed_time,
             "seed_ratio": brush_config.seed_ratio,
             "seed_ratio_check_minutes": brush_config.seed_ratio_check_minutes,
+            "skip_rules_downloading_threshold": brush_config.skip_rules_downloading_threshold,
+            "seed_ratio_speed_protect": brush_config.seed_ratio_speed_protect,
             "seed_ratio_min_30m": brush_config.seed_ratio_min_30m,
             "seed_size": brush_config.seed_size,
             "download_time": brush_config.download_time,
