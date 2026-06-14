@@ -363,7 +363,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.26"
+    plugin_version = "4.3.27"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -3976,6 +3976,10 @@ class BrushFlowLowFreq(_PluginBase):
         except (TypeError, ValueError):
             return default_value
 
+    @staticmethod
+    def __yield_guard_rehearsal_reason(reason: str) -> str:
+        return f"上传收益保护演练模式：{reason}，不实际执行"
+
     def __evaluate_yield_guard_for_delete(self, site_name: str, brush_config: BrushConfig,
                                           torrent_info: dict, torrent_task: dict) -> Tuple[bool, str]:
         """
@@ -4031,6 +4035,10 @@ class BrushFlowLowFreq(_PluginBase):
                 final_action = self.__yield_guard_action_value(brush_config.yield_guard_final_action, "delete")
                 if final_action == "delete":
                     reason = f"上传收益保护：低收益，已超过快速淘汰窗口，连续 {bad_streak} 次，最终删除"
+                    if brush_config.yield_guard_rehearsal:
+                        reason = self.__yield_guard_rehearsal_reason(reason)
+                        torrent_task["yield_guard_last_reason"] = reason
+                        return False, reason
                     torrent_task["yield_guard_last_reason"] = reason
                     return True, reason
                 reason = f"上传收益保护：低收益，已超过快速淘汰窗口，动作 {final_action}"
@@ -4111,6 +4119,10 @@ class BrushFlowLowFreq(_PluginBase):
             torrent_task["yield_guard_paused_time"] = time.time()
             return False, reason
         if action == "delete":
+            if brush_config.yield_guard_rehearsal:
+                reason = self.__yield_guard_rehearsal_reason(reason)
+                torrent_task["yield_guard_last_reason"] = reason
+                return False, reason
             return True, reason
         return False, reason
 
