@@ -363,7 +363,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.29"
+    plugin_version = "4.3.30"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2845,7 +2845,7 @@ class BrushFlowLowFreq(_PluginBase):
                 return
 
             # 判断能否通过刷流前置条件
-            pre_condition_passed, reason = self.__evaluate_pre_conditions_for_brush()
+            pre_condition_passed, reason = self.__evaluate_pre_conditions_for_brush(include_yield_guard=False)
             self.__log_brush_conditions(passed=pre_condition_passed, reason=reason)
             if not pre_condition_passed:
                 logger.info(f"刷流任务执行完成")
@@ -2931,7 +2931,10 @@ class BrushFlowLowFreq(_PluginBase):
         # 过滤种子
         for torrent in torrents:
             # 判断能否通过刷流前置条件
-            pre_condition_passed, reason = self.__evaluate_pre_conditions_for_brush(include_network_conditions=False)
+            pre_condition_passed, reason = self.__evaluate_pre_conditions_for_brush(
+                sitename=siteinfo.name,
+                include_network_conditions=False
+            )
             self.__log_brush_conditions(passed=pre_condition_passed, reason=reason)
             if not pre_condition_passed:
                 return False
@@ -3071,7 +3074,8 @@ class BrushFlowLowFreq(_PluginBase):
 
         return True, None
 
-    def __evaluate_pre_conditions_for_brush(self, include_network_conditions: bool = True) \
+    def __evaluate_pre_conditions_for_brush(self, sitename: str = None, include_network_conditions: bool = True,
+                                            include_yield_guard: bool = True) \
             -> Tuple[bool, Optional[str]]:
         """
         前置过滤不符合条件的种子
@@ -3094,10 +3098,14 @@ class BrushFlowLowFreq(_PluginBase):
                                     f"已达到最大值 {config} KB/s，暂时停止新增任务"),
                 ])
 
-        brush_config = self.__get_brush_config()
-        yield_guard_passed, yield_guard_reason = self.__evaluate_yield_guard_brush_pre_condition(brush_config)
-        if not yield_guard_passed:
-            return False, yield_guard_reason
+        brush_config = self.__get_brush_config(sitename=sitename)
+        if include_yield_guard:
+            yield_guard_passed, yield_guard_reason = self.__evaluate_yield_guard_brush_pre_condition(
+                brush_config=brush_config,
+                sitename=sitename
+            )
+            if not yield_guard_passed:
+                return False, yield_guard_reason
 
         for condition, check, message in reasons:
             config_value = getattr(brush_config, condition, None)
@@ -3107,7 +3115,8 @@ class BrushFlowLowFreq(_PluginBase):
 
         return True, None
 
-    def __evaluate_yield_guard_brush_pre_condition(self, brush_config: BrushConfig) -> Tuple[bool, Optional[str]]:
+    def __evaluate_yield_guard_brush_pre_condition(self, brush_config: BrushConfig,
+                                                   sitename: str = None) -> Tuple[bool, Optional[str]]:
         if (not brush_config.yield_guard_enabled
                 or not brush_config.yield_guard_stop_brush_when_good_pool):
             return True, None
@@ -3125,6 +3134,8 @@ class BrushFlowLowFreq(_PluginBase):
         recent_probe_exists = False
         for task in torrent_tasks.values():
             if not isinstance(task, dict) or task.get("deleted"):
+                continue
+            if sitename and task.get("site_name") != sitename:
                 continue
             if task.get("yield_guard_good_protected"):
                 good_pool_count += 1
@@ -3340,6 +3351,8 @@ class BrushFlowLowFreq(_PluginBase):
             if not torrent_tasks or not torrent_check_hashes:
                 logger.info("没有需要检查的刷流下载任务")
                 return
+            for torrent_task in torrent_tasks.values():
+                self.__clear_yield_guard_check_cache(torrent_task)
 
             logger.info(f"共有 {len(torrent_check_hashes)} 个任务正在刷流，开始检查任务状态")
 
@@ -3401,6 +3414,13 @@ class BrushFlowLowFreq(_PluginBase):
                     no_free_delete_hash_set = set(no_free_delete_hashes)
                     proxy_check_torrents = [torrent for torrent in check_torrents
                                             if self.__get_hash(torrent) not in no_free_delete_hash_set]
+                    yield_guard_delete_hashes = self.__delete_torrent_for_yield_guard(torrents=proxy_check_torrents,
+                                                                                      torrent_tasks=torrent_tasks,
+                                                                                      delete_message_map=delete_message_map) or []
+                    need_delete_hashes.extend(yield_guard_delete_hashes)
+                    forced_delete_hash_set = no_free_delete_hash_set | set(yield_guard_delete_hashes)
+                    proxy_check_torrents = [torrent for torrent in check_torrents
+                                            if self.__get_hash(torrent) not in forced_delete_hash_set]
 
                     proxy_delete_hashes = self.__delete_torrent_for_proxy(torrents=proxy_check_torrents,
                                                                           torrent_tasks=torrent_tasks,
@@ -3569,6 +3589,7 @@ class BrushFlowLowFreq(_PluginBase):
             torrent_task = torrent_tasks.get(torrent_hash)
             if not torrent_hash or not torrent_task or torrent_task.get("deleted"):
                 continue
+            self.__clear_yield_guard_check_cache(torrent_task)
 
             site_name = torrent_task.get("site_name", "")
             brush_config = self.__get_brush_config(sitename=site_name)
@@ -3597,15 +3618,21 @@ class BrushFlowLowFreq(_PluginBase):
                 action = "pause"
 
             if action:
-                if self.__apply_qb_yield_guard_action(torrent_hash=torrent_hash,
-                                                      action=action,
-                                                      brush_config=brush_config,
-                                                      site_name=site_name,
-                                                      reason=reason):
-                    torrent_task["yield_guard_last_action_time"] = time.time()
-                    if action == "restore_limit":
-                        torrent_task["yield_guard_restore_download_limit"] = False
-                    logger.info(f"站点：{site_name}，{reason}，已执行上传收益保护动作：{action}")
+                if self.__apply_yield_guard_action_for_task(torrent_hash=torrent_hash,
+                                                            torrent_task=torrent_task,
+                                                            action=action,
+                                                            brush_config=brush_config,
+                                                            site_name=site_name,
+                                                            reason=reason):
+                    if not brush_config.yield_guard_rehearsal:
+                        logger.info(f"站点：{site_name}，{reason}，已执行上传收益保护动作：{action}")
+
+    @staticmethod
+    def __clear_yield_guard_check_cache(torrent_task: dict) -> None:
+        if not isinstance(torrent_task, dict):
+            return
+        torrent_task.pop("yield_guard_evaluated_in_check", None)
+        torrent_task.pop("yield_guard_should_delete", None)
 
     @classmethod
     def __normalize_hash(cls, hash_value: Any) -> str:
@@ -3989,6 +4016,7 @@ class BrushFlowLowFreq(_PluginBase):
         限速/暂停动作在 check() 的动作层处理；本函数只维护状态和给出决策原因。
         """
         if not brush_config.yield_guard_enabled:
+            self.__clear_yield_guard_check_cache(torrent_task)
             torrent_task["yield_guard_good_protected"] = False
             torrent_task["yield_guard_promising_protected"] = False
             return False, ""
@@ -4072,15 +4100,18 @@ class BrushFlowLowFreq(_PluginBase):
         min_downloaded_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_min_downloaded_gb) * 1024 ** 3
         min_progress_percent = self.__yield_guard_positive_number(brush_config.yield_guard_min_progress_percent)
         progress_percent = (downloaded / total_size * 100) if total_size > 0 else 0
-        has_enough_sample = (
-                (min_downloaded_bytes <= 0 or downloaded >= min_downloaded_bytes)
-                and (min_progress_percent <= 0 or progress_percent >= min_progress_percent)
-        )
+        sample_checks = []
+        if min_downloaded_bytes > 0:
+            sample_checks.append(downloaded >= min_downloaded_bytes)
+        if min_progress_percent > 0:
+            sample_checks.append(progress_percent >= min_progress_percent)
+        has_enough_sample = any(sample_checks) if sample_checks else True
 
         if not (is_high_download and is_low_upload and has_enough_sample):
             torrent_task["yield_guard_bad_streak"] = 0
             if torrent_task.get("yield_guard_stage") == "limited":
                 torrent_task["yield_guard_stage"] = "normal"
+                torrent_task["yield_guard_restore_download_limit"] = True
             torrent_task["yield_guard_last_reason"] = "上传收益保护：未命中低收益条件"
             return False, torrent_task["yield_guard_last_reason"]
 
@@ -4181,7 +4212,7 @@ class BrushFlowLowFreq(_PluginBase):
         if no_free_reason and no_free_reason.startswith("失去免费删种检测跳过"):
             logger.debug(f"站点：{site_name}，{no_free_reason}")
 
-        if torrent_task.get("yield_guard_evaluated_in_check"):
+        if brush_config.yield_guard_enabled and torrent_task.get("yield_guard_evaluated_in_check"):
             yield_guard_should_delete = bool(torrent_task.get("yield_guard_should_delete"))
             yield_guard_reason = torrent_task.get("yield_guard_last_reason", "")
         else:
@@ -4352,6 +4383,39 @@ class BrushFlowLowFreq(_PluginBase):
                 logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
             elif reason and reason.startswith("失去免费删种检测跳过"):
                 logger.debug(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
+
+        return delete_hashes
+
+    def __delete_torrent_for_yield_guard(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
+                                         delete_message_map: Optional[Dict[str, List[dict]]] = None) -> List:
+        """
+        根据上传收益保护已缓存的删除决策获取待删列表，不受动态删种体积阈值影响。
+        """
+        delete_hashes = []
+
+        for torrent in torrents:
+            torrent_hash = self.__get_hash(torrent)
+            torrent_task = torrent_tasks.get(torrent_hash, None)
+            if not torrent_task:
+                continue
+
+            site_name = torrent_task.get("site_name", "")
+            brush_config = self.__get_brush_config(sitename=site_name)
+            if not brush_config.yield_guard_enabled:
+                continue
+            if not torrent_task.get("yield_guard_evaluated_in_check"):
+                continue
+            if not torrent_task.get("yield_guard_should_delete"):
+                continue
+
+            torrent_title = torrent_task.get("title", "")
+            torrent_desc = torrent_task.get("description", "")
+            reason = torrent_task.get("yield_guard_last_reason") or "上传收益保护：低收益，最终删除"
+            delete_hashes.append(torrent_hash)
+            self.__append_delete_message(delete_message_map=delete_message_map, torrent_hash=torrent_hash,
+                                         site_name=site_name, torrent_title=torrent_title,
+                                         torrent_desc=torrent_desc, reason=reason)
+            logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
 
         return delete_hashes
 
@@ -4782,11 +4846,20 @@ class BrushFlowLowFreq(_PluginBase):
                 torrent_info = torrent_info_map.get(torrent_hash, None)
                 if not torrent_task or not torrent_info:
                     continue
+                site_name = torrent_task.get("site_name", "")
+                site_brush_config = self.__get_brush_config(sitename=site_name)
+                if (site_brush_config.yield_guard_enabled
+                        and site_brush_config.yield_guard_protect_delete_rules
+                        and torrent_task.get("yield_guard_good_protected")):
+                    logger.debug(
+                        f"站点：{site_name}，上传收益保护：高上传任务跳过动态删除兜底，"
+                        f"不删除种子：{torrent_task.get('title', '')}|{torrent_task.get('description', '')}"
+                    )
+                    continue
 
                 need_delete_hashes.append(torrent_hash)
                 total_torrent_size -= torrent_info.get("total_size", 0)
 
-                site_name = torrent_task.get("site_name", "")
                 torrent_title = torrent_task.get("title", "")
                 torrent_desc = torrent_task.get("description", "")
                 seeding_time = torrent_task.get("seeding_time", 0)
@@ -5104,7 +5177,20 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_inactivetime": "未活动时间",
             "up_speed": "单任务上传限速",
             "dl_speed": "单任务下载限速",
-            "auto_archive_days": "自动清理记录天数"
+            "auto_archive_days": "自动清理记录天数",
+            "yield_guard_high_download_kbs": "收益保护高下载阈值",
+            "yield_guard_low_upload_kbs": "收益保护低上传阈值",
+            "yield_guard_bad_checks": "低收益连续命中次数",
+            "yield_guard_min_downloaded_gb": "收益保护最小下载量",
+            "yield_guard_min_progress_percent": "收益保护最小进度",
+            "yield_guard_download_limit_kbs": "低收益下载限速",
+            "yield_guard_fast_fail_minutes": "快速淘汰窗口",
+            "yield_guard_good_upload_kbs": "高上传保护阈值",
+            "yield_guard_good_avg_upload_kbs": "高平均上传保护阈值",
+            "yield_guard_good_pool_min_count": "高收益池最小数量",
+            "yield_guard_probe_slots": "收益保护探测名额",
+            "yield_guard_probe_interval_minutes": "收益保护探测间隔",
+            "yield_guard_promising_pubtime_minutes": "新发布短窗保护"
         }
 
         config_range_number_attr_to_desc = {
@@ -5128,6 +5214,23 @@ class BrushFlowLowFreq(_PluginBase):
                 self.__log_and_notify_error(f"站点刷流任务出错，{desc}设置错误：{value}")
                 config[attr] = None
                 found_error = True  # 更新错误标志
+
+        yield_guard_action_defaults = {
+            "yield_guard_first_action": ("低收益首次动作", "limit", {"none", "limit", "pause", "delete"}),
+            "yield_guard_second_action": ("低收益二次动作", "pause", {"none", "pause", "delete"}),
+            "yield_guard_final_action": ("短窗后最终动作", "delete", {"none", "delete"}),
+        }
+        for attr, (desc, default_value, allowed_values) in yield_guard_action_defaults.items():
+            value = config.get(attr)
+            if value in (None, ""):
+                continue
+            normalized_value = str(value).strip().lower()
+            if normalized_value not in allowed_values:
+                self.__log_and_notify_error(f"站点刷流任务出错，{desc}设置错误：{value}")
+                config[attr] = default_value
+                found_error = True
+            else:
+                config[attr] = normalized_value
 
         active_time_range = config.get("active_time_range")
         if active_time_range and not self.__is_valid_time_range(time_range=active_time_range):
@@ -5510,6 +5613,30 @@ class BrushFlowLowFreq(_PluginBase):
         except Exception as err:
             logger.error(f"上传收益保护执行 qB 动作失败，hash={torrent_hash}，动作={action}，错误：{err}")
         return False
+
+    def __apply_yield_guard_action_for_task(self, torrent_hash: str, torrent_task: dict, action: str,
+                                            brush_config: BrushConfig, site_name: str = "",
+                                            reason: str = "") -> bool:
+        """
+        处理收益保护动作的任务状态。演练模式视为已记录动作，但不执行 qB。
+        """
+        if not torrent_hash or not torrent_task or not brush_config.yield_guard_enabled:
+            return False
+
+        handled = self.__apply_qb_yield_guard_action(
+            torrent_hash=torrent_hash,
+            action=action,
+            brush_config=brush_config,
+            site_name=site_name,
+            reason=reason
+        )
+        if not handled and not brush_config.yield_guard_rehearsal:
+            return False
+
+        torrent_task["yield_guard_last_action_time"] = time.time()
+        if action == "restore_limit" and not brush_config.yield_guard_rehearsal:
+            torrent_task["yield_guard_restore_download_limit"] = False
+        return True
 
     def __get_hash(self, torrent: Any):
         """
