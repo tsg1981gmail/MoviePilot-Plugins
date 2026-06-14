@@ -363,7 +363,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.30"
+    plugin_version = "4.3.31"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -3584,6 +3584,10 @@ class BrushFlowLowFreq(_PluginBase):
         if not torrents:
             return
 
+        evaluated_count = 0
+        action_count = 0
+        delete_count = 0
+        reason_samples = []
         for torrent in torrents:
             torrent_hash = self.__get_hash(torrent)
             torrent_task = torrent_tasks.get(torrent_hash)
@@ -3605,7 +3609,13 @@ class BrushFlowLowFreq(_PluginBase):
             )
             torrent_task["yield_guard_evaluated_in_check"] = True
             torrent_task["yield_guard_should_delete"] = bool(should_delete)
+            evaluated_count += 1
+            if reason and len(reason_samples) < 5:
+                reason_samples.append(
+                    f"{torrent_task.get('title', '') or torrent_hash}：{reason}"
+                )
             if should_delete:
+                delete_count += 1
                 continue
 
             stage = torrent_task.get("yield_guard_stage")
@@ -3626,6 +3636,15 @@ class BrushFlowLowFreq(_PluginBase):
                                                             reason=reason):
                     if not brush_config.yield_guard_rehearsal:
                         logger.info(f"站点：{site_name}，{reason}，已执行上传收益保护动作：{action}")
+                    action_count += 1
+
+        if evaluated_count > 0:
+            sample_text = "；".join(reason_samples)
+            logger.info(
+                f"上传收益保护：本轮检查已评估 {evaluated_count} 个任务，"
+                f"待删除 {delete_count} 个，已记录/执行动作 {action_count} 个"
+                f"{'；样例：' + sample_text if sample_text else ''}"
+            )
 
     @staticmethod
     def __clear_yield_guard_check_cache(torrent_task: dict) -> None:

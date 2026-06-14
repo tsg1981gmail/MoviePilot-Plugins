@@ -1333,6 +1333,73 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual([(["abcdef"], 512 * 1024)], plugin.downloader.qbc.download_limits)
         self.assertEqual("limited", torrent_tasks["abcdef"].get("yield_guard_stage"))
 
+    def test_check_logs_yield_guard_summary_even_without_action(self):
+        class FakeDownloader:
+            def is_inactive(self):
+                return False
+
+            def get_torrents(self):
+                torrent = {
+                    "hash": "abcdef",
+                    "name": "yield pending sample",
+                    "tags": "刷流",
+                    "state": "downloading",
+                    "progress": 0.1,
+                    "downloaded": 1000,
+                    "uploaded": 0,
+                    "total_size": 10000,
+                    "ratio": 0,
+                    "added_on": 1,
+                    "completion_on": 0,
+                    "last_activity": 1,
+                    "tracker": "tracker",
+                }
+                return [torrent], None
+
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_high_download_kbs": 1,
+            "yield_guard_low_upload_kbs": 500,
+            "freeleech": "",
+            "hr": "no",
+        }, downloader=FakeDownloader())
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
+        torrent_tasks = {
+            "abcdef": {
+                "site": 1,
+                "site_name": "站点1",
+                "title": "yield pending sample",
+                "description": "desc",
+                "hit_and_run": False,
+                "time": 0,
+                "downloaded": 0,
+                "uploaded": 0,
+                "total_size": 10000,
+                "ratio": 0,
+                "seeding_time": 0,
+                "yield_guard_bad_streak": 0,
+                "yield_guard_stage": "normal",
+                "yield_guard_good_protected": False,
+                "yield_guard_promising_protected": False,
+                "deleted": False,
+            }
+        }
+        plugin.get_data = lambda key: {
+            "torrents": torrent_tasks,
+            "unmanaged": {}
+        }.get(key, {})
+        plugin.save_data = lambda *args, **kwargs: None
+        start_info_count = len(self.module.logger.info_messages)
+
+        plugin.check()
+
+        new_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(any("上传收益保护：本轮检查已评估 1 个任务" in msg for msg in new_logs))
+        self.assertTrue(any("采样未就绪" in msg for msg in new_logs))
+
     def test_check_skips_low_ratio_delete_when_good_protected(self):
         class FakeDownloader:
             def is_inactive(self):
