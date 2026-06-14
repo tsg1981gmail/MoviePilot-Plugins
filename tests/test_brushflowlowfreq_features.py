@@ -495,6 +495,64 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(3, site_config.yield_guard_fast_fail_minutes)
         self.assertEqual(12, brush_config.yield_guard_fast_fail_minutes)
 
+    def test_update_config_persists_yield_guard_values(self):
+        plugin = self._new_plugin({
+            "enabled": True,
+            "notify": False,
+            "downloader": "qb",
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_high_download_kbs": 1024,
+            "yield_guard_low_upload_kbs": 128,
+            "yield_guard_bad_checks": 1,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+            "yield_guard_first_action": "pause",
+            "yield_guard_second_action": "delete",
+            "yield_guard_final_action": "none",
+            "yield_guard_download_limit_kbs": 256,
+            "yield_guard_fast_fail_minutes": 3,
+            "yield_guard_good_upload_kbs": 300,
+            "yield_guard_good_avg_upload_kbs": 350,
+            "yield_guard_protect_delete_rules": False,
+            "yield_guard_stop_brush_when_good_pool": False,
+            "yield_guard_good_pool_min_count": 4,
+            "yield_guard_probe_slots": 2,
+            "yield_guard_probe_interval_minutes": 5,
+            "yield_guard_promising_pubtime_minutes": 6,
+        })
+        saved_config = {}
+        plugin.update_config = lambda config: saved_config.update(config)
+
+        plugin._BrushFlowLowFreq__update_config()
+
+        expected_values = {
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_high_download_kbs": 1024,
+            "yield_guard_low_upload_kbs": 128,
+            "yield_guard_bad_checks": 1,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+            "yield_guard_first_action": "pause",
+            "yield_guard_second_action": "delete",
+            "yield_guard_final_action": "none",
+            "yield_guard_download_limit_kbs": 256,
+            "yield_guard_fast_fail_minutes": 3,
+            "yield_guard_good_upload_kbs": 300,
+            "yield_guard_good_avg_upload_kbs": 350,
+            "yield_guard_protect_delete_rules": False,
+            "yield_guard_stop_brush_when_good_pool": False,
+            "yield_guard_good_pool_min_count": 4,
+            "yield_guard_probe_slots": 2,
+            "yield_guard_probe_interval_minutes": 5,
+            "yield_guard_promising_pubtime_minutes": 6,
+        }
+        for key, expected_value in expected_values.items():
+            with self.subTest(key=key):
+                self.assertIn(key, saved_config)
+                self.assertEqual(expected_value, saved_config.get(key))
+
     def test_new_torrent_task_initializes_yield_guard_fields(self):
         class FakeDownloader:
             def is_inactive(self):

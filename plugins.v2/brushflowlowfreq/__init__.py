@@ -363,7 +363,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.28"
+    plugin_version = "4.3.29"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -5181,6 +5181,26 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_ratio_check_minutes": brush_config.seed_ratio_check_minutes,
             "skip_rules_downloading_threshold": brush_config.skip_rules_downloading_threshold,
             "seed_ratio_speed_protect": brush_config.seed_ratio_speed_protect,
+            "yield_guard_enabled": brush_config.yield_guard_enabled,
+            "yield_guard_high_download_kbs": brush_config.yield_guard_high_download_kbs,
+            "yield_guard_low_upload_kbs": brush_config.yield_guard_low_upload_kbs,
+            "yield_guard_bad_checks": brush_config.yield_guard_bad_checks,
+            "yield_guard_min_downloaded_gb": brush_config.yield_guard_min_downloaded_gb,
+            "yield_guard_min_progress_percent": brush_config.yield_guard_min_progress_percent,
+            "yield_guard_first_action": brush_config.yield_guard_first_action,
+            "yield_guard_second_action": brush_config.yield_guard_second_action,
+            "yield_guard_final_action": brush_config.yield_guard_final_action,
+            "yield_guard_download_limit_kbs": brush_config.yield_guard_download_limit_kbs,
+            "yield_guard_fast_fail_minutes": brush_config.yield_guard_fast_fail_minutes,
+            "yield_guard_good_upload_kbs": brush_config.yield_guard_good_upload_kbs,
+            "yield_guard_good_avg_upload_kbs": brush_config.yield_guard_good_avg_upload_kbs,
+            "yield_guard_protect_delete_rules": brush_config.yield_guard_protect_delete_rules,
+            "yield_guard_stop_brush_when_good_pool": brush_config.yield_guard_stop_brush_when_good_pool,
+            "yield_guard_good_pool_min_count": brush_config.yield_guard_good_pool_min_count,
+            "yield_guard_probe_slots": brush_config.yield_guard_probe_slots,
+            "yield_guard_probe_interval_minutes": brush_config.yield_guard_probe_interval_minutes,
+            "yield_guard_promising_pubtime_minutes": brush_config.yield_guard_promising_pubtime_minutes,
+            "yield_guard_rehearsal": brush_config.yield_guard_rehearsal,
             "seed_ratio_min_30m": brush_config.seed_ratio_min_30m,
             "seed_size": brush_config.seed_size,
             "download_time": brush_config.download_time,
