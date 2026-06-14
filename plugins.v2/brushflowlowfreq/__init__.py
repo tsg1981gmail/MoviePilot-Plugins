@@ -95,6 +95,28 @@ class BrushConfig:
         self.include_second_page = config.get("include_second_page", False)
         self.skip_rules_downloading_threshold = self.__parse_number(config.get("skip_rules_downloading_threshold", 0)) or 0
         self.seed_ratio_speed_protect = self.__parse_number(config.get("seed_ratio_speed_protect", 0)) or 0
+        self.yield_guard_enabled = config.get("yield_guard_enabled", False)
+        self.yield_guard_high_download_kbs = self.__parse_number(config.get("yield_guard_high_download_kbs", 2048))
+        self.yield_guard_low_upload_kbs = self.__parse_number(config.get("yield_guard_low_upload_kbs", 200))
+        self.yield_guard_bad_checks = self.__parse_number(config.get("yield_guard_bad_checks", 2))
+        self.yield_guard_min_downloaded_gb = self.__parse_number(config.get("yield_guard_min_downloaded_gb", 2))
+        self.yield_guard_min_progress_percent = self.__parse_number(config.get("yield_guard_min_progress_percent", 10))
+        self.yield_guard_first_action = config.get("yield_guard_first_action", "limit")
+        self.yield_guard_second_action = config.get("yield_guard_second_action", "pause")
+        self.yield_guard_final_action = config.get("yield_guard_final_action", "delete")
+        self.yield_guard_download_limit_kbs = self.__parse_number(config.get("yield_guard_download_limit_kbs", 512))
+        self.yield_guard_fast_fail_minutes = self.__parse_number(config.get("yield_guard_fast_fail_minutes", 10))
+        self.yield_guard_good_upload_kbs = self.__parse_number(config.get("yield_guard_good_upload_kbs", 500))
+        self.yield_guard_good_avg_upload_kbs = self.__parse_number(config.get("yield_guard_good_avg_upload_kbs", 500))
+        self.yield_guard_protect_delete_rules = config.get("yield_guard_protect_delete_rules", True)
+        self.yield_guard_stop_brush_when_good_pool = config.get("yield_guard_stop_brush_when_good_pool", True)
+        self.yield_guard_good_pool_min_count = self.__parse_number(config.get("yield_guard_good_pool_min_count", 2))
+        self.yield_guard_probe_slots = self.__parse_number(config.get("yield_guard_probe_slots", 1))
+        self.yield_guard_probe_interval_minutes = self.__parse_number(config.get("yield_guard_probe_interval_minutes", 10))
+        self.yield_guard_promising_pubtime_minutes = self.__parse_number(
+            config.get("yield_guard_promising_pubtime_minutes", 15)
+        )
+        self.yield_guard_rehearsal = config.get("yield_guard_rehearsal", True)
 
         self.brush_tag = "刷流"
         # 站点独立配置
@@ -153,7 +175,27 @@ class BrushConfig:
             "site_skip_tips",
             "include_second_page",
             "skip_rules_downloading_threshold",
-            "seed_ratio_speed_protect"
+            "seed_ratio_speed_protect",
+            "yield_guard_enabled",
+            "yield_guard_high_download_kbs",
+            "yield_guard_low_upload_kbs",
+            "yield_guard_bad_checks",
+            "yield_guard_min_downloaded_gb",
+            "yield_guard_min_progress_percent",
+            "yield_guard_first_action",
+            "yield_guard_second_action",
+            "yield_guard_final_action",
+            "yield_guard_download_limit_kbs",
+            "yield_guard_fast_fail_minutes",
+            "yield_guard_good_upload_kbs",
+            "yield_guard_good_avg_upload_kbs",
+            "yield_guard_protect_delete_rules",
+            "yield_guard_stop_brush_when_good_pool",
+            "yield_guard_good_pool_min_count",
+            "yield_guard_probe_slots",
+            "yield_guard_probe_interval_minutes",
+            "yield_guard_promising_pubtime_minutes",
+            "yield_guard_rehearsal"
             # 当新增支持字段时，仅在此处添加字段名
         }
         try:
@@ -235,7 +277,27 @@ class BrushConfig:
     "site_skip_tips": true,
     "include_second_page": false,
     "skip_rules_downloading_threshold": 0,
-    "seed_ratio_speed_protect": 0
+    "seed_ratio_speed_protect": 0,
+    "yield_guard_enabled": false,
+    "yield_guard_high_download_kbs": 2048,
+    "yield_guard_low_upload_kbs": 200,
+    "yield_guard_bad_checks": 2,
+    "yield_guard_min_downloaded_gb": 2,
+    "yield_guard_min_progress_percent": 10,
+    "yield_guard_first_action": "limit",
+    "yield_guard_second_action": "pause",
+    "yield_guard_final_action": "delete",
+    "yield_guard_download_limit_kbs": 512,
+    "yield_guard_fast_fail_minutes": 10,
+    "yield_guard_good_upload_kbs": 500,
+    "yield_guard_good_avg_upload_kbs": 500,
+    "yield_guard_protect_delete_rules": true,
+    "yield_guard_stop_brush_when_good_pool": true,
+    "yield_guard_good_pool_min_count": 2,
+    "yield_guard_probe_slots": 1,
+    "yield_guard_probe_interval_minutes": 10,
+    "yield_guard_promising_pubtime_minutes": 15,
+    "yield_guard_rehearsal": true
 }]"""
         return desc + config
 
@@ -301,7 +363,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.25"
+    plugin_version = "4.3.26"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1801,6 +1863,359 @@ class BrushFlowLowFreq(_PluginBase):
                                             }
                                         ]
                                     }
+                                    , {
+                                        'component': 'VRow',
+                                        'content': [
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'yield_guard_enabled',
+                                                            'label': '上传收益保护'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'yield_guard_rehearsal',
+                                                            'label': '上传收益保护演练模式'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'yield_guard_protect_delete_rules',
+                                                            'label': '保护高上传任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_high_download_kbs',
+                                                            'label': '收益保护高下载阈值（KB/s）',
+                                                            'placeholder': '如：2048，检查间下载达到后参与判断'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_low_upload_kbs',
+                                                            'label': '收益保护低上传阈值（KB/s）',
+                                                            'placeholder': '如：200，检查间上传低于时计入低收益'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_bad_checks',
+                                                            'label': '低收益连续命中次数',
+                                                            'placeholder': '如：2，连续命中后执行动作'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_min_downloaded_gb',
+                                                            'label': '收益保护最小下载量（GB）',
+                                                            'placeholder': '如：2，达到后才处理'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_min_progress_percent',
+                                                            'label': '收益保护最小进度（%）',
+                                                            'placeholder': '如：10，达到后才处理'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_fast_fail_minutes',
+                                                            'label': '快速淘汰窗口（分钟）',
+                                                            'placeholder': '如：10，窗口内不直接删除'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_promising_pubtime_minutes',
+                                                            'label': '新发布短窗保护（分钟）',
+                                                            'placeholder': '如：15，发布时间内不直接删除'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_download_limit_kbs',
+                                                            'label': '低收益下载限速（KB/s）',
+                                                            'placeholder': '如：512，低收益限速动作使用'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_good_upload_kbs',
+                                                            'label': '高上传保护阈值（KB/s）',
+                                                            'placeholder': '如：500，检查间上传达到后保护'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_good_avg_upload_kbs',
+                                                            'label': '高平均上传保护阈值（KB/s）',
+                                                            'placeholder': '如：500，平均上传达到后保护'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'yield_guard_first_action',
+                                                            'label': '低收益首次动作',
+                                                            'items': [
+                                                                {'title': '不处理', 'value': 'none'},
+                                                                {'title': '下载限速', 'value': 'limit'},
+                                                                {'title': '暂停', 'value': 'pause'},
+                                                                {'title': '删除', 'value': 'delete'},
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'yield_guard_second_action',
+                                                            'label': '低收益二次动作',
+                                                            'items': [
+                                                                {'title': '不处理', 'value': 'none'},
+                                                                {'title': '暂停', 'value': 'pause'},
+                                                                {'title': '删除', 'value': 'delete'},
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'yield_guard_final_action',
+                                                            'label': '短窗后最终动作',
+                                                            'items': [
+                                                                {'title': '不处理', 'value': 'none'},
+                                                                {'title': '删除', 'value': 'delete'},
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'yield_guard_stop_brush_when_good_pool',
+                                                            'label': '高收益池满时停止新增'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_good_pool_min_count',
+                                                            'label': '高收益池最小数量',
+                                                            'placeholder': '如：2，达到后减少新增'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_probe_slots',
+                                                            'label': '收益保护探测名额',
+                                                            'placeholder': '如：1，保留新增探测任务数'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_probe_interval_minutes',
+                                                            'label': '收益保护探测间隔（分钟）',
+                                                            'placeholder': '如：10，两次探测新增的最小间隔'
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
                                 ]
                             },
                             {
@@ -2179,6 +2594,26 @@ class BrushFlowLowFreq(_PluginBase):
             "interval_upspeed_rehearsal": False,
             "skip_rules_downloading_threshold": 0,
             "seed_ratio_speed_protect": 0,
+            "yield_guard_enabled": False,
+            "yield_guard_high_download_kbs": 2048,
+            "yield_guard_low_upload_kbs": 200,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_min_downloaded_gb": 2,
+            "yield_guard_min_progress_percent": 10,
+            "yield_guard_first_action": "limit",
+            "yield_guard_second_action": "pause",
+            "yield_guard_final_action": "delete",
+            "yield_guard_download_limit_kbs": 512,
+            "yield_guard_fast_fail_minutes": 10,
+            "yield_guard_good_upload_kbs": 500,
+            "yield_guard_good_avg_upload_kbs": 500,
+            "yield_guard_protect_delete_rules": True,
+            "yield_guard_stop_brush_when_good_pool": True,
+            "yield_guard_good_pool_min_count": 2,
+            "yield_guard_probe_slots": 1,
+            "yield_guard_probe_interval_minutes": 10,
+            "yield_guard_promising_pubtime_minutes": 15,
+            "yield_guard_rehearsal": True,
             "freeleech": "free",
             "hr": "yes",
             "enable_site_config": False,
@@ -2570,6 +3005,9 @@ class BrushFlowLowFreq(_PluginBase):
                 "deleted": False,
                 "time": time.time()
             }
+            torrent_task.update(self.__get_default_yield_guard_task_state())
+            if brush_config.yield_guard_enabled and brush_config.yield_guard_stop_brush_when_good_pool:
+                torrent_task["yield_guard_last_probe_time"] = time.time()
 
             self.eventmanager.send_event(etype=EventType.PluginTriggered, data={
                 "plugin_id": self.__class__.__name__,
@@ -2657,6 +3095,10 @@ class BrushFlowLowFreq(_PluginBase):
                 ])
 
         brush_config = self.__get_brush_config()
+        yield_guard_passed, yield_guard_reason = self.__evaluate_yield_guard_brush_pre_condition(brush_config)
+        if not yield_guard_passed:
+            return False, yield_guard_reason
+
         for condition, check, message in reasons:
             config_value = getattr(brush_config, condition, None)
             if config_value and check(config_value):
@@ -2664,6 +3106,51 @@ class BrushFlowLowFreq(_PluginBase):
                 return False, reason
 
         return True, None
+
+    def __evaluate_yield_guard_brush_pre_condition(self, brush_config: BrushConfig) -> Tuple[bool, Optional[str]]:
+        if (not brush_config.yield_guard_enabled
+                or not brush_config.yield_guard_stop_brush_when_good_pool):
+            return True, None
+
+        torrent_tasks = self.get_data("torrents") or {}
+        if not torrent_tasks:
+            return True, None
+
+        now = time.time()
+        good_pool_count = 0
+        probe_count = 0
+        recent_probe_seconds = int(self.__yield_guard_positive_number(
+            brush_config.yield_guard_probe_interval_minutes, 10
+        ) * 60)
+        recent_probe_exists = False
+        for task in torrent_tasks.values():
+            if not isinstance(task, dict) or task.get("deleted"):
+                continue
+            if task.get("yield_guard_good_protected"):
+                good_pool_count += 1
+            else:
+                probe_count += 1
+                last_probe_time = self.__number_or_none(task.get("yield_guard_last_probe_time"))
+                if (recent_probe_seconds > 0 and last_probe_time is not None
+                        and now - float(last_probe_time) < recent_probe_seconds):
+                    recent_probe_exists = True
+
+        good_pool_min = max(0, int(self.__yield_guard_positive_number(
+            brush_config.yield_guard_good_pool_min_count, 2
+        )))
+        if good_pool_min <= 0 or good_pool_count < good_pool_min:
+            return True, None
+
+        probe_slots = int(self.__yield_guard_positive_number(brush_config.yield_guard_probe_slots, 1))
+        if probe_slots <= 0:
+            return False, (f"上传收益保护：高收益任务池 {good_pool_count} 个已达到阈值 {good_pool_min}，"
+                           f"探测名额已关闭，暂时停止新增任务")
+
+        if probe_count < probe_slots and not recent_probe_exists:
+            return True, None
+
+        return False, (f"上传收益保护：高收益任务池 {good_pool_count} 个已达到阈值 {good_pool_min}，"
+                       f"探测任务 {probe_count} 个已达到名额 {probe_slots}，或最近探测间隔未到，暂时停止新增任务")
 
     def __evaluate_conditions_for_brush(self, torrent, torrent_tasks) -> Tuple[bool, Optional[str]]:
         """
@@ -2900,6 +3387,9 @@ class BrushFlowLowFreq(_PluginBase):
                     seeding_torrents_dict=seeding_torrents_dict
                 )
 
+                # 上传收益保护的限速/暂停动作先执行，最终删除仍交给后续删种流程统一处理
+                self.__apply_yield_guard_actions(torrents=check_torrents, torrent_tasks=torrent_tasks)
+
                 # 如果配置了动态删除以及删种阈值，则根据动态删种进行分组处理
                 if brush_config.proxy_delete and brush_config.delete_size_range:
                     logger.info("已开启动态删种，按系统默认动态删种条件开始检查任务")
@@ -3003,6 +3493,7 @@ class BrushFlowLowFreq(_PluginBase):
                 torrent_task["first_uploaded_time"] = check_time
 
             last_check_uploaded = torrent_task.get("last_check_uploaded")
+            last_check_downloaded = torrent_task.get("last_check_downloaded")
             last_check_time = torrent_task.get("last_check_time")
 
             interval_speed = None
@@ -3010,6 +3501,10 @@ class BrushFlowLowFreq(_PluginBase):
             interval_uploaded = None
             interval_valid = False
             interval_reason = "首次检查，暂不计算检查间上传速度"
+            interval_downspeed = None
+            interval_downloaded = None
+            interval_downspeed_valid = False
+            interval_downspeed_reason = "首次检查，暂不计算检查间下载速度"
 
             if isinstance(last_check_uploaded, (int, float)) and isinstance(last_check_time, (int, float)):
                 try:
@@ -3026,6 +3521,21 @@ class BrushFlowLowFreq(_PluginBase):
                 except (TypeError, ValueError):
                     interval_reason = "检查间基线异常，已跳过本次低速统计"
 
+            if isinstance(last_check_downloaded, (int, float)) and isinstance(last_check_time, (int, float)):
+                try:
+                    down_interval_seconds = check_time - int(float(last_check_time))
+                    interval_downloaded = float(downloaded) - float(last_check_downloaded)
+                    if down_interval_seconds <= 0:
+                        interval_downspeed_reason = "检查间隔异常，已跳过本次下载速度统计"
+                    elif interval_downloaded < 0:
+                        interval_downspeed_reason = "下载量出现回退，已跳过本次下载速度统计"
+                    else:
+                        interval_downspeed = float(interval_downloaded) / down_interval_seconds
+                        interval_downspeed_valid = True
+                        interval_downspeed_reason = ""
+                except (TypeError, ValueError):
+                    interval_downspeed_reason = "检查间下载基线异常，已跳过本次下载速度统计"
+
             # 更新上传量、下载量
             torrent_task.update({
                 "downloaded": torrent_info.get("downloaded"),
@@ -3035,12 +3545,65 @@ class BrushFlowLowFreq(_PluginBase):
                 "seeding_time": torrent_info.get("seeding_time"),
                 "last_check_time": check_time,
                 "last_check_uploaded": uploaded,
+                "last_check_downloaded": downloaded,
                 "last_check_interval_upspeed": interval_speed,
                 "last_check_interval_seconds": interval_seconds,
                 "last_check_interval_uploaded": interval_uploaded,
                 "last_check_interval_upspeed_valid": interval_valid,
-                "last_check_interval_reason": interval_reason
+                "last_check_interval_reason": interval_reason,
+                "last_check_interval_downloaded": interval_downloaded,
+                "last_check_interval_downspeed": interval_downspeed,
+                "last_check_interval_downspeed_valid": interval_downspeed_valid,
+                "last_check_interval_downspeed_reason": interval_downspeed_reason
             })
+
+    def __apply_yield_guard_actions(self, torrents: List[Any], torrent_tasks: Dict[str, dict]):
+        """
+        根据最新采样对低收益任务执行限速/暂停动作。delete 动作由现有删除流程统一处理。
+        """
+        if not torrents:
+            return
+
+        for torrent in torrents:
+            torrent_hash = self.__get_hash(torrent)
+            torrent_task = torrent_tasks.get(torrent_hash)
+            if not torrent_hash or not torrent_task or torrent_task.get("deleted"):
+                continue
+
+            site_name = torrent_task.get("site_name", "")
+            brush_config = self.__get_brush_config(sitename=site_name)
+            if not brush_config.yield_guard_enabled:
+                continue
+
+            torrent_info = self.__get_torrent_info(torrent)
+            should_delete, reason = self.__evaluate_yield_guard_for_delete(
+                site_name=site_name,
+                brush_config=brush_config,
+                torrent_info=torrent_info,
+                torrent_task=torrent_task
+            )
+            torrent_task["yield_guard_evaluated_in_check"] = True
+            torrent_task["yield_guard_should_delete"] = bool(should_delete)
+            if should_delete:
+                continue
+
+            stage = torrent_task.get("yield_guard_stage")
+            action = None
+            if torrent_task.get("yield_guard_restore_download_limit"):
+                action = "restore_limit"
+            elif stage == "limited":
+                action = "limit"
+            elif stage == "paused":
+                action = "pause"
+
+            if action:
+                if self.__apply_qb_yield_guard_action(torrent_hash=torrent_hash,
+                                                      action=action,
+                                                      brush_config=brush_config):
+                    torrent_task["yield_guard_last_action_time"] = time.time()
+                    if action == "restore_limit":
+                        torrent_task["yield_guard_restore_download_limit"] = False
+                    logger.info(f"站点：{site_name}，{reason}，已执行上传收益保护动作：{action}")
 
     @classmethod
     def __normalize_hash(cls, hash_value: Any) -> str:
@@ -3399,6 +3962,181 @@ class BrushFlowLowFreq(_PluginBase):
         total_size = self.__number_or_none(torrent_info.get("total_size"))
         return downloaded is not None and total_size is not None and total_size > 0 and downloaded >= total_size
 
+    @staticmethod
+    def __yield_guard_action_value(action: Any, default_value: str) -> str:
+        action = str(action or "").strip().lower()
+        return action if action in {"none", "limit", "pause", "delete"} else default_value
+
+    @staticmethod
+    def __yield_guard_positive_number(value: Any, default_value: float = 0.0) -> float:
+        try:
+            if value in (None, ""):
+                return default_value
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return default_value
+
+    def __evaluate_yield_guard_for_delete(self, site_name: str, brush_config: BrushConfig,
+                                          torrent_info: dict, torrent_task: dict) -> Tuple[bool, str]:
+        """
+        评估上传收益保护。这里返回 True 表示应交给现有删种流程删除。
+        限速/暂停动作在 check() 的动作层处理；本函数只维护状态和给出决策原因。
+        """
+        if not brush_config.yield_guard_enabled:
+            torrent_task["yield_guard_good_protected"] = False
+            torrent_task["yield_guard_promising_protected"] = False
+            return False, ""
+
+        interval_upspeed = self.__number_or_none(torrent_task.get("last_check_interval_upspeed"))
+        if interval_upspeed is None:
+            interval_upspeed = self.__number_or_none(torrent_info.get("last_check_interval_upspeed"))
+        avg_upspeed = self.__number_or_none(torrent_info.get("avg_upspeed"))
+
+        good_upload_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_good_upload_kbs) * 1024
+        good_avg_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_good_avg_upload_kbs) * 1024
+        good_protected = False
+        if good_upload_bytes > 0 and interval_upspeed is not None and interval_upspeed >= good_upload_bytes:
+            good_protected = True
+        if good_avg_bytes > 0 and avg_upspeed is not None and avg_upspeed >= good_avg_bytes:
+            good_protected = True
+        torrent_task["yield_guard_good_protected"] = good_protected
+        if good_protected:
+            if torrent_task.get("yield_guard_stage") == "limited":
+                torrent_task["yield_guard_stage"] = "normal"
+                torrent_task["yield_guard_restore_download_limit"] = True
+            torrent_task["yield_guard_bad_streak"] = 0
+            torrent_task["yield_guard_last_reason"] = "上传收益保护：上传表现达标，跳过易误伤删种规则"
+            return False, torrent_task["yield_guard_last_reason"]
+
+        short_window, short_window_reason = self.__evaluate_yield_guard_short_window(
+            brush_config=brush_config,
+            torrent_task=torrent_task
+        )
+        torrent_task["yield_guard_promising_protected"] = short_window
+
+        bad_checks = max(1, int(self.__yield_guard_positive_number(brush_config.yield_guard_bad_checks, 2)))
+        bad_streak = int(self.__yield_guard_positive_number(torrent_task.get("yield_guard_bad_streak"), 0))
+        stage = torrent_task.get("yield_guard_stage") or "normal"
+        first_transfer_time = torrent_task.get("first_downloaded_time")
+        if first_transfer_time is None:
+            first_transfer_time = torrent_task.get("first_uploaded_time")
+        transfer_elapsed_minutes = self.__get_task_elapsed_minutes(first_transfer_time) if first_transfer_time is not None else None
+        fast_fail_minutes = self.__yield_guard_positive_number(brush_config.yield_guard_fast_fail_minutes, 10)
+
+        if stage == "paused" and bad_streak >= bad_checks:
+            if short_window:
+                torrent_task["yield_guard_last_reason"] = short_window_reason or "上传收益保护：仍处于短窗保护"
+                return False, torrent_task["yield_guard_last_reason"]
+            if fast_fail_minutes <= 0 or (transfer_elapsed_minutes is not None and transfer_elapsed_minutes >= fast_fail_minutes):
+                final_action = self.__yield_guard_action_value(brush_config.yield_guard_final_action, "delete")
+                if final_action == "delete":
+                    reason = f"上传收益保护：低收益，已超过快速淘汰窗口，连续 {bad_streak} 次，最终删除"
+                    torrent_task["yield_guard_last_reason"] = reason
+                    return True, reason
+                reason = f"上传收益保护：低收益，已超过快速淘汰窗口，动作 {final_action}"
+                torrent_task["yield_guard_last_reason"] = reason
+                return False, reason
+            torrent_task["yield_guard_last_reason"] = "上传收益保护：已暂停，但尚未超过快速淘汰窗口"
+            return False, torrent_task["yield_guard_last_reason"]
+
+        interval_downspeed = self.__number_or_none(torrent_task.get("last_check_interval_downspeed"))
+        if interval_downspeed is None:
+            interval_downspeed = self.__number_or_none(torrent_info.get("last_check_interval_downspeed"))
+        downspeed_valid = bool(torrent_task.get("last_check_interval_downspeed_valid",
+                                                torrent_info.get("last_check_interval_downspeed_valid", False)))
+        upspeed_valid = bool(torrent_task.get("last_check_interval_upspeed_valid",
+                                              torrent_info.get("last_check_interval_upspeed_valid", False)))
+        if not (downspeed_valid and upspeed_valid):
+            torrent_task["yield_guard_bad_streak"] = 0
+            torrent_task["yield_guard_last_reason"] = "上传收益保护：采样未就绪"
+            return False, torrent_task["yield_guard_last_reason"]
+
+        high_download_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_high_download_kbs) * 1024
+        low_upload_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_low_upload_kbs) * 1024
+        is_high_download = high_download_bytes > 0 and interval_downspeed is not None and interval_downspeed >= high_download_bytes
+        is_low_upload = interval_upspeed is not None and interval_upspeed <= low_upload_bytes
+
+        downloaded = self.__number_or_none(torrent_info.get("downloaded")) or 0
+        total_size = self.__number_or_none(torrent_info.get("total_size")) or 0
+        min_downloaded_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_min_downloaded_gb) * 1024 ** 3
+        min_progress_percent = self.__yield_guard_positive_number(brush_config.yield_guard_min_progress_percent)
+        progress_percent = (downloaded / total_size * 100) if total_size > 0 else 0
+        has_enough_sample = (
+                (min_downloaded_bytes <= 0 or downloaded >= min_downloaded_bytes)
+                and (min_progress_percent <= 0 or progress_percent >= min_progress_percent)
+        )
+
+        if not (is_high_download and is_low_upload and has_enough_sample):
+            torrent_task["yield_guard_bad_streak"] = 0
+            if torrent_task.get("yield_guard_stage") == "limited":
+                torrent_task["yield_guard_stage"] = "normal"
+            torrent_task["yield_guard_last_reason"] = "上传收益保护：未命中低收益条件"
+            return False, torrent_task["yield_guard_last_reason"]
+
+        bad_streak = int(self.__yield_guard_positive_number(torrent_task.get("yield_guard_bad_streak"), 0)) + 1
+        torrent_task["yield_guard_bad_streak"] = bad_streak
+        records = torrent_task.get("yield_guard_bad_records")
+        if not isinstance(records, list):
+            records = []
+        records.append(1)
+        torrent_task["yield_guard_bad_records"] = records[-20:]
+
+        if bad_streak < bad_checks:
+            reason = f"上传收益保护：低收益命中 {bad_streak}/{bad_checks} 次，继续观察"
+            torrent_task["yield_guard_last_reason"] = reason
+            return False, reason
+
+        in_short_window = short_window
+
+        stage = torrent_task.get("yield_guard_stage") or "normal"
+        if stage == "normal":
+            action = self.__yield_guard_action_value(brush_config.yield_guard_first_action, "limit")
+        elif stage == "limited":
+            action = self.__yield_guard_action_value(brush_config.yield_guard_second_action, "pause")
+        else:
+            action = self.__yield_guard_action_value(brush_config.yield_guard_final_action, "delete")
+
+        if in_short_window and action == "delete":
+            action = "pause"
+
+        reason = (f"上传收益保护：低收益，下载 {interval_downspeed / 1024:.1f} KB/s，"
+                  f"上传 {interval_upspeed / 1024:.1f} KB/s，连续 {bad_streak} 次，动作 {action}")
+        torrent_task["yield_guard_last_reason"] = reason
+
+        if action == "limit":
+            torrent_task["yield_guard_stage"] = "limited"
+            return False, reason
+        if action == "pause":
+            torrent_task["yield_guard_stage"] = "paused"
+            torrent_task["yield_guard_paused_time"] = time.time()
+            return False, reason
+        if action == "delete":
+            return True, reason
+        return False, reason
+
+    def __evaluate_yield_guard_short_window(self, brush_config: BrushConfig, torrent_task: dict) -> Tuple[bool, str]:
+        """
+        判断当前是否仍处于上传收益保护短窗期。
+        """
+        promising_pub_minutes = int(self.__yield_guard_positive_number(
+            brush_config.yield_guard_promising_pubtime_minutes, 15
+        ))
+        pubdate = torrent_task.get("pubdate")
+        if promising_pub_minutes > 0 and pubdate:
+            pubdate_minutes = self.__get_pubminutes(str(pubdate))
+            if 0 < pubdate_minutes <= promising_pub_minutes:
+                return True, f"上传收益保护：发布时间 {pubdate_minutes:.0f} 分钟内，仍处于短窗保护"
+
+        fast_fail_minutes = self.__yield_guard_positive_number(brush_config.yield_guard_fast_fail_minutes, 10)
+        first_transfer_time = torrent_task.get("first_downloaded_time")
+        if first_transfer_time is None:
+            first_transfer_time = torrent_task.get("first_uploaded_time")
+        transfer_elapsed_minutes = self.__get_task_elapsed_minutes(first_transfer_time) if first_transfer_time is not None else None
+        if fast_fail_minutes > 0 and transfer_elapsed_minutes is not None and transfer_elapsed_minutes < fast_fail_minutes:
+            return True, f"上传收益保护：首次实际传输 {transfer_elapsed_minutes:.0f} 分钟内，仍处于短窗保护"
+
+        return False, ""
+
     def __evaluate_conditions_for_delete(self, site_name: str, torrent_info: dict, torrent_task: dict,
                                           downloading_count: int = 0) \
             -> Tuple[bool, str]:
@@ -3426,6 +4164,24 @@ class BrushFlowLowFreq(_PluginBase):
             return True, no_free_reason
         if no_free_reason and no_free_reason.startswith("失去免费删种检测跳过"):
             logger.debug(f"站点：{site_name}，{no_free_reason}")
+
+        if torrent_task.get("yield_guard_evaluated_in_check"):
+            yield_guard_should_delete = bool(torrent_task.get("yield_guard_should_delete"))
+            yield_guard_reason = torrent_task.get("yield_guard_last_reason", "")
+        else:
+            yield_guard_should_delete, yield_guard_reason = self.__evaluate_yield_guard_for_delete(
+                site_name=site_name,
+                brush_config=brush_config,
+                torrent_info=torrent_info,
+                torrent_task=torrent_task
+            )
+        if yield_guard_should_delete:
+            return True, yield_guard_reason
+        yield_guard_good_protected = (
+                brush_config.yield_guard_enabled
+                and brush_config.yield_guard_protect_delete_rules
+                and bool(torrent_task.get("yield_guard_good_protected"))
+        )
 
         task_elapsed_minutes = self.__get_task_elapsed_minutes(torrent_task.get("time"))
         ratio_check_minutes = brush_config.seed_ratio_check_minutes if brush_config.seed_ratio_check_minutes else 30
@@ -3478,6 +4234,7 @@ class BrushFlowLowFreq(_PluginBase):
             if brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
                 return True, f"H&R种子，分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
             if (brush_config.seed_ratio_min_30m and not download_protection_active
+                    and not yield_guard_good_protected
                     and not speed_protection_active
                     and downloaded_elapsed_minutes is not None
                     and downloaded_elapsed_minutes >= float(ratio_check_minutes)
@@ -3493,6 +4250,7 @@ class BrushFlowLowFreq(_PluginBase):
         elif brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
             reason = f"分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
         elif (brush_config.seed_ratio_min_30m and not download_protection_active
+              and not yield_guard_good_protected
               and not speed_protection_active
               and downloaded_elapsed_minutes is not None
               and downloaded_elapsed_minutes >= float(ratio_check_minutes)
@@ -3504,15 +4262,20 @@ class BrushFlowLowFreq(_PluginBase):
         elif brush_config.download_time and torrent_info.get("downloaded") < torrent_info.get(
                 "total_size") and torrent_info.get("dltime") >= float(brush_config.download_time) * 3600:
             reason = f"下载耗时 {torrent_info.get('dltime') / 3600:.1f} 小时，大于 {brush_config.download_time} 小时"
-        elif brush_config.seed_avgspeed and torrent_info.get("avg_upspeed") <= float(
-                brush_config.seed_avgspeed) * 1024 and torrent_info.get("seeding_time") >= 30 * 60:
+        elif (brush_config.seed_avgspeed and not yield_guard_good_protected
+              and torrent_info.get("avg_upspeed") <= float(brush_config.seed_avgspeed) * 1024
+              and torrent_info.get("seeding_time") >= 30 * 60):
             reason = f"平均上传速度 {torrent_info.get('avg_upspeed') / 1024:.1f} KB/s，低于 {brush_config.seed_avgspeed} KB/s"
-        elif interval_should_delete:
+        elif interval_should_delete and not yield_guard_good_protected:
             reason = interval_reason
         elif brush_config.seed_inactivetime and torrent_info.get("iatime") >= float(
                 brush_config.seed_inactivetime) * 60:
             reason = f"未活动时间 {torrent_info.get('iatime') / 60:.0f} 分钟，大于 {brush_config.seed_inactivetime} 分钟"
         else:
+            if yield_guard_good_protected:
+                return False, torrent_task.get("yield_guard_last_reason") or "上传收益保护已跳过易误伤删种规则"
+            if yield_guard_reason:
+                return False, yield_guard_reason
             return False, interval_reason if interval_reason else reason
 
         return True, reason if not hit_and_run else "H&R种子（未设置H&R条件），" + reason
@@ -4211,7 +4974,27 @@ class BrushFlowLowFreq(_PluginBase):
             "deleted": False,
             "time": torrent_info.get("add_on", time.time())
         }
+        torrent_task.update(self.__get_default_yield_guard_task_state())
         return torrent_task
+
+    @staticmethod
+    def __get_default_yield_guard_task_state() -> Dict[str, Any]:
+        return {
+            "last_check_downloaded": None,
+            "last_check_interval_downloaded": None,
+            "last_check_interval_downspeed": None,
+            "last_check_interval_downspeed_valid": False,
+            "yield_guard_bad_records": [],
+            "yield_guard_bad_streak": 0,
+            "yield_guard_stage": "normal",
+            "yield_guard_last_action_time": None,
+            "yield_guard_paused_time": None,
+            "yield_guard_last_probe_time": None,
+            "yield_guard_good_protected": False,
+            "yield_guard_promising_protected": False,
+            "yield_guard_restore_download_limit": False,
+            "yield_guard_last_reason": ""
+        }
 
     # endregion
 
@@ -4638,6 +5421,54 @@ class BrushFlowLowFreq(_PluginBase):
             downloader.qbc.torrents_reannounce(torrent_hashes=torrent_hashes)
         except Exception as err:
             logger.error(f"强制重新汇报失败：{str(err)}")
+
+    def __apply_qb_yield_guard_action(self, torrent_hash: str, action: str, brush_config: BrushConfig) -> bool:
+        """
+        执行上传收益保护的 qBittorrent 动作。delete 动作由现有删种流程处理。
+        """
+        if not torrent_hash or not brush_config.yield_guard_enabled:
+            return False
+        raw_action = str(action or "").strip().lower()
+        action = "restore_limit" if raw_action == "restore_limit" else self.__yield_guard_action_value(action, "none")
+        if action in ("none", "delete"):
+            return False
+        if brush_config.yield_guard_rehearsal:
+            logger.info(f"上传收益保护演练模式：hash={torrent_hash}，动作={action}，不实际执行")
+            return False
+
+        downloader = self.downloader
+        if not downloader:
+            return False
+
+        try:
+            if action == "limit":
+                download_limit = int(self.__yield_guard_positive_number(
+                    brush_config.yield_guard_download_limit_kbs, 512
+                ) * 1024)
+                if getattr(downloader, "qbc", None) and hasattr(downloader.qbc, "torrents_set_download_limit"):
+                    downloader.qbc.torrents_set_download_limit([torrent_hash], download_limit)
+                    return True
+                if hasattr(downloader, "change_torrent"):
+                    downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)
+                    return True
+            if action == "restore_limit":
+                download_limit = int(self.__yield_guard_positive_number(brush_config.dl_speed, 0) * 1024)
+                if getattr(downloader, "qbc", None) and hasattr(downloader.qbc, "torrents_set_download_limit"):
+                    downloader.qbc.torrents_set_download_limit([torrent_hash], download_limit)
+                    return True
+                if hasattr(downloader, "change_torrent"):
+                    downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)
+                    return True
+            if action == "pause":
+                if getattr(downloader, "qbc", None) and hasattr(downloader.qbc, "torrents_pause"):
+                    downloader.qbc.torrents_pause([torrent_hash])
+                    return True
+                if hasattr(downloader, "pause_torrent"):
+                    downloader.pause_torrent(hash_string=torrent_hash)
+                    return True
+        except Exception as err:
+            logger.error(f"上传收益保护执行 qB 动作失败，hash={torrent_hash}，动作={action}，错误：{err}")
+        return False
 
     def __get_hash(self, torrent: Any):
         """

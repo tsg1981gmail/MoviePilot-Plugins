@@ -6,6 +6,11 @@
 
 ## 版本更新日志
 
+- v4.3.26
+  - 新增“上传收益保护”：按检查间下载/上传表现识别高下载低上传任务，支持限速、暂停和短窗后删除
+  - 新增高上传保护和高收益池软停止：保护上传快的任务，减少低收益新增，同时保留可配置探测名额
+  - 上传收益保护默认关闭，默认开启演练模式，建议先观察日志后再执行真实动作
+
 - v4.3.25
   - 修复 hash 大小写不一致导致任务重复、数量不准和误判“下载器中找不到”的问题
   - 修复下载保护在站点独立配置下可能使用错误计数的问题
@@ -182,6 +187,26 @@
 | 选种包含第二页         | `include_second_page` | 是否获取站点第二页种子扩大选种范围   | 默认关闭（仅获取前100个种子）；开启后获取前两页（最多200个种子），提供更大的选种池                                |
 | 下载保护阈值           | `skip_rules_downloading_threshold` | 下载中种子数≤此值时跳过最低分享率和上传速度检查 | 默认 0（关闭）；示例：3，保护种子数量少时不被过早删除                                                              |
 | 分享率保护速度阈值（KB/s） | `seed_ratio_speed_protect` | 平均上传速度≥此值时即使分享率低也不删 | 默认 0（关闭）；示例：100，种子上传达100KB/s即豁免分享率检查                                                        |
+| 上传收益保护           | `yield_guard_enabled` | 是否启用上传收益保护                 | 默认关闭；仅处理插件托管任务，第一版面向 qBittorrent                                                               |
+| 上传收益保护演练模式   | `yield_guard_rehearsal` | 命中低收益动作时只记录日志，不实际限速/暂停/删除 | 默认开启；建议观察 24 小时后再关闭                                                                                 |
+| 收益保护高下载阈值（KB/s） | `yield_guard_high_download_kbs` | 检查间下载速度达到该值时参与低收益判断 | 默认 2048                                                                                                          |
+| 收益保护低上传阈值（KB/s） | `yield_guard_low_upload_kbs` | 检查间上传速度低于该值时参与低收益判断 | 默认 200                                                                                                           |
+| 低收益连续命中次数     | `yield_guard_bad_checks` | 连续命中多少次后执行低收益动作       | 默认 2                                                                                                             |
+| 收益保护最小下载量（GB） | `yield_guard_min_downloaded_gb` | 下载量达到该值后才处理低收益任务     | 默认 2                                                                                                             |
+| 收益保护最小进度（%）  | `yield_guard_min_progress_percent` | 下载进度达到该值后才处理低收益任务   | 默认 10                                                                                                            |
+| 低收益首次动作         | `yield_guard_first_action` | 首次确认低收益后的动作               | 可选 `none`、`limit`、`pause`、`delete`；默认 `limit`                                                               |
+| 低收益二次动作         | `yield_guard_second_action` | 限速后仍低收益时的动作               | 可选 `none`、`pause`、`delete`；默认 `pause`                                                                        |
+| 短窗后最终动作         | `yield_guard_final_action` | 暂停后超过短窗仍低收益时的动作       | 可选 `none`、`delete`；默认 `delete`                                                                                |
+| 低收益下载限速（KB/s） | `yield_guard_download_limit_kbs` | 低收益限速动作使用的下载限速         | 默认 512                                                                                                           |
+| 快速淘汰窗口（分钟）   | `yield_guard_fast_fail_minutes` | 首次实际传输后多少分钟内不直接删除   | 默认 10；窗口内若动作是删除，会降级为暂停                                                                          |
+| 高上传保护阈值（KB/s） | `yield_guard_good_upload_kbs` | 检查间上传达到该值时保护任务         | 默认 500；会跳过低分享率、平均低速、检查间低速等易误伤规则                                                         |
+| 高平均上传保护阈值（KB/s） | `yield_guard_good_avg_upload_kbs` | 平均上传达到该值时保护任务           | 默认 500                                                                                                           |
+| 保护高上传任务         | `yield_guard_protect_delete_rules` | 高上传保护命中时跳过易误伤删种规则   | 默认开启；不阻止失去免费即删种、做种时间、上传量上限等明确规则                                                     |
+| 高收益池满时停止新增   | `yield_guard_stop_brush_when_good_pool` | 高收益任务数达到阈值后减少新增       | 默认开启；仍受探测名额控制                                                                                         |
+| 高收益池最小数量       | `yield_guard_good_pool_min_count` | 高上传保护任务达到多少个后进入软停止 | 默认 2                                                                                                             |
+| 收益保护探测名额       | `yield_guard_probe_slots` | 高收益池满时保留多少个普通探测任务   | 默认 1；设置 0 表示高收益池满后不再保留探测                                                                         |
+| 收益保护探测间隔（分钟） | `yield_guard_probe_interval_minutes` | 两次探测新增之间的最小间隔           | 默认 10                                                                                                            |
+| 新发布短窗保护（分钟） | `yield_guard_promising_pubtime_minutes` | 发布时间在该窗口内时不直接删除       | 默认 15                                                                                                            |
 | 动态删除种子           | `proxy_delete`       | 是否启用动态删除种子                 | **实验性功能**，可能导致刷流数据异常，甚至清空数据，请慎重开启。详情见[动态删除规则](#动态删除规则)               |
 | 清除统计数据           | `clear_task`         | 是否清除统计数据                     | 一次性任务，自动重置插件数据页中的所有数据                                                                        |
 | 站点独立配置           | `enable_site_config` | 是否启用站点独立配置                 | 详情见[站点独立配置](#站点独立配置)                                                                               |
@@ -240,6 +265,26 @@
 - `interval_upspeed_continuous`：检查间低速按连续命中判定
 - `interval_upspeed_rehearsal`：检查间低速演练模式（只提醒不删）
 - `seed_inactivetime`：未活动时间
+- `yield_guard_enabled`：上传收益保护
+- `yield_guard_rehearsal`：上传收益保护演练模式
+- `yield_guard_high_download_kbs`：收益保护高下载阈值（KB/s）
+- `yield_guard_low_upload_kbs`：收益保护低上传阈值（KB/s）
+- `yield_guard_bad_checks`：低收益连续命中次数
+- `yield_guard_min_downloaded_gb`：收益保护最小下载量（GB）
+- `yield_guard_min_progress_percent`：收益保护最小进度（%）
+- `yield_guard_first_action`：低收益首次动作
+- `yield_guard_second_action`：低收益二次动作
+- `yield_guard_final_action`：短窗后最终动作
+- `yield_guard_download_limit_kbs`：低收益下载限速（KB/s）
+- `yield_guard_fast_fail_minutes`：快速淘汰窗口（分钟）
+- `yield_guard_good_upload_kbs`：高上传保护阈值（KB/s）
+- `yield_guard_good_avg_upload_kbs`：高平均上传保护阈值（KB/s）
+- `yield_guard_protect_delete_rules`：保护高上传任务
+- `yield_guard_stop_brush_when_good_pool`：高收益池满时停止新增
+- `yield_guard_good_pool_min_count`：高收益池最小数量
+- `yield_guard_probe_slots`：收益保护探测名额
+- `yield_guard_probe_interval_minutes`：收益保护探测间隔（分钟）
+- `yield_guard_promising_pubtime_minutes`：新发布短窗保护（分钟）
 - `save_path`：保存目录
 - `proxy_delete`：动态删除种子（实验性功能）
 - `hr_seed_time`：H&R 做种时间
@@ -293,6 +338,26 @@
     "interval_upspeed_start_minutes": 30,
     "interval_upspeed_continuous": false,
     "interval_upspeed_rehearsal": false,
+    "yield_guard_enabled": true,
+    "yield_guard_rehearsal": true,
+    "yield_guard_high_download_kbs": 2048,
+    "yield_guard_low_upload_kbs": 200,
+    "yield_guard_bad_checks": 2,
+    "yield_guard_min_downloaded_gb": 2,
+    "yield_guard_min_progress_percent": 10,
+    "yield_guard_first_action": "limit",
+    "yield_guard_second_action": "pause",
+    "yield_guard_final_action": "delete",
+    "yield_guard_download_limit_kbs": 512,
+    "yield_guard_fast_fail_minutes": 10,
+    "yield_guard_good_upload_kbs": 500,
+    "yield_guard_good_avg_upload_kbs": 500,
+    "yield_guard_protect_delete_rules": true,
+    "yield_guard_stop_brush_when_good_pool": true,
+    "yield_guard_good_pool_min_count": 2,
+    "yield_guard_probe_slots": 1,
+    "yield_guard_probe_interval_minutes": 10,
+    "yield_guard_promising_pubtime_minutes": 15,
     "seed_inactivetime": "",
     "save_path": "/downloads/site1",
     "proxy_delete": false,
