@@ -1,8 +1,10 @@
-# qBittorrent 上传收益保护设计
+# PT 场景上传收益保护设计
 
 ## 背景
 
 用户的上下行带宽都是 10M，当前目标不是单纯限制下载速度，而是保证刷流资源优先给“上传快、有收益”的种子。实际风险是：某些种子下载速度很高但上传很慢，它们会占用 qBittorrent 活跃任务、连接、磁盘 IO、缓存、做种体积和刷流新增节奏，间接影响真正上传快的种子。
+
+在 PT 站点里，上传收益通常集中在种子加入后的最早一小段时间。进入稳定做种后，长期突然爆发的大上传种相对少，更多任务只是一般种子。因此策略不应该长时间等待普通种子翻身，而应该用短窗口快速筛掉低收益任务，同时保留少量探测名额发现少数优质种。
 
 现有 `brushflowlowfreq` 插件已有以下能力：
 
@@ -20,7 +22,7 @@
 1. 识别连续高下载但低上传的低收益刷流任务。
 2. 对低收益任务先降下载限速，再暂停下载，最后可选删除。
 3. 保护上传表现好的种子，不让它们被低分享率、低速或动态删种规则误伤。
-4. 控制新增任务节奏，避免低收益任务稀释 qB 资源，同时保留少量探测名额，避免错过潜在优质上传种。
+4. 控制新增任务节奏，避免低收益任务稀释 qB 资源，同时保留少量探测名额，避免错过少数优质上传种。
 5. 保持默认关闭，避免升级后改变用户现有行为。
 
 ## 非目标
@@ -28,7 +30,7 @@
 - 不做路由器 QoS/SQM，也不承诺系统级包优先级。
 - 不限制高上传种子的上传速度。
 - 不把所有下载任务都视为有害；只处理“下载高且上传低”的任务。
-- 不在任务尚未完成且没有完成后做种观察窗口前执行最终删除。
+- 不保留长时间等待窗口去赌普通种子后期翻身。
 - 不影响非插件托管种子，除非未来单独增加显式开关。
 
 ## 核心概念
@@ -67,21 +69,19 @@ interval_downspeed = (current_downloaded - last_check_downloaded) / interval_sec
 - 最小进度：`10%`
 - 连续命中：`2`
 
-低收益命中只代表“当前资源收益差”，不代表该任务永远没有价值。下载中的任务第一版默认只允许降速或暂停，最终删除必须等任务完成并经过完成后观察窗口。
+低收益命中只代表“当前资源收益差”，不代表该任务永远没有价值。PT 场景下，这个信号本身就足够早，默认只给很短的缓冲时间；缓冲结束后仍低收益，就允许删除，不必等到完成。
 
-### 潜在优质种保护
+### PT 短窗保护
 
-部分种子前期下载很快、上传很慢，但完成后可能因为站点 peers 增加、客户端校验完成、热门内容扩散而开始大量上传。为避免错过这类任务，新增潜在优质保护：
+为避免刚发布的少量优质种被太快淘汰，新增短窗保护：
 
-满足任一条件的下载中任务，不允许直接删除：
+满足任一条件的任务，可以在短窗内只降速或暂停，不直接删除：
 
 - 发布时间很新，仍在 `yield_guard_promising_pubtime_minutes` 内。
-- 做种人数较少，且符合用户选种规则。
-- 免费剩余时间充足。
-- 已下载比例未达到完成后观察条件。
+- 刚开始有下载或上传数据，距离首次实际传输还未超过 `yield_guard_fast_fail_minutes`。
 - 最近有过任意有效上传增长。
 
-这些任务可以被降速，必要时可以暂停，但不能在下载阶段被最终删除。
+短窗到期后，如果仍然高下载低上传，就按普通低收益处理，允许最终删除。
 
 ### 高收益保护
 
@@ -102,6 +102,23 @@ interval_downspeed = (current_downloaded - last_check_downloaded) / interval_sec
 - 不阻止 H&R 专用做种时间/分享率规则。
 - 不阻止用户明确配置的上传量上限。
 
+### 可调参数原则
+
+PT 站点差异很大，同一站点在不同时间段的 peers 行为也会变化。收益保护不把任何关键阈值写死，以下参数都必须由用户可配置：
+
+- 判定“高下载”的下载速度阈值。
+- 判定“低上传”的上传速度阈值。
+- 连续命中多少次才算低收益。
+- 最小已下载体积和最小下载进度。
+- 快速淘汰窗口分钟数。
+- 低收益后的动作链。
+- 降速后的下载限速。
+- 高上传保护阈值。
+- 高收益池数量、探测名额和探测间隔。
+- 新发布种子的短窗保护时间。
+
+全局配置用于通用默认值，站点独立配置用于针对不同 PT 站点调优。
+
 ## 配置项
 
 新增配置项默认关闭：
@@ -116,21 +133,20 @@ interval_downspeed = (current_downloaded - last_check_downloaded) / interval_sec
 | `yield_guard_min_progress_percent` | `10` | 下载进度达到多少百分比后才处理 |
 | `yield_guard_first_action` | `limit` | 首次命中后的动作：`limit` / `pause` / `delete` |
 | `yield_guard_second_action` | `pause` | 降速后仍低收益的动作：`none` / `pause` / `delete` |
-| `yield_guard_final_action` | `delete` | 完成后观察仍低收益的动作：`none` / `delete` |
+| `yield_guard_final_action` | `delete` | 短窗到期后仍低收益的动作：`none` / `delete` |
 | `yield_guard_download_limit_kbs` | `512` | 低收益任务被降速后的下载限速 |
-| `yield_guard_paused_delete_minutes` | `30` | 已完成任务被收益保护暂停后，观察超过多少分钟才执行最终删除 |
-| `yield_guard_complete_observe_minutes` | `30` | 任务完成后至少观察多少分钟，才允许最终删除 |
+| `yield_guard_fast_fail_minutes` | `10` | 从首次实际传输开始，超过多少分钟仍低收益就允许最终删除 |
 | `yield_guard_good_upload_kbs` | `500` | 检查间上传达到该值时保护 |
 | `yield_guard_good_avg_upload_kbs` | `500` | 平均上传达到该值时保护 |
 | `yield_guard_protect_delete_rules` | `true` | 上传表现好时跳过低分享率、平均低速、检查间低速、动态兜底删除 |
 | `yield_guard_stop_brush_when_good_pool` | `true` | 高收益任务池足够时减少新增刷流，但仍保留探测名额 |
 | `yield_guard_good_pool_min_count` | `2` | 高收益任务至少达到多少个后停止新增 |
 | `yield_guard_probe_slots` | `1` | 高收益池足够时仍保留多少个低速探测下载名额 |
-| `yield_guard_probe_interval_minutes` | `30` | 高收益池足够时，两次探测新增之间至少间隔多少分钟 |
-| `yield_guard_promising_pubtime_minutes` | `60` | 发布时间多新以内视为潜在优质任务，不允许下载阶段最终删除 |
+| `yield_guard_probe_interval_minutes` | `10` | 高收益池足够时，两次探测新增之间至少间隔多少分钟 |
+| `yield_guard_promising_pubtime_minutes` | `15` | 发布时间多新以内视为短窗优先任务 |
 | `yield_guard_rehearsal` | `true` | 演练模式，只记录和提醒，不执行限速/暂停/删除 |
 
-站点独立配置支持以上字段，站点未配置时使用全局配置。
+以上数值项都必须支持全局配置和站点独立配置。默认值只作为初始建议，不代表固定策略；用户可以在后续自行摸索并调整。
 
 ## 状态字段
 
@@ -147,10 +163,9 @@ interval_downspeed = (current_downloaded - last_check_downloaded) / interval_sec
 | `yield_guard_stage` | string | `normal` / `limited` / `paused` |
 | `yield_guard_last_action_time` | number/null | 最近一次保护动作时间 |
 | `yield_guard_paused_time` | number/null | 被收益保护暂停的时间 |
-| `yield_guard_completed_time` | number/null | 首次检测到完成的时间 |
 | `yield_guard_last_probe_time` | number/null | 最近一次按探测名额新增任务的时间 |
 | `yield_guard_good_protected` | bool | 最近一次检查是否被高收益保护 |
-| `yield_guard_promising_protected` | bool | 最近一次检查是否被潜在优质保护 |
+| `yield_guard_promising_protected` | bool | 最近一次检查是否被短窗保护 |
 | `yield_guard_last_reason` | string | 最近一次收益判断原因 |
 
 新增任务时初始化这些字段。存量任务首次检查时以当前数据补基线，不立即触发动作。
@@ -176,14 +191,14 @@ interval_downspeed = (current_downloaded - last_check_downloaded) / interval_sec
 
 1. `normal` 阶段命中：执行 `yield_guard_first_action`。
 2. `limited` 阶段继续命中：执行 `yield_guard_second_action`。
-3. `paused` 阶段不再依赖“高下载低上传”继续命中，因为暂停后下载速度会变为 0。只有任务已完成、已完成观察窗口到期、且暂停观察时间到期后，才执行 `yield_guard_final_action`。
+3. `paused` 阶段不再依赖“高下载低上传”继续命中，因为暂停后下载速度会变为 0。只要距离首次实际传输已经超过 `yield_guard_fast_fail_minutes`，且上一阶段已经确认低收益，就执行 `yield_guard_final_action`，不要求任务完成。
 
 推荐默认行为：
 
 ```text
 normal -> limit download to 512 KB/s
 limited -> pause torrent
-completed and observed for 30 minutes + paused for 30 minutes -> delete torrent and files
+after 10 minutes of real transfer and still low -> delete torrent and files
 ```
 
 如果演练模式开启，只记录日志和通知，不调用 qB 修改接口。
@@ -198,8 +213,8 @@ completed and observed for 30 minutes + paused for 30 minutes -> delete torrent 
 如果任务被暂停：
 
 - 默认不自动恢复，避免反复抢资源。
-- 下载中的任务不执行最终删除，最多保持暂停状态。
-- 暂停后的最终删除仅适用于已完成任务，并同时满足 `yield_guard_complete_observe_minutes` 和 `yield_guard_paused_delete_minutes`。
+- 下载中的任务可以在短窗到期后最终删除，不再强制等完成。
+- 暂停后的最终删除以短窗为准，而不是以完成状态为准。
 - 后续可增加“低峰时段恢复”能力，但不纳入第一版。
 
 ## qBittorrent 操作
@@ -281,6 +296,7 @@ completed and observed for 30 minutes + paused for 30 minutes -> delete torrent 
 - 高下载阈值
 - 低上传阈值
 - 连续命中次数
+- 快速淘汰窗口
 - 低收益动作
 - 降速值
 - 高上传保护阈值
@@ -296,14 +312,13 @@ completed and observed for 30 minutes + paused for 30 minutes -> delete torrent 
 4. 未达到最小下载体积或进度时不处理。
 5. 演练模式不调用 qB 动作。
 6. 低收益任务从 normal 到 limited、paused、delete 的阶段递进。
-7. 下载中的低收益任务不会执行最终删除，只允许限速或暂停。
-8. 已完成任务必须经过完成后观察窗口，才允许最终删除。
-9. 暂停任务不会因为下载速度归零而卡住最终动作，观察超时后按配置删除或保留。
-10. 上传恢复后从 limited 回到 normal，并恢复下载限速。
-11. 高收益池足够时仍按探测名额周期性允许新增任务。
-12. 高收益保护跳过低分享率、平均低速和检查间低速删除。
-13. 失去免费即删种不受高收益保护阻止。
-14. 站点独立配置覆盖全局收益保护配置。
+7. 下载中的低收益任务在短窗内只允许限速或暂停，短窗到期后可以直接删除。
+8. 暂停任务不会因为下载速度归零而卡住最终动作。
+9. 上传恢复后从 limited 回到 normal，并恢复下载限速。
+10. 高收益池足够时仍按探测名额周期性允许新增任务。
+11. 高收益保护跳过低分享率、平均低速和检查间低速删除。
+12. 失去免费即删种不受高收益保护阻止。
+13. 站点独立配置覆盖全局收益保护配置。
 
 ## 推荐初始配置
 
@@ -320,11 +335,12 @@ completed and observed for 30 minutes + paused for 30 minutes -> delete torrent 
 - `yield_guard_low_upload_kbs`: `200`
 - `yield_guard_bad_checks`: `2`
 - `yield_guard_download_limit_kbs`: `512`
-- `yield_guard_complete_observe_minutes`: `30`
+- `yield_guard_fast_fail_minutes`: `10`
 - `yield_guard_good_upload_kbs`: `500`
 - `yield_guard_good_pool_min_count`: `2`
 - `yield_guard_probe_slots`: `1`
-- `yield_guard_probe_interval_minutes`: `30`
+- `yield_guard_probe_interval_minutes`: `10`
+- `yield_guard_promising_pubtime_minutes`: `15`
 
 演练 24 小时后，如果日志命中符合预期，再关闭演练执行真实动作。
 
@@ -333,9 +349,9 @@ completed and observed for 30 minutes + paused for 30 minutes -> delete torrent 
 | 风险 | 缓解 |
 | --- | --- |
 | 新种刚开始下载时上传少，被误判 | 设置最小下载体积和最小进度，首次检查只补基线 |
+| 快速淘汰窗口太短导致少数慢热好种被删 | 保留探测下载名额，并用发布时间/上传增长作为短窗保护信号 |
 | 高收益池软停止导致错过新热门种 | 保留探测下载名额和探测间隔，不完全停止新增 |
-| 下载中任务前期上传少但完成后爆发 | 下载阶段不最终删除，必须完成后观察一段时间 |
-| 部分冷门种需要先下载完成才开始上传 | 默认先限速再暂停，删除作为最后阶段，并默认演练 |
+| 部分冷门种需要先下载完成才开始上传 | 这是 PT 快速淘汰策略接受的取舍；可按站点调大 `yield_guard_fast_fail_minutes` |
 | qB 接口差异导致限速/暂停失败 | 封装 qB 操作并记录失败，不影响主检查流程 |
 | 高收益保护导致磁盘占用增长 | 做种时间、失去免费、上传量上限仍可生效 |
 | 站点规则差异明显 | 支持站点独立配置 |
