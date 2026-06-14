@@ -363,7 +363,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.27"
+    plugin_version = "4.3.28"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -3599,7 +3599,9 @@ class BrushFlowLowFreq(_PluginBase):
             if action:
                 if self.__apply_qb_yield_guard_action(torrent_hash=torrent_hash,
                                                       action=action,
-                                                      brush_config=brush_config):
+                                                      brush_config=brush_config,
+                                                      site_name=site_name,
+                                                      reason=reason):
                     torrent_task["yield_guard_last_action_time"] = time.time()
                     if action == "restore_limit":
                         torrent_task["yield_guard_restore_download_limit"] = False
@@ -4038,6 +4040,7 @@ class BrushFlowLowFreq(_PluginBase):
                     if brush_config.yield_guard_rehearsal:
                         reason = self.__yield_guard_rehearsal_reason(reason)
                         torrent_task["yield_guard_last_reason"] = reason
+                        logger.info(f"站点：{site_name}，{reason}")
                         return False, reason
                     torrent_task["yield_guard_last_reason"] = reason
                     return True, reason
@@ -4122,6 +4125,7 @@ class BrushFlowLowFreq(_PluginBase):
             if brush_config.yield_guard_rehearsal:
                 reason = self.__yield_guard_rehearsal_reason(reason)
                 torrent_task["yield_guard_last_reason"] = reason
+                logger.info(f"站点：{site_name}，{reason}")
                 return False, reason
             return True, reason
         return False, reason
@@ -5434,7 +5438,8 @@ class BrushFlowLowFreq(_PluginBase):
         except Exception as err:
             logger.error(f"强制重新汇报失败：{str(err)}")
 
-    def __apply_qb_yield_guard_action(self, torrent_hash: str, action: str, brush_config: BrushConfig) -> bool:
+    def __apply_qb_yield_guard_action(self, torrent_hash: str, action: str, brush_config: BrushConfig,
+                                      site_name: str = "", reason: str = "") -> bool:
         """
         执行上传收益保护的 qBittorrent 动作。delete 动作由现有删种流程处理。
         """
@@ -5444,8 +5449,12 @@ class BrushFlowLowFreq(_PluginBase):
         action = "restore_limit" if raw_action == "restore_limit" else self.__yield_guard_action_value(action, "none")
         if action in ("none", "delete"):
             return False
+        action_reason = reason or f"上传收益保护动作 {action}"
         if brush_config.yield_guard_rehearsal:
-            logger.info(f"上传收益保护演练模式：hash={torrent_hash}，动作={action}，不实际执行")
+            if site_name:
+                logger.info(f"站点：{site_name}，{action_reason}，上传收益保护演练模式：hash={torrent_hash}，动作={action}，不实际执行")
+            else:
+                logger.info(f"上传收益保护演练模式：hash={torrent_hash}，动作={action}，原因：{action_reason}，不实际执行")
             return False
 
         downloader = self.downloader

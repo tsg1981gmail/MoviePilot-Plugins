@@ -66,17 +66,23 @@ def _install_moviepilot_stubs():
     log_module = _install_module("app.log")
 
     class Logger:
+        def __init__(self):
+            self.debug_messages = []
+            self.info_messages = []
+            self.warning_messages = []
+            self.error_messages = []
+
         def debug(self, *args, **kwargs):
-            pass
+            self.debug_messages.append(" ".join(str(arg) for arg in args))
 
         def info(self, *args, **kwargs):
-            pass
+            self.info_messages.append(" ".join(str(arg) for arg in args))
 
         def warning(self, *args, **kwargs):
-            pass
+            self.warning_messages.append(" ".join(str(arg) for arg in args))
 
         def error(self, *args, **kwargs):
-            pass
+            self.error_messages.append(" ".join(str(arg) for arg in args))
 
     log_module.logger = Logger()
     app.log = log_module
@@ -923,6 +929,43 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertFalse(applied)
         self.assertEqual([], downloader.qbc.download_limits)
 
+    def test_yield_guard_rehearsal_logs_qb_action_details(self):
+        class FakeQbc:
+            def __init__(self):
+                self.download_limits = []
+
+            def torrents_set_download_limit(self, torrent_hashes, limit):
+                self.download_limits.append((torrent_hashes, limit))
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": True,
+            "yield_guard_download_limit_kbs": 512,
+        }, downloader=downloader)
+        start_info_count = len(self.module.logger.info_messages)
+
+        applied = plugin._BrushFlowLowFreq__apply_qb_yield_guard_action(
+            torrent_hash="abcdef",
+            action="limit",
+            brush_config=plugin._brush_config,
+            site_name="站点1",
+            reason="上传收益保护：低收益，下载 5.0 KB/s，上传 10.0 KB/s，连续 1 次，动作 limit",
+        )
+
+        self.assertFalse(applied)
+        self.assertEqual([], downloader.qbc.download_limits)
+        new_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(any("站点：站点1" in msg and "abcdef" in msg and "动作 limit" in msg
+                            and "上传收益保护：低收益" in msg for msg in new_logs))
+
     def test_check_applies_yield_guard_action_before_delete_rules(self):
         class FakeQbc:
             def __init__(self):
@@ -1303,6 +1346,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_fast_fail_minutes": 0,
             "yield_guard_promising_pubtime_minutes": 0,
         })
+        start_info_count = len(self.module.logger.info_messages)
         torrent_task = {
             "first_downloaded_time": 1,
             "last_check_interval_downspeed": 5 * 1024,
@@ -1331,6 +1375,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIn("动作 delete", reason)
         self.assertEqual("normal", torrent_task.get("yield_guard_stage"))
         self.assertEqual(reason, torrent_task.get("yield_guard_last_reason"))
+        new_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(any("演练模式" in msg and "动作 delete" in msg for msg in new_logs))
 
     def test_get_form_exposes_yield_guard_controls(self):
         plugin = self._new_qb_plugin()
