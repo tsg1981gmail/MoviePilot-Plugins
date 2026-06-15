@@ -374,7 +374,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.34"
+    plugin_version = "4.3.35"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -5897,7 +5897,10 @@ class BrushFlowLowFreq(_PluginBase):
                     brush_config.yield_guard_download_limit_kbs, 512
                 ) * 1024)
                 if getattr(downloader, "qbc", None) and hasattr(downloader.qbc, "torrents_set_download_limit"):
-                    downloader.qbc.torrents_set_download_limit([torrent_hash], download_limit)
+                    downloader.qbc.torrents_set_download_limit(
+                        limit=download_limit,
+                        torrent_hashes=[torrent_hash]
+                    )
                     return True
                 if hasattr(downloader, "change_torrent"):
                     downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)
@@ -5905,7 +5908,10 @@ class BrushFlowLowFreq(_PluginBase):
             if action == "restore_limit":
                 download_limit = int(self.__yield_guard_positive_number(brush_config.dl_speed, 0) * 1024)
                 if getattr(downloader, "qbc", None) and hasattr(downloader.qbc, "torrents_set_download_limit"):
-                    downloader.qbc.torrents_set_download_limit([torrent_hash], download_limit)
+                    downloader.qbc.torrents_set_download_limit(
+                        limit=download_limit,
+                        torrent_hashes=[torrent_hash]
+                    )
                     return True
                 if hasattr(downloader, "change_torrent"):
                     downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)

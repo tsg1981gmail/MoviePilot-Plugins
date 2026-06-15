@@ -1151,7 +1151,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             def __init__(self):
                 self.download_limits = []
 
-            def torrents_set_download_limit(self, torrent_hashes, limit):
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
                 self.download_limits.append((torrent_hashes, limit))
 
         class FakeDownloader:
@@ -1182,7 +1182,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             def __init__(self):
                 self.download_limits = []
 
-            def torrents_set_download_limit(self, torrent_hashes, limit):
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
                 self.download_limits.append((torrent_hashes, limit))
 
         class FakeDownloader:
@@ -1213,7 +1213,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             def __init__(self):
                 self.download_limits = []
 
-            def torrents_set_download_limit(self, torrent_hashes, limit):
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
                 self.download_limits.append((torrent_hashes, limit))
 
         class FakeDownloader:
