@@ -374,7 +374,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.35"
+    plugin_version = "4.3.36"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -3775,6 +3775,7 @@ class BrushFlowLowFreq(_PluginBase):
                 and yield_ratio_percent <= low_ratio_percent
         )
         is_absolute_low_yield = is_high_download and is_low_upload
+        is_limited_low_upload = torrent_task.get("yield_guard_stage") == "limited" and is_low_upload
         sample_checks = []
         if min_downloaded_bytes > 0:
             sample_checks.append(downloaded >= min_downloaded_bytes)
@@ -3810,7 +3811,9 @@ class BrushFlowLowFreq(_PluginBase):
                         f"收益比 {self.__format_percent(yield_ratio_percent)} 低于低收益比阈值 "
                         f"{brush_config.yield_guard_low_ratio_percent}%"
                     )
-                if not is_high_download and not is_low_ratio:
+                if is_limited_low_upload and not is_high_download and not is_low_ratio:
+                    decision_reasons.append("任务已限速且上传仍低，保持收益保护并继续按低收益处理")
+                if not is_high_download and not is_low_ratio and not is_limited_low_upload:
                     decision_reasons.append(
                         f"检查间下载 {self.__format_speed_kbs(interval_downspeed)} 低于高下载阈值 "
                         f"{brush_config.yield_guard_high_download_kbs} KB/s"
@@ -3835,7 +3838,7 @@ class BrushFlowLowFreq(_PluginBase):
                         )
                 if not has_enough_sample:
                     decision_reasons.append("下载量和进度未达到收益保护最小样本门槛")
-                if (is_absolute_low_yield or is_low_ratio) and has_enough_sample:
+                if (is_absolute_low_yield or is_low_ratio or is_limited_low_upload) and has_enough_sample:
                     bad_streak = int(self.__yield_guard_positive_number(torrent_task.get("yield_guard_bad_streak"), 0))
                     if bad_streak < bad_checks:
                         decision_reasons.append(f"低收益连续命中 {bad_streak}/{bad_checks}，仍在观察")
@@ -3867,6 +3870,7 @@ class BrushFlowLowFreq(_PluginBase):
             f"低收益比={'是' if is_low_ratio else '否'}"
             f"(阈值 {brush_config.yield_guard_low_ratio_percent}%/"
             f"最小下载 {brush_config.yield_guard_ratio_min_download_kbs} KB/s)，"
+            f"限速后低上传={'是' if is_limited_low_upload else '否'}，"
             f"样本足够={'是' if has_enough_sample else '否'}"
             f"(下载阈值 {brush_config.yield_guard_min_downloaded_gb} GB/进度阈值 {brush_config.yield_guard_min_progress_percent}%)，"
             f"原因：{reason or '无'}"
@@ -4395,7 +4399,8 @@ class BrushFlowLowFreq(_PluginBase):
                 and yield_ratio_percent is not None
                 and yield_ratio_percent <= low_ratio_percent
         )
-        is_low_yield = (is_high_download and is_low_upload) or is_low_ratio
+        is_limited_low_upload = (torrent_task.get("yield_guard_stage") == "limited" and is_low_upload)
+        is_low_yield = (is_high_download and is_low_upload) or is_low_ratio or is_limited_low_upload
 
         downloaded = self.__number_or_none(torrent_info.get("downloaded")) or 0
         total_size = self.__number_or_none(torrent_info.get("total_size")) or 0
