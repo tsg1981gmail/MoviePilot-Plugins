@@ -1,5 +1,6 @@
 import importlib.util
 import hashlib
+import json
 import sys
 import types
 import unittest
@@ -177,6 +178,15 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         plugin.downloader_helper = FakeHelper(downloader or FakeDownloader())
         return plugin
+
+    def test_plugin_version_matches_package_manifest(self):
+        package_path = Path(__file__).resolve().parents[1] / "package.v2.json"
+        package_info = json.loads(package_path.read_text())
+
+        self.assertEqual(
+            package_info["BrushFlowLowFreq"]["version"],
+            self.module.BrushFlowLowFreq.plugin_version,
+        )
 
     @staticmethod
     def _free_torrent_task():
