@@ -6,6 +6,10 @@
 
 ## 版本更新日志
 
+- v4.3.37
+  - “上传收益保护”新增 `收益比保护上传阈值`：收益比偏低但检查间上传达到阈值时先继续观察，避免误伤绝对上传速度仍有价值的任务
+  - 详细日志新增低收益比上传保护状态，便于判断低收益比任务为何被保留观察
+
 - v4.3.36
   - 修复“上传收益保护”限速后因下载速度被压到阈值以下而错误执行 `restore_limit` 的问题；限速状态下只在上传恢复或命中高收益保护时恢复下载限速，上传仍低时继续按低收益处理
 
@@ -233,6 +237,7 @@
 | 收益保护低上传阈值（KB/s） | `yield_guard_low_upload_kbs` | 检查间上传速度低于该值时参与低收益判断 | 默认 200                                                                                                           |
 | 收益保护低收益比阈值（%） | `yield_guard_low_ratio_percent` | 检查间上传/下载收益比低于该值时参与低收益判断 | 默认 8；收益比 = 检查间上传速度 ÷ 检查间下载速度 × 100                                                              |
 | 收益比判断最小下载速度（KB/s） | `yield_guard_ratio_min_download_kbs` | 检查间下载速度达到该值后才判断收益比   | 默认 500；避免低下载波动导致收益比误判                                                                              |
+| 收益比保护上传阈值（KB/s） | `yield_guard_ratio_protect_upload_kbs` | 收益比偏低但检查间上传达到该值时先继续观察 | 默认 0（关闭）；示例：200，保留上传速度仍有价值但收益比暂时偏低的任务                                               |
 | 低收益连续命中次数     | `yield_guard_bad_checks` | 连续命中多少次后执行低收益动作       | 默认 2                                                                                                             |
 | 收益保护最小下载量（GB） | `yield_guard_min_downloaded_gb` | 下载量达到该值后才处理低收益任务     | 默认 2；与最小进度满足任一即可                                                                                    |
 | 收益保护最小进度（%）  | `yield_guard_min_progress_percent` | 下载进度达到该值后才处理低收益任务   | 默认 10；与最小下载量满足任一即可                                                                                 |
@@ -314,6 +319,7 @@
 - `yield_guard_low_upload_kbs`：收益保护低上传阈值（KB/s）
 - `yield_guard_low_ratio_percent`：收益保护低收益比阈值（%）
 - `yield_guard_ratio_min_download_kbs`：收益比判断最小下载速度（KB/s）
+- `yield_guard_ratio_protect_upload_kbs`：收益比保护上传阈值（KB/s）
 - `yield_guard_bad_checks`：低收益连续命中次数
 - `yield_guard_min_downloaded_gb`：收益保护最小下载量（GB）
 - `yield_guard_min_progress_percent`：收益保护最小进度（%）
@@ -389,6 +395,7 @@
     "yield_guard_low_upload_kbs": 200,
     "yield_guard_low_ratio_percent": 8,
     "yield_guard_ratio_min_download_kbs": 500,
+    "yield_guard_ratio_protect_upload_kbs": 0,
     "yield_guard_bad_checks": 2,
     "yield_guard_min_downloaded_gb": 2,
     "yield_guard_min_progress_percent": 10,

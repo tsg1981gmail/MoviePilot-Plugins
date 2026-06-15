@@ -479,6 +479,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(200, brush_config.yield_guard_low_upload_kbs)
         self.assertEqual(8, brush_config.yield_guard_low_ratio_percent)
         self.assertEqual(500, brush_config.yield_guard_ratio_min_download_kbs)
+        self.assertEqual(0, brush_config.yield_guard_ratio_protect_upload_kbs)
         self.assertEqual(2, brush_config.yield_guard_bad_checks)
         self.assertEqual(2, brush_config.yield_guard_min_downloaded_gb)
         self.assertEqual(10, brush_config.yield_guard_min_progress_percent)
@@ -500,11 +501,13 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_fast_fail_minutes": 12,
             "yield_guard_low_ratio_percent": 8,
             "yield_guard_ratio_min_download_kbs": 500,
+            "yield_guard_ratio_protect_upload_kbs": 0,
             "yield_guard_detail_log": False,
             "enable_site_config": True,
             "site_config": '[{"sitename": "站点1", "yield_guard_fast_fail_minutes": 3, '
                            '"yield_guard_enabled": false, "yield_guard_low_ratio_percent": 5, '
-                           '"yield_guard_ratio_min_download_kbs": 800, "yield_guard_detail_log": true}]',
+                           '"yield_guard_ratio_min_download_kbs": 800, '
+                           '"yield_guard_ratio_protect_upload_kbs": 200, "yield_guard_detail_log": true}]',
         })
 
         site_config = brush_config.get_site_config("站点1")
@@ -512,10 +515,12 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(3, site_config.yield_guard_fast_fail_minutes)
         self.assertEqual(5, site_config.yield_guard_low_ratio_percent)
         self.assertEqual(800, site_config.yield_guard_ratio_min_download_kbs)
+        self.assertEqual(200, site_config.yield_guard_ratio_protect_upload_kbs)
         self.assertTrue(site_config.yield_guard_detail_log)
         self.assertEqual(12, brush_config.yield_guard_fast_fail_minutes)
         self.assertEqual(8, brush_config.yield_guard_low_ratio_percent)
         self.assertEqual(500, brush_config.yield_guard_ratio_min_download_kbs)
+        self.assertEqual(0, brush_config.yield_guard_ratio_protect_upload_kbs)
 
     def test_update_config_persists_yield_guard_values(self):
         plugin = self._new_plugin({
@@ -528,6 +533,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_low_upload_kbs": 128,
             "yield_guard_low_ratio_percent": 6,
             "yield_guard_ratio_min_download_kbs": 600,
+            "yield_guard_ratio_protect_upload_kbs": 200,
             "yield_guard_bad_checks": 1,
             "yield_guard_min_downloaded_gb": 0,
             "yield_guard_min_progress_percent": 0,
@@ -558,6 +564,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_low_upload_kbs": 128,
             "yield_guard_low_ratio_percent": 6,
             "yield_guard_ratio_min_download_kbs": 600,
+            "yield_guard_ratio_protect_upload_kbs": 200,
             "yield_guard_bad_checks": 1,
             "yield_guard_min_downloaded_gb": 0,
             "yield_guard_min_progress_percent": 0,
@@ -588,6 +595,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_high_download_kbs": "fast",
             "yield_guard_low_ratio_percent": "bad",
             "yield_guard_ratio_min_download_kbs": "slow",
+            "yield_guard_ratio_protect_upload_kbs": "medium",
             "yield_guard_bad_checks": "twice",
             "yield_guard_first_action": "throttle",
             "yield_guard_final_action": "remove",
@@ -600,6 +608,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIsNone(config.get("yield_guard_high_download_kbs"))
         self.assertIsNone(config.get("yield_guard_low_ratio_percent"))
         self.assertIsNone(config.get("yield_guard_ratio_min_download_kbs"))
+        self.assertIsNone(config.get("yield_guard_ratio_protect_upload_kbs"))
         self.assertIsNone(config.get("yield_guard_bad_checks"))
         self.assertEqual("limit", config.get("yield_guard_first_action"))
         self.assertEqual("delete", config.get("yield_guard_final_action"))
@@ -607,6 +616,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(any("收益保护高下载阈值" in msg for msg in new_errors))
         self.assertTrue(any("收益保护低收益比阈值" in msg for msg in new_errors))
         self.assertTrue(any("收益比判断最小下载速度" in msg for msg in new_errors))
+        self.assertTrue(any("收益比保护上传阈值" in msg for msg in new_errors))
         self.assertTrue(any("低收益首次动作" in msg for msg in new_errors))
 
     def test_new_torrent_task_initializes_yield_guard_fields(self):
@@ -1058,6 +1068,45 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertFalse(should_delete, reason)
         self.assertIn("低收益", reason)
         self.assertEqual("limited", torrent_task.get("yield_guard_stage"))
+
+    def test_yield_guard_low_ratio_is_observed_when_interval_upload_reaches_ratio_protect_threshold(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_high_download_kbs": 300,
+            "yield_guard_low_upload_kbs": 150,
+            "yield_guard_low_ratio_percent": 8,
+            "yield_guard_ratio_min_download_kbs": 300,
+            "yield_guard_ratio_protect_upload_kbs": 200,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+        })
+        torrent_task = {
+            "last_check_interval_downspeed": int(5498.5 * 1024),
+            "last_check_interval_downspeed_valid": True,
+            "last_check_interval_upspeed": int(248.6 * 1024),
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_bad_streak": 1,
+            "yield_guard_stage": "normal",
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+            site_name="站点1",
+            brush_config=plugin._brush_config,
+            torrent_info={
+                "downloaded": 2 * 1024 ** 3,
+                "total_size": 36 * 1024 ** 3,
+                "avg_upspeed": int(127.9 * 1024),
+            },
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("收益比保护上传阈值", reason)
+        self.assertEqual(0, torrent_task.get("yield_guard_bad_streak"))
+        self.assertEqual("normal", torrent_task.get("yield_guard_stage"))
+        self.assertFalse(torrent_task.get("yield_guard_restore_download_limit"))
 
     def test_yield_guard_ratio_does_not_trigger_below_ratio_download_floor(self):
         plugin = self._new_qb_plugin({
@@ -2519,6 +2568,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_low_upload_kbs",
             "yield_guard_low_ratio_percent",
             "yield_guard_ratio_min_download_kbs",
+            "yield_guard_ratio_protect_upload_kbs",
             "yield_guard_bad_checks",
             "yield_guard_fast_fail_minutes",
             "yield_guard_first_action",

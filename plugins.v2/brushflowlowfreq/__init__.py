@@ -102,6 +102,9 @@ class BrushConfig:
         self.yield_guard_ratio_min_download_kbs = self.__parse_number(
             config.get("yield_guard_ratio_min_download_kbs", 500)
         )
+        self.yield_guard_ratio_protect_upload_kbs = self.__parse_number(
+            config.get("yield_guard_ratio_protect_upload_kbs", 0)
+        )
         self.yield_guard_bad_checks = self.__parse_number(config.get("yield_guard_bad_checks", 2))
         self.yield_guard_min_downloaded_gb = self.__parse_number(config.get("yield_guard_min_downloaded_gb", 2))
         self.yield_guard_min_progress_percent = self.__parse_number(config.get("yield_guard_min_progress_percent", 10))
@@ -186,6 +189,7 @@ class BrushConfig:
             "yield_guard_low_upload_kbs",
             "yield_guard_low_ratio_percent",
             "yield_guard_ratio_min_download_kbs",
+            "yield_guard_ratio_protect_upload_kbs",
             "yield_guard_bad_checks",
             "yield_guard_min_downloaded_gb",
             "yield_guard_min_progress_percent",
@@ -291,6 +295,7 @@ class BrushConfig:
     "yield_guard_low_upload_kbs": 200,
     "yield_guard_low_ratio_percent": 8,
     "yield_guard_ratio_min_download_kbs": 500,
+    "yield_guard_ratio_protect_upload_kbs": 0,
     "yield_guard_bad_checks": 2,
     "yield_guard_min_downloaded_gb": 2,
     "yield_guard_min_progress_percent": 10,
@@ -374,7 +379,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.36"
+    plugin_version = "4.3.37"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1380,6 +1385,23 @@ class BrushFlowLowFreq(_PluginBase):
                                                                 {'title': '是', 'value': 'yes'},
                                                                 {'title': '否', 'value': 'no'},
                                                             ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_ratio_protect_upload_kbs',
+                                                            'label': '收益比保护上传阈值（KB/s）',
+                                                            'placeholder': '如：200，收益比低但上传达到该值时继续观察'
                                                         }
                                                     }
                                                 ]
@@ -3749,6 +3771,9 @@ class BrushFlowLowFreq(_PluginBase):
         ratio_min_download_bytes = (
                 self.__yield_guard_positive_number(brush_config.yield_guard_ratio_min_download_kbs) * 1024
         )
+        ratio_protect_upload_bytes = (
+                self.__yield_guard_positive_number(brush_config.yield_guard_ratio_protect_upload_kbs) * 1024
+        )
         min_downloaded_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_min_downloaded_gb) * 1024 ** 3
         min_progress_percent = self.__yield_guard_positive_number(brush_config.yield_guard_min_progress_percent)
         bad_checks = max(1, int(self.__yield_guard_positive_number(brush_config.yield_guard_bad_checks, 2)))
@@ -3775,6 +3800,12 @@ class BrushFlowLowFreq(_PluginBase):
                 and yield_ratio_percent <= low_ratio_percent
         )
         is_absolute_low_yield = is_high_download and is_low_upload
+        is_ratio_upload_protected = (
+                is_low_ratio
+                and ratio_protect_upload_bytes > 0
+                and interval_upspeed is not None
+                and interval_upspeed >= ratio_protect_upload_bytes
+        )
         is_limited_low_upload = torrent_task.get("yield_guard_stage") == "limited" and is_low_upload
         sample_checks = []
         if min_downloaded_bytes > 0:
@@ -3811,6 +3842,11 @@ class BrushFlowLowFreq(_PluginBase):
                         f"收益比 {self.__format_percent(yield_ratio_percent)} 低于低收益比阈值 "
                         f"{brush_config.yield_guard_low_ratio_percent}%"
                     )
+                if is_ratio_upload_protected:
+                    decision_reasons.append(
+                        f"检查间上传 {self.__format_speed_kbs(interval_upspeed)} 达到收益比保护上传阈值 "
+                        f"{brush_config.yield_guard_ratio_protect_upload_kbs} KB/s，继续观察"
+                    )
                 if is_limited_low_upload and not is_high_download and not is_low_ratio:
                     decision_reasons.append("任务已限速且上传仍低，保持收益保护并继续按低收益处理")
                 if not is_high_download and not is_low_ratio and not is_limited_low_upload:
@@ -3838,7 +3874,11 @@ class BrushFlowLowFreq(_PluginBase):
                         )
                 if not has_enough_sample:
                     decision_reasons.append("下载量和进度未达到收益保护最小样本门槛")
-                if (is_absolute_low_yield or is_low_ratio or is_limited_low_upload) and has_enough_sample:
+                if (
+                        is_absolute_low_yield
+                        or (is_low_ratio and not is_ratio_upload_protected)
+                        or is_limited_low_upload
+                ) and has_enough_sample:
                     bad_streak = int(self.__yield_guard_positive_number(torrent_task.get("yield_guard_bad_streak"), 0))
                     if bad_streak < bad_checks:
                         decision_reasons.append(f"低收益连续命中 {bad_streak}/{bad_checks}，仍在观察")
@@ -3870,6 +3910,8 @@ class BrushFlowLowFreq(_PluginBase):
             f"低收益比={'是' if is_low_ratio else '否'}"
             f"(阈值 {brush_config.yield_guard_low_ratio_percent}%/"
             f"最小下载 {brush_config.yield_guard_ratio_min_download_kbs} KB/s)，"
+            f"低收益比上传保护={'是' if is_ratio_upload_protected else '否'}"
+            f"(阈值 {brush_config.yield_guard_ratio_protect_upload_kbs} KB/s)，"
             f"限速后低上传={'是' if is_limited_low_upload else '否'}，"
             f"样本足够={'是' if has_enough_sample else '否'}"
             f"(下载阈值 {brush_config.yield_guard_min_downloaded_gb} GB/进度阈值 {brush_config.yield_guard_min_progress_percent}%)，"
@@ -4387,6 +4429,9 @@ class BrushFlowLowFreq(_PluginBase):
         ratio_min_download_bytes = (
                 self.__yield_guard_positive_number(brush_config.yield_guard_ratio_min_download_kbs) * 1024
         )
+        ratio_protect_upload_bytes = (
+                self.__yield_guard_positive_number(brush_config.yield_guard_ratio_protect_upload_kbs) * 1024
+        )
         yield_ratio_percent = self.__calculate_yield_guard_ratio_percent(
             interval_upspeed=interval_upspeed,
             interval_downspeed=interval_downspeed
@@ -4399,8 +4444,14 @@ class BrushFlowLowFreq(_PluginBase):
                 and yield_ratio_percent is not None
                 and yield_ratio_percent <= low_ratio_percent
         )
+        is_ratio_upload_protected = (
+                is_low_ratio
+                and ratio_protect_upload_bytes > 0
+                and interval_upspeed is not None
+                and interval_upspeed >= ratio_protect_upload_bytes
+        )
         is_limited_low_upload = (torrent_task.get("yield_guard_stage") == "limited" and is_low_upload)
-        is_low_yield = (is_high_download and is_low_upload) or is_low_ratio or is_limited_low_upload
+        is_low_yield = (is_high_download and is_low_upload) or (is_low_ratio and not is_ratio_upload_protected) or is_limited_low_upload
 
         downloaded = self.__number_or_none(torrent_info.get("downloaded")) or 0
         total_size = self.__number_or_none(torrent_info.get("total_size")) or 0
@@ -4419,7 +4470,13 @@ class BrushFlowLowFreq(_PluginBase):
             if torrent_task.get("yield_guard_stage") == "limited":
                 torrent_task["yield_guard_stage"] = "normal"
                 torrent_task["yield_guard_restore_download_limit"] = True
-            torrent_task["yield_guard_last_reason"] = "上传收益保护：未命中低收益条件"
+            if is_ratio_upload_protected:
+                torrent_task["yield_guard_last_reason"] = (
+                    f"上传收益保护：收益比偏低但检查间上传 {interval_upspeed / 1024:.1f} KB/s "
+                    f"达到收益比保护上传阈值 {brush_config.yield_guard_ratio_protect_upload_kbs} KB/s，继续观察"
+                )
+            else:
+                torrent_task["yield_guard_last_reason"] = "上传收益保护：未命中低收益条件"
             return False, torrent_task["yield_guard_last_reason"]
 
         bad_streak = int(self.__yield_guard_positive_number(torrent_task.get("yield_guard_bad_streak"), 0)) + 1
@@ -5489,6 +5546,7 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_low_upload_kbs": "收益保护低上传阈值",
             "yield_guard_low_ratio_percent": "收益保护低收益比阈值",
             "yield_guard_ratio_min_download_kbs": "收益比判断最小下载速度",
+            "yield_guard_ratio_protect_upload_kbs": "收益比保护上传阈值",
             "yield_guard_bad_checks": "低收益连续命中次数",
             "yield_guard_min_downloaded_gb": "收益保护最小下载量",
             "yield_guard_min_progress_percent": "收益保护最小进度",
@@ -5598,6 +5656,7 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_low_upload_kbs": brush_config.yield_guard_low_upload_kbs,
             "yield_guard_low_ratio_percent": brush_config.yield_guard_low_ratio_percent,
             "yield_guard_ratio_min_download_kbs": brush_config.yield_guard_ratio_min_download_kbs,
+            "yield_guard_ratio_protect_upload_kbs": brush_config.yield_guard_ratio_protect_upload_kbs,
             "yield_guard_bad_checks": brush_config.yield_guard_bad_checks,
             "yield_guard_min_downloaded_gb": brush_config.yield_guard_min_downloaded_gb,
             "yield_guard_min_progress_percent": brush_config.yield_guard_min_progress_percent,
