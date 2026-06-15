@@ -379,7 +379,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.37"
+    plugin_version = "4.3.38"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1399,23 +1399,6 @@ class BrushFlowLowFreq(_PluginBase):
                                                     {
                                                         'component': 'VTextField',
                                                         'props': {
-                                                            'model': 'yield_guard_ratio_protect_upload_kbs',
-                                                            'label': '收益比保护上传阈值（KB/s）',
-                                                            'placeholder': '如：200，收益比低但上传达到该值时继续观察'
-                                                        }
-                                                    }
-                                                ]
-                                            },
-                                            {
-                                                'component': 'VCol',
-                                                'props': {
-                                                    'cols': 12,
-                                                    'md': 4
-                                                },
-                                                'content': [
-                                                    {
-                                                        'component': 'VTextField',
-                                                        'props': {
                                                             'model': 'delete_free_remaining_minutes',
                                                             'label': '免费临期删种阈值（分钟）',
                                                             'placeholder': '默认5，开启失去免费即删种后生效'
@@ -2027,6 +2010,23 @@ class BrushFlowLowFreq(_PluginBase):
                                                             'model': 'yield_guard_ratio_min_download_kbs',
                                                             'label': '收益比判断最小下载速度（KB/s）',
                                                             'placeholder': '如：500，下载达到后才判断收益比'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_ratio_protect_upload_kbs',
+                                                            'label': '收益比保护上传阈值（KB/s）',
+                                                            'placeholder': '如：200，收益比低但上传达到该值时继续观察'
                                                         }
                                                     }
                                                 ]

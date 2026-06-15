@@ -2580,6 +2580,38 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         }
         self.assertTrue(expected_models.issubset(models), expected_models - models)
 
+    def test_get_form_places_ratio_upload_protection_next_to_ratio_controls(self):
+        plugin = self._new_qb_plugin()
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.downloader_helper.get_configs = lambda: {}
+
+        form, _defaults = plugin.get_form()
+
+        def collect_models_in_order(node):
+            models = []
+            if isinstance(node, dict):
+                props = node.get("props") or {}
+                for key in ("model", "modelvalue"):
+                    if props.get(key):
+                        models.append(props[key])
+                for child in node.get("content") or []:
+                    models.extend(collect_models_in_order(child))
+            elif isinstance(node, list):
+                for child in node:
+                    models.extend(collect_models_in_order(child))
+            return models
+
+        models = collect_models_in_order(form)
+
+        self.assertLess(
+            models.index("yield_guard_low_ratio_percent"),
+            models.index("yield_guard_ratio_min_download_kbs")
+        )
+        self.assertEqual(
+            models.index("yield_guard_ratio_min_download_kbs") + 1,
+            models.index("yield_guard_ratio_protect_upload_kbs")
+        )
+
     def test_empty_new_numeric_options_default_to_zero(self):
         brush_config = self.module.BrushConfig({
             "skip_rules_downloading_threshold": "",
