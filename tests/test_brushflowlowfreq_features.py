@@ -480,19 +480,22 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(10, brush_config.yield_guard_probe_interval_minutes)
         self.assertEqual(15, brush_config.yield_guard_promising_pubtime_minutes)
         self.assertTrue(brush_config.yield_guard_rehearsal)
+        self.assertFalse(brush_config.yield_guard_detail_log)
 
     def test_yield_guard_site_config_overrides_global_values(self):
         brush_config = self.module.BrushConfig({
             "yield_guard_enabled": True,
             "yield_guard_fast_fail_minutes": 12,
+            "yield_guard_detail_log": False,
             "enable_site_config": True,
             "site_config": '[{"sitename": "站点1", "yield_guard_fast_fail_minutes": 3, '
-                           '"yield_guard_enabled": false}]',
+                           '"yield_guard_enabled": false, "yield_guard_detail_log": true}]',
         })
 
         site_config = brush_config.get_site_config("站点1")
         self.assertFalse(site_config.yield_guard_enabled)
         self.assertEqual(3, site_config.yield_guard_fast_fail_minutes)
+        self.assertTrue(site_config.yield_guard_detail_log)
         self.assertEqual(12, brush_config.yield_guard_fast_fail_minutes)
 
     def test_update_config_persists_yield_guard_values(self):
@@ -520,6 +523,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_probe_slots": 2,
             "yield_guard_probe_interval_minutes": 5,
             "yield_guard_promising_pubtime_minutes": 6,
+            "yield_guard_detail_log": True,
         })
         saved_config = {}
         plugin.update_config = lambda config: saved_config.update(config)
@@ -547,6 +551,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_probe_slots": 2,
             "yield_guard_probe_interval_minutes": 5,
             "yield_guard_promising_pubtime_minutes": 6,
+            "yield_guard_detail_log": True,
         }
         for key, expected_value in expected_values.items():
             with self.subTest(key=key):
@@ -1400,6 +1405,165 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(any("上传收益保护：本轮检查已评估 1 个任务" in msg for msg in new_logs))
         self.assertTrue(any("采样未就绪" in msg for msg in new_logs))
 
+    def test_check_logs_yield_guard_detail_when_enabled(self):
+        class FakeDownloader:
+            def is_inactive(self):
+                return False
+
+            def get_torrents(self):
+                torrent = {
+                    "hash": "abcdef",
+                    "name": "good yield sample",
+                    "tags": "刷流",
+                    "state": "downloading",
+                    "progress": 0.5,
+                    "downloaded": 6 * 1024 * 1024,
+                    "uploaded": 2 * 1024 * 1024,
+                    "total_size": 10 * 1024 * 1024,
+                    "ratio": 0.3,
+                    "added_on": 1,
+                    "completion_on": 0,
+                    "last_activity": 1,
+                    "tracker": "tracker",
+                }
+                return [torrent], None
+
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_detail_log": True,
+            "yield_guard_good_upload_kbs": 500,
+            "yield_guard_good_avg_upload_kbs": 500,
+            "freeleech": "",
+            "hr": "no",
+        }, downloader=FakeDownloader())
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
+        torrent_tasks = {
+            "abcdef": {
+                "site": 1,
+                "site_name": "站点1",
+                "title": "good yield sample",
+                "description": "desc",
+                "hit_and_run": False,
+                "time": 0,
+                "downloaded": 5 * 1024 * 1024,
+                "uploaded": 1 * 1024 * 1024,
+                "total_size": 10 * 1024 * 1024,
+                "ratio": 0.2,
+                "seeding_time": 0,
+                "last_check_time": 1,
+                "last_check_uploaded": 1 * 1024 * 1024,
+                "last_check_downloaded": 5 * 1024 * 1024,
+                "yield_guard_bad_streak": 0,
+                "yield_guard_stage": "normal",
+                "yield_guard_good_protected": False,
+                "yield_guard_promising_protected": False,
+                "deleted": False,
+            }
+        }
+        plugin.get_data = lambda key: {
+            "torrents": torrent_tasks,
+            "unmanaged": {}
+        }.get(key, {})
+        plugin.save_data = lambda *args, **kwargs: None
+        start_info_count = len(self.module.logger.info_messages)
+
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 2
+        try:
+            plugin.check()
+        finally:
+            self.module.time.time = original_time
+
+        new_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(any("上传收益保护详细日志" in msg for msg in new_logs), new_logs)
+        self.assertTrue(any("检查间上传 1024.0 KB/s" in msg for msg in new_logs), new_logs)
+        self.assertTrue(any("判定=高收益保护" in msg for msg in new_logs), new_logs)
+        self.assertTrue(any("高收益保护 1 个" in msg for msg in new_logs), new_logs)
+
+    def test_check_logs_yield_guard_detail_miss_reason_when_upload_is_low_but_download_not_high(self):
+        class FakeDownloader:
+            def is_inactive(self):
+                return False
+
+            def get_torrents(self):
+                torrent = {
+                    "hash": "abcdef",
+                    "name": "low upload sample",
+                    "tags": "刷流",
+                    "state": "downloading",
+                    "progress": 0.1,
+                    "downloaded": 5 * 1024 * 1024 + 100 * 1024,
+                    "uploaded": 10 * 1024,
+                    "total_size": 10 * 1024 * 1024,
+                    "ratio": 0.02,
+                    "added_on": 1,
+                    "completion_on": 0,
+                    "last_activity": 1,
+                    "tracker": "tracker",
+                }
+                return [torrent], None
+
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_detail_log": True,
+            "yield_guard_good_upload_kbs": 500,
+            "yield_guard_good_avg_upload_kbs": 500,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+            "freeleech": "",
+            "hr": "no",
+        }, downloader=FakeDownloader())
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
+        torrent_tasks = {
+            "abcdef": {
+                "site": 1,
+                "site_name": "站点1",
+                "title": "low upload sample",
+                "description": "desc",
+                "hit_and_run": False,
+                "time": 0,
+                "downloaded": 5 * 1024 * 1024,
+                "uploaded": 0,
+                "total_size": 10 * 1024 * 1024,
+                "ratio": 0.01,
+                "seeding_time": 0,
+                "last_check_time": 999,
+                "last_check_uploaded": 0,
+                "last_check_downloaded": 5 * 1024 * 1024,
+                "yield_guard_bad_streak": 0,
+                "yield_guard_stage": "normal",
+                "yield_guard_good_protected": False,
+                "yield_guard_promising_protected": False,
+                "deleted": False,
+            }
+        }
+        plugin.get_data = lambda key: {
+            "torrents": torrent_tasks,
+            "unmanaged": {}
+        }.get(key, {})
+        plugin.save_data = lambda *args, **kwargs: None
+        start_info_count = len(self.module.logger.info_messages)
+
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000
+        try:
+            plugin.check()
+        finally:
+            self.module.time.time = original_time
+
+        new_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(
+            any("判定原因=检查间下载" in msg and "低于高下载阈值" in msg for msg in new_logs),
+            new_logs
+        )
+        self.assertTrue(any("高下载=否" in msg for msg in new_logs), new_logs)
+
     def test_check_skips_low_ratio_delete_when_good_protected(self):
         class FakeDownloader:
             def is_inactive(self):
@@ -1999,6 +2163,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         expected_models = {
             "yield_guard_enabled",
             "yield_guard_rehearsal",
+            "yield_guard_detail_log",
             "yield_guard_high_download_kbs",
             "yield_guard_low_upload_kbs",
             "yield_guard_bad_checks",

@@ -6,6 +6,10 @@
 
 ## 版本更新日志
 
+- v4.3.32
+  - 增加“上传收益保护”详细日志开关，开启后会记录单任务采样数据、判定原因、操作意图和低收益未命中的具体条件
+  - 增强“上传收益保护”本轮检查汇总日志，记录高收益保护数和低收益命中数
+
 - v4.3.31
   - 增加“上传收益保护”本轮检查汇总日志，即使未触发限速/暂停/删除，也会记录已评估任务数、待删数、动作数和状态样例
 
@@ -210,6 +214,7 @@
 | 分享率保护速度阈值（KB/s） | `seed_ratio_speed_protect` | 平均上传速度≥此值时即使分享率低也不删 | 默认 0（关闭）；示例：100，种子上传达100KB/s即豁免分享率检查                                                        |
 | 上传收益保护           | `yield_guard_enabled` | 是否启用上传收益保护                 | 默认关闭；仅处理插件托管任务，第一版面向 qBittorrent                                                               |
 | 上传收益保护演练模式   | `yield_guard_rehearsal` | 命中低收益动作时只记录日志，不实际限速/暂停/删除 | 默认开启；日志会记录站点、hash、拟动作和触发原因，建议观察 24 小时后再关闭                                         |
+| 上传收益保护详细日志   | `yield_guard_detail_log` | 输出每个任务的详细判定过程、操作意图和未命中原因 | 默认关闭；开启后会显著增加日志量，适合观察期排查                                                                     |
 | 收益保护高下载阈值（KB/s） | `yield_guard_high_download_kbs` | 检查间下载速度达到该值时参与低收益判断 | 默认 2048                                                                                                          |
 | 收益保护低上传阈值（KB/s） | `yield_guard_low_upload_kbs` | 检查间上传速度低于该值时参与低收益判断 | 默认 200                                                                                                           |
 | 低收益连续命中次数     | `yield_guard_bad_checks` | 连续命中多少次后执行低收益动作       | 默认 2                                                                                                             |
@@ -288,6 +293,7 @@
 - `seed_inactivetime`：未活动时间
 - `yield_guard_enabled`：上传收益保护
 - `yield_guard_rehearsal`：上传收益保护演练模式
+- `yield_guard_detail_log`：上传收益保护详细日志
 - `yield_guard_high_download_kbs`：收益保护高下载阈值（KB/s）
 - `yield_guard_low_upload_kbs`：收益保护低上传阈值（KB/s）
 - `yield_guard_bad_checks`：低收益连续命中次数
