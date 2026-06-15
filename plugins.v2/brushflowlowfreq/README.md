@@ -6,6 +6,10 @@
 
 ## 版本更新日志
 
+- v4.3.34
+  - “上传收益保护”新增检查间上传/下载收益比判断，可识别下载不算特别快但上传回报比例很低的下载中任务
+  - 详细日志新增收益比、低收益比命中状态和对应阈值，便于观察低收益判定依据
+
 - v4.3.33
   - 调整“上传收益保护”只评估未完成的下载中任务，已完成做种任务不再计入收益保护汇总/详细日志，也不再触发高收益保护
   - 已完成做种任务继续由做种时间、分享率、动态删种等常规删种规则处理
@@ -221,6 +225,8 @@
 | 上传收益保护详细日志   | `yield_guard_detail_log` | 输出每个任务的详细判定过程、操作意图和未命中原因 | 默认关闭；开启后会显著增加日志量，适合观察期排查                                                                     |
 | 收益保护高下载阈值（KB/s） | `yield_guard_high_download_kbs` | 检查间下载速度达到该值时参与低收益判断 | 默认 2048                                                                                                          |
 | 收益保护低上传阈值（KB/s） | `yield_guard_low_upload_kbs` | 检查间上传速度低于该值时参与低收益判断 | 默认 200                                                                                                           |
+| 收益保护低收益比阈值（%） | `yield_guard_low_ratio_percent` | 检查间上传/下载收益比低于该值时参与低收益判断 | 默认 8；收益比 = 检查间上传速度 ÷ 检查间下载速度 × 100                                                              |
+| 收益比判断最小下载速度（KB/s） | `yield_guard_ratio_min_download_kbs` | 检查间下载速度达到该值后才判断收益比   | 默认 500；避免低下载波动导致收益比误判                                                                              |
 | 低收益连续命中次数     | `yield_guard_bad_checks` | 连续命中多少次后执行低收益动作       | 默认 2                                                                                                             |
 | 收益保护最小下载量（GB） | `yield_guard_min_downloaded_gb` | 下载量达到该值后才处理低收益任务     | 默认 2；与最小进度满足任一即可                                                                                    |
 | 收益保护最小进度（%）  | `yield_guard_min_progress_percent` | 下载进度达到该值后才处理低收益任务   | 默认 10；与最小下载量满足任一即可                                                                                 |
@@ -300,6 +306,8 @@
 - `yield_guard_detail_log`：上传收益保护详细日志
 - `yield_guard_high_download_kbs`：收益保护高下载阈值（KB/s）
 - `yield_guard_low_upload_kbs`：收益保护低上传阈值（KB/s）
+- `yield_guard_low_ratio_percent`：收益保护低收益比阈值（%）
+- `yield_guard_ratio_min_download_kbs`：收益比判断最小下载速度（KB/s）
 - `yield_guard_bad_checks`：低收益连续命中次数
 - `yield_guard_min_downloaded_gb`：收益保护最小下载量（GB）
 - `yield_guard_min_progress_percent`：收益保护最小进度（%）
@@ -373,6 +381,8 @@
     "yield_guard_rehearsal": true,
     "yield_guard_high_download_kbs": 2048,
     "yield_guard_low_upload_kbs": 200,
+    "yield_guard_low_ratio_percent": 8,
+    "yield_guard_ratio_min_download_kbs": 500,
     "yield_guard_bad_checks": 2,
     "yield_guard_min_downloaded_gb": 2,
     "yield_guard_min_progress_percent": 10,

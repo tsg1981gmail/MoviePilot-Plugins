@@ -98,6 +98,10 @@ class BrushConfig:
         self.yield_guard_enabled = config.get("yield_guard_enabled", False)
         self.yield_guard_high_download_kbs = self.__parse_number(config.get("yield_guard_high_download_kbs", 2048))
         self.yield_guard_low_upload_kbs = self.__parse_number(config.get("yield_guard_low_upload_kbs", 200))
+        self.yield_guard_low_ratio_percent = self.__parse_number(config.get("yield_guard_low_ratio_percent", 8))
+        self.yield_guard_ratio_min_download_kbs = self.__parse_number(
+            config.get("yield_guard_ratio_min_download_kbs", 500)
+        )
         self.yield_guard_bad_checks = self.__parse_number(config.get("yield_guard_bad_checks", 2))
         self.yield_guard_min_downloaded_gb = self.__parse_number(config.get("yield_guard_min_downloaded_gb", 2))
         self.yield_guard_min_progress_percent = self.__parse_number(config.get("yield_guard_min_progress_percent", 10))
@@ -180,6 +184,8 @@ class BrushConfig:
             "yield_guard_enabled",
             "yield_guard_high_download_kbs",
             "yield_guard_low_upload_kbs",
+            "yield_guard_low_ratio_percent",
+            "yield_guard_ratio_min_download_kbs",
             "yield_guard_bad_checks",
             "yield_guard_min_downloaded_gb",
             "yield_guard_min_progress_percent",
@@ -283,6 +289,8 @@ class BrushConfig:
     "yield_guard_enabled": false,
     "yield_guard_high_download_kbs": 2048,
     "yield_guard_low_upload_kbs": 200,
+    "yield_guard_low_ratio_percent": 8,
+    "yield_guard_ratio_min_download_kbs": 500,
     "yield_guard_bad_checks": 2,
     "yield_guard_min_downloaded_gb": 2,
     "yield_guard_min_progress_percent": 10,
@@ -366,7 +374,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.33"
+    plugin_version = "4.3.34"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1977,6 +1985,40 @@ class BrushFlowLowFreq(_PluginBase):
                                                     {
                                                         'component': 'VTextField',
                                                         'props': {
+                                                            'model': 'yield_guard_low_ratio_percent',
+                                                            'label': '收益保护低收益比阈值（%）',
+                                                            'placeholder': '如：8，检查间上传/下载低于该比例'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_ratio_min_download_kbs',
+                                                            'label': '收益比判断最小下载速度（KB/s）',
+                                                            'placeholder': '如：500，下载达到后才判断收益比'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
                                                             'model': 'yield_guard_bad_checks',
                                                             'label': '低收益连续命中次数',
                                                             'placeholder': '如：2，连续命中后执行动作'
@@ -2616,6 +2658,8 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_enabled": False,
             "yield_guard_high_download_kbs": 2048,
             "yield_guard_low_upload_kbs": 200,
+            "yield_guard_low_ratio_percent": 8,
+            "yield_guard_ratio_min_download_kbs": 500,
             "yield_guard_bad_checks": 2,
             "yield_guard_min_downloaded_gb": 2,
             "yield_guard_min_progress_percent": 10,
@@ -3701,6 +3745,10 @@ class BrushFlowLowFreq(_PluginBase):
 
         high_download_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_high_download_kbs) * 1024
         low_upload_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_low_upload_kbs) * 1024
+        low_ratio_percent = self.__yield_guard_positive_number(brush_config.yield_guard_low_ratio_percent)
+        ratio_min_download_bytes = (
+                self.__yield_guard_positive_number(brush_config.yield_guard_ratio_min_download_kbs) * 1024
+        )
         min_downloaded_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_min_downloaded_gb) * 1024 ** 3
         min_progress_percent = self.__yield_guard_positive_number(brush_config.yield_guard_min_progress_percent)
         bad_checks = max(1, int(self.__yield_guard_positive_number(brush_config.yield_guard_bad_checks, 2)))
@@ -3711,6 +3759,22 @@ class BrushFlowLowFreq(_PluginBase):
                                               torrent_info.get("last_check_interval_upspeed_valid", False)))
         is_high_download = high_download_bytes > 0 and interval_downspeed is not None and interval_downspeed >= high_download_bytes
         is_low_upload = interval_upspeed is not None and interval_upspeed <= low_upload_bytes
+        yield_ratio_percent = self.__calculate_yield_guard_ratio_percent(
+            interval_upspeed=interval_upspeed,
+            interval_downspeed=interval_downspeed
+        )
+        has_ratio_download = (
+                ratio_min_download_bytes > 0
+                and interval_downspeed is not None
+                and interval_downspeed >= ratio_min_download_bytes
+        )
+        is_low_ratio = (
+                low_ratio_percent > 0
+                and has_ratio_download
+                and yield_ratio_percent is not None
+                and yield_ratio_percent <= low_ratio_percent
+        )
+        is_absolute_low_yield = is_high_download and is_low_upload
         sample_checks = []
         if min_downloaded_bytes > 0:
             sample_checks.append(downloaded >= min_downloaded_bytes)
@@ -3734,19 +3798,44 @@ class BrushFlowLowFreq(_PluginBase):
             if not (downspeed_valid and upspeed_valid):
                 decision_reasons.append("采样未就绪")
             else:
-                if not is_high_download:
+                if is_absolute_low_yield:
+                    decision_reasons.append(
+                        f"检查间下载 {self.__format_speed_kbs(interval_downspeed)} 达到高下载阈值 "
+                        f"{brush_config.yield_guard_high_download_kbs} KB/s，"
+                        f"检查间上传 {self.__format_speed_kbs(interval_upspeed)} 低于低上传阈值 "
+                        f"{brush_config.yield_guard_low_upload_kbs} KB/s"
+                    )
+                if is_low_ratio:
+                    decision_reasons.append(
+                        f"收益比 {self.__format_percent(yield_ratio_percent)} 低于低收益比阈值 "
+                        f"{brush_config.yield_guard_low_ratio_percent}%"
+                    )
+                if not is_high_download and not is_low_ratio:
                     decision_reasons.append(
                         f"检查间下载 {self.__format_speed_kbs(interval_downspeed)} 低于高下载阈值 "
                         f"{brush_config.yield_guard_high_download_kbs} KB/s"
                     )
-                if not is_low_upload:
+                if not is_low_upload and not is_low_ratio:
                     decision_reasons.append(
                         f"检查间上传 {self.__format_speed_kbs(interval_upspeed)} 高于低上传阈值 "
                         f"{brush_config.yield_guard_low_upload_kbs} KB/s"
                     )
+                if not is_low_ratio:
+                    if not has_ratio_download:
+                        decision_reasons.append(
+                            f"检查间下载 {self.__format_speed_kbs(interval_downspeed)} 低于收益比判断最小下载速度 "
+                            f"{brush_config.yield_guard_ratio_min_download_kbs} KB/s"
+                        )
+                    elif yield_ratio_percent is None:
+                        decision_reasons.append("收益比无法计算")
+                    else:
+                        decision_reasons.append(
+                            f"收益比 {self.__format_percent(yield_ratio_percent)} 高于低收益比阈值 "
+                            f"{brush_config.yield_guard_low_ratio_percent}%"
+                        )
                 if not has_enough_sample:
                     decision_reasons.append("下载量和进度未达到收益保护最小样本门槛")
-                if is_high_download and is_low_upload and has_enough_sample:
+                if (is_absolute_low_yield or is_low_ratio) and has_enough_sample:
                     bad_streak = int(self.__yield_guard_positive_number(torrent_task.get("yield_guard_bad_streak"), 0))
                     if bad_streak < bad_checks:
                         decision_reasons.append(f"低收益连续命中 {bad_streak}/{bad_checks}，仍在观察")
@@ -3774,6 +3863,10 @@ class BrushFlowLowFreq(_PluginBase):
             f"条件：采样={'是' if downspeed_valid and upspeed_valid else '否'}，"
             f"高下载={'是' if is_high_download else '否'}(阈值 {brush_config.yield_guard_high_download_kbs} KB/s)，"
             f"低上传={'是' if is_low_upload else '否'}(阈值 {brush_config.yield_guard_low_upload_kbs} KB/s)，"
+            f"收益比 {self.__format_percent(yield_ratio_percent)}，"
+            f"低收益比={'是' if is_low_ratio else '否'}"
+            f"(阈值 {brush_config.yield_guard_low_ratio_percent}%/"
+            f"最小下载 {brush_config.yield_guard_ratio_min_download_kbs} KB/s)，"
             f"样本足够={'是' if has_enough_sample else '否'}"
             f"(下载阈值 {brush_config.yield_guard_min_downloaded_gb} GB/进度阈值 {brush_config.yield_guard_min_progress_percent}%)，"
             f"原因：{reason or '无'}"
@@ -3784,6 +3877,19 @@ class BrushFlowLowFreq(_PluginBase):
         if speed_bytes is None:
             return "未知"
         return f"{speed_bytes / 1024:.1f} KB/s"
+
+    @staticmethod
+    def __format_percent(percent: Optional[float]) -> str:
+        if percent is None:
+            return "未知"
+        return f"{percent:.1f}%"
+
+    @staticmethod
+    def __calculate_yield_guard_ratio_percent(interval_upspeed: Optional[float],
+                                             interval_downspeed: Optional[float]) -> Optional[float]:
+        if interval_upspeed is None or interval_downspeed is None or interval_downspeed <= 0:
+            return None
+        return max(0.0, float(interval_upspeed)) / float(interval_downspeed) * 100
 
     @staticmethod
     def __clear_yield_guard_check_cache(torrent_task: dict) -> None:
@@ -4273,6 +4379,23 @@ class BrushFlowLowFreq(_PluginBase):
         low_upload_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_low_upload_kbs) * 1024
         is_high_download = high_download_bytes > 0 and interval_downspeed is not None and interval_downspeed >= high_download_bytes
         is_low_upload = interval_upspeed is not None and interval_upspeed <= low_upload_bytes
+        low_ratio_percent = self.__yield_guard_positive_number(brush_config.yield_guard_low_ratio_percent)
+        ratio_min_download_bytes = (
+                self.__yield_guard_positive_number(brush_config.yield_guard_ratio_min_download_kbs) * 1024
+        )
+        yield_ratio_percent = self.__calculate_yield_guard_ratio_percent(
+            interval_upspeed=interval_upspeed,
+            interval_downspeed=interval_downspeed
+        )
+        is_low_ratio = (
+                low_ratio_percent > 0
+                and ratio_min_download_bytes > 0
+                and interval_downspeed is not None
+                and interval_downspeed >= ratio_min_download_bytes
+                and yield_ratio_percent is not None
+                and yield_ratio_percent <= low_ratio_percent
+        )
+        is_low_yield = (is_high_download and is_low_upload) or is_low_ratio
 
         downloaded = self.__number_or_none(torrent_info.get("downloaded")) or 0
         total_size = self.__number_or_none(torrent_info.get("total_size")) or 0
@@ -4286,7 +4409,7 @@ class BrushFlowLowFreq(_PluginBase):
             sample_checks.append(progress_percent >= min_progress_percent)
         has_enough_sample = any(sample_checks) if sample_checks else True
 
-        if not (is_high_download and is_low_upload and has_enough_sample):
+        if not (is_low_yield and has_enough_sample):
             torrent_task["yield_guard_bad_streak"] = 0
             if torrent_task.get("yield_guard_stage") == "limited":
                 torrent_task["yield_guard_stage"] = "normal"
@@ -5359,6 +5482,8 @@ class BrushFlowLowFreq(_PluginBase):
             "auto_archive_days": "自动清理记录天数",
             "yield_guard_high_download_kbs": "收益保护高下载阈值",
             "yield_guard_low_upload_kbs": "收益保护低上传阈值",
+            "yield_guard_low_ratio_percent": "收益保护低收益比阈值",
+            "yield_guard_ratio_min_download_kbs": "收益比判断最小下载速度",
             "yield_guard_bad_checks": "低收益连续命中次数",
             "yield_guard_min_downloaded_gb": "收益保护最小下载量",
             "yield_guard_min_progress_percent": "收益保护最小进度",
@@ -5466,6 +5591,8 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_enabled": brush_config.yield_guard_enabled,
             "yield_guard_high_download_kbs": brush_config.yield_guard_high_download_kbs,
             "yield_guard_low_upload_kbs": brush_config.yield_guard_low_upload_kbs,
+            "yield_guard_low_ratio_percent": brush_config.yield_guard_low_ratio_percent,
+            "yield_guard_ratio_min_download_kbs": brush_config.yield_guard_ratio_min_download_kbs,
             "yield_guard_bad_checks": brush_config.yield_guard_bad_checks,
             "yield_guard_min_downloaded_gb": brush_config.yield_guard_min_downloaded_gb,
             "yield_guard_min_progress_percent": brush_config.yield_guard_min_progress_percent,
