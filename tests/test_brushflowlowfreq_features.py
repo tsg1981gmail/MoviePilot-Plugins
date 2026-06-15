@@ -743,7 +743,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_fast_fail_minutes": 10,
         })
         torrent_info = {
-            "seeding_time": 120,
+            "seeding_time": 0,
             "ratio": 0.1,
             "uploaded": 100,
             "downloaded": 1000,
@@ -792,7 +792,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "seed_ratio_min_30m": 0.5,
         })
         torrent_info = {
-            "seeding_time": 3600,
+            "seeding_time": 0,
             "ratio": 0.1,
             "uploaded": 100,
             "downloaded": 1000,
@@ -822,6 +822,52 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertFalse(should_delete, reason)
         self.assertIn("保护", reason)
+
+    def test_completed_torrent_is_not_yield_guard_good_protected(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_good_upload_kbs": 1,
+            "yield_guard_good_avg_upload_kbs": 1,
+            "yield_guard_protect_delete_rules": True,
+            "seed_ratio_check_minutes": 30,
+            "seed_ratio_min_30m": 0.5,
+        })
+        torrent_info = {
+            "seeding_time": 3600,
+            "ratio": 0.1,
+            "uploaded": 100 * 1024 * 1024,
+            "downloaded": 1000,
+            "total_size": 1000,
+            "dltime": 3600,
+            "avg_upspeed": 2 * 1024,
+            "iatime": 0,
+            "last_check_interval_upspeed": 2 * 1024,
+            "last_check_interval_upspeed_valid": True,
+        }
+        torrent_task = {
+            "site_name": "站点1",
+            "time": 0,
+            "first_downloaded_time": 1,
+            "first_uploaded_time": 1,
+            "last_check_interval_upspeed": 2 * 1024,
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_good_protected": False,
+            "yield_guard_promising_protected": False,
+        }
+        original_get_task_elapsed_minutes = plugin._BrushFlowLowFreq__get_task_elapsed_minutes
+        plugin._BrushFlowLowFreq__get_task_elapsed_minutes = lambda value: 60
+        try:
+            should_delete, reason = plugin._BrushFlowLowFreq__evaluate_conditions_for_delete(
+                site_name="站点1",
+                torrent_info=torrent_info,
+                torrent_task=torrent_task,
+            )
+        finally:
+            plugin._BrushFlowLowFreq__get_task_elapsed_minutes = original_get_task_elapsed_minutes
+
+        self.assertTrue(should_delete, reason)
+        self.assertIn("分享率", reason)
+        self.assertFalse(torrent_task.get("yield_guard_good_protected"))
 
     def test_yield_guard_good_protected_resets_limited_stage_and_marks_limit_restore(self):
         plugin = self._new_qb_plugin({
@@ -967,7 +1013,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_fast_fail_minutes": 1,
         })
         torrent_info = {
-            "seeding_time": 120,
+            "seeding_time": 0,
             "ratio": 0.1,
             "uploaded": 100,
             "downloaded": 1000,
@@ -1574,6 +1620,85 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         )
         self.assertTrue(any("高下载=否" in msg for msg in new_logs), new_logs)
 
+    def test_check_skips_yield_guard_for_completed_torrents(self):
+        class FakeDownloader:
+            def is_inactive(self):
+                return False
+
+            def get_torrents(self):
+                torrent = {
+                    "hash": "abcdef",
+                    "name": "completed yield sample",
+                    "tags": "刷流",
+                    "state": "stalledUP",
+                    "progress": 1.0,
+                    "downloaded": 10 * 1024 * 1024,
+                    "uploaded": 4 * 1024 * 1024,
+                    "total_size": 10 * 1024 * 1024,
+                    "ratio": 0.4,
+                    "added_on": 1,
+                    "completion_on": 1,
+                    "last_activity": 1,
+                    "tracker": "tracker",
+                }
+                return [torrent], None
+
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_detail_log": True,
+            "yield_guard_good_upload_kbs": 1,
+            "yield_guard_good_avg_upload_kbs": 1,
+            "freeleech": "",
+            "hr": "no",
+        }, downloader=FakeDownloader())
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
+        torrent_tasks = {
+            "abcdef": {
+                "site": 1,
+                "site_name": "站点1",
+                "title": "completed yield sample",
+                "description": "desc",
+                "hit_and_run": False,
+                "time": 0,
+                "downloaded": 10 * 1024 * 1024,
+                "uploaded": 1 * 1024 * 1024,
+                "total_size": 10 * 1024 * 1024,
+                "ratio": 0.1,
+                "seeding_time": 3600,
+                "last_check_time": 1,
+                "last_check_uploaded": 1 * 1024 * 1024,
+                "last_check_downloaded": 10 * 1024 * 1024,
+                "yield_guard_bad_streak": 1,
+                "yield_guard_stage": "normal",
+                "yield_guard_good_protected": True,
+                "yield_guard_promising_protected": False,
+                "deleted": False,
+            }
+        }
+        plugin.get_data = lambda key: {
+            "torrents": torrent_tasks,
+            "unmanaged": {}
+        }.get(key, {})
+        plugin.save_data = lambda *args, **kwargs: None
+        start_info_count = len(self.module.logger.info_messages)
+
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 2
+        try:
+            plugin.check()
+        finally:
+            self.module.time.time = original_time
+
+        new_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertFalse(any("上传收益保护：本轮检查已评估" in msg for msg in new_logs), new_logs)
+        self.assertFalse(any("上传收益保护详细日志" in msg for msg in new_logs), new_logs)
+        self.assertFalse(torrent_tasks["abcdef"].get("yield_guard_evaluated_in_check"))
+        self.assertFalse(torrent_tasks["abcdef"].get("yield_guard_good_protected"))
+        self.assertEqual(0, torrent_tasks["abcdef"].get("yield_guard_bad_streak"))
+
     def test_check_skips_low_ratio_delete_when_good_protected(self):
         class FakeDownloader:
             def is_inactive(self):
@@ -1815,7 +1940,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             delete_summary_messages=[],
         )
 
-        self.assertEqual([], delete_hashes)
+        self.assertEqual(["good"], delete_hashes)
 
     def test_yield_guard_good_pool_soft_stop_blocks_new_brush_without_probe_slot(self):
         plugin = self._new_qb_plugin({

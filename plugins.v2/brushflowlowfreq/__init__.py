@@ -366,7 +366,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.32"
+    plugin_version = "4.3.33"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -3623,6 +3623,10 @@ class BrushFlowLowFreq(_PluginBase):
                 continue
 
             torrent_info = self.__get_torrent_info(torrent)
+            if not self.__is_yield_guard_applicable_torrent(torrent_info=torrent_info):
+                self.__reset_yield_guard_runtime_state_for_skip(torrent_task)
+                continue
+
             should_delete, reason = self.__evaluate_yield_guard_for_delete(
                 site_name=site_name,
                 brush_config=brush_config,
@@ -4145,6 +4149,23 @@ class BrushFlowLowFreq(_PluginBase):
         total_size = self.__number_or_none(torrent_info.get("total_size"))
         return downloaded is not None and total_size is not None and total_size > 0 and downloaded >= total_size
 
+    def __is_yield_guard_applicable_torrent(self, torrent_info: dict) -> bool:
+        """
+        上传收益保护只处理正在下载的种子；已完成做种种子交给常规做种删种规则。
+        """
+        return not self.__is_torrent_seeding_or_completed(torrent_info=torrent_info)
+
+    def __reset_yield_guard_runtime_state_for_skip(self, torrent_task: dict) -> None:
+        if not isinstance(torrent_task, dict):
+            return
+        self.__clear_yield_guard_check_cache(torrent_task)
+        torrent_task["yield_guard_good_protected"] = False
+        torrent_task["yield_guard_promising_protected"] = False
+        torrent_task["yield_guard_bad_streak"] = 0
+        torrent_task["yield_guard_stage"] = "normal"
+        torrent_task["yield_guard_restore_download_limit"] = False
+        torrent_task["yield_guard_last_reason"] = "上传收益保护：已完成做种，跳过"
+
     @staticmethod
     def __yield_guard_action_value(action: Any, default_value: str) -> str:
         action = str(action or "").strip().lower()
@@ -4173,6 +4194,10 @@ class BrushFlowLowFreq(_PluginBase):
             self.__clear_yield_guard_check_cache(torrent_task)
             torrent_task["yield_guard_good_protected"] = False
             torrent_task["yield_guard_promising_protected"] = False
+            return False, ""
+
+        if not self.__is_yield_guard_applicable_torrent(torrent_info=torrent_info):
+            self.__reset_yield_guard_runtime_state_for_skip(torrent_task)
             return False, ""
 
         interval_upspeed = self.__number_or_none(torrent_task.get("last_check_interval_upspeed"))
