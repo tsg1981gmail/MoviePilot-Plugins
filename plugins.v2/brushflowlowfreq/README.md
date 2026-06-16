@@ -6,6 +6,11 @@
 
 ## 版本更新日志
 
+- v4.3.44
+  - “上传收益保护”新增下载带宽仲裁：下载高压时会回退已放开的限速任务，避免优秀上传任务被其它种子占用下载带宽
+  - 下载带宽连续空闲时，会按上传表现把已限速任务从普通限速逐步放开到空闲释放、半开放和恢复限速，减少带宽闲置
+  - 新增下载高压/空闲阈值、空闲释放连续次数、空闲释放限速和半开放限速配置
+
 - v4.3.43
   - “上传收益保护”新增压力策略：可选择自动判断、偏保守、偏激进、宽松探测、均衡处理、竞争淘汰，用于控制低收益任务观察和处理节奏
   - 新增“任务少时新增策略”：可选择自动放开、保持限制、积极补种；任务少时可放开部分限制，任务多或近期已探测时仍会拦截新增
@@ -284,6 +289,12 @@
 | 高收益池最小数量       | `yield_guard_good_pool_min_count` | 高上传保护任务达到多少个后进入软停止 | 默认 2                                                                                                             |
 | 收益保护探测名额       | `yield_guard_probe_slots` | 高收益池满时保留多少个普通探测任务   | 默认 1；设置 0 表示高收益池满后不再保留探测                                                                         |
 | 收益保护探测间隔（分钟） | `yield_guard_probe_interval_minutes` | 两次探测新增之间的最小间隔           | 默认 10                                                                                                            |
+| 下载带宽仲裁           | `yield_guard_bandwidth_arbitration_enabled` | 是否按总下载带宽压力回退或释放限速任务 | 默认开启；需要配置总下载带宽 `maxdlspeed` 才能判断压力                                                              |
+| 下载高压阈值（%）       | `yield_guard_high_pressure_percent` | 总下载带宽占用达到该比例时回退已释放任务 | 默认 85                                                                                                            |
+| 下载空闲阈值（%）       | `yield_guard_idle_pressure_percent` | 总下载带宽占用低于该比例时允许逐步放开限速任务 | 默认 45                                                                                                            |
+| 空闲释放连续检查次数   | `yield_guard_idle_release_checks` | 连续多少轮下载空闲后升一档限速       | 默认 2                                                                                                             |
+| 空闲释放限速（KB/s）   | `yield_guard_relax_download_limit_kbs` | 低收益限速任务空闲释放后的第一档下载限速 | 默认 1024                                                                                                          |
+| 半开放限速（KB/s）     | `yield_guard_half_open_download_limit_kbs` | 空闲释放任务继续观察良好后的第二档下载限速 | 默认 2048                                                                                                          |
 | 新发布短窗保护（分钟） | `yield_guard_promising_pubtime_minutes` | 发布时间在该窗口内时不直接删除       | 默认 15                                                                                                            |
 | 动态删除种子           | `proxy_delete`       | 是否启用动态删除种子                 | **实验性功能**，可能导致刷流数据异常，甚至清空数据，请慎重开启。详情见[动态删除规则](#动态删除规则)               |
 | 清除统计数据           | `clear_task`         | 是否清除统计数据                     | 一次性任务，自动重置插件数据页中的所有数据                                                                        |
@@ -368,6 +379,12 @@
 - `yield_guard_good_pool_min_count`：高收益池最小数量
 - `yield_guard_probe_slots`：收益保护探测名额
 - `yield_guard_probe_interval_minutes`：收益保护探测间隔（分钟）
+- `yield_guard_bandwidth_arbitration_enabled`：下载带宽仲裁
+- `yield_guard_high_pressure_percent`：下载高压阈值（%）
+- `yield_guard_idle_pressure_percent`：下载空闲阈值（%）
+- `yield_guard_idle_release_checks`：空闲释放连续检查次数
+- `yield_guard_relax_download_limit_kbs`：空闲释放限速（KB/s）
+- `yield_guard_half_open_download_limit_kbs`：半开放限速（KB/s）
 - `yield_guard_promising_pubtime_minutes`：新发布短窗保护（分钟）
 - `save_path`：保存目录
 - `proxy_delete`：动态删除种子（实验性功能）
@@ -446,6 +463,12 @@
     "yield_guard_good_pool_min_count": 2,
     "yield_guard_probe_slots": 1,
     "yield_guard_probe_interval_minutes": 10,
+    "yield_guard_bandwidth_arbitration_enabled": true,
+    "yield_guard_high_pressure_percent": 85,
+    "yield_guard_idle_pressure_percent": 45,
+    "yield_guard_idle_release_checks": 2,
+    "yield_guard_relax_download_limit_kbs": 1024,
+    "yield_guard_half_open_download_limit_kbs": 2048,
     "yield_guard_promising_pubtime_minutes": 15,
     "seed_inactivetime": "",
     "save_path": "/downloads/site1",

@@ -130,6 +130,24 @@ class BrushConfig:
         self.yield_guard_good_pool_min_count = self.__parse_number(config.get("yield_guard_good_pool_min_count", 2))
         self.yield_guard_probe_slots = self.__parse_number(config.get("yield_guard_probe_slots", 1))
         self.yield_guard_probe_interval_minutes = self.__parse_number(config.get("yield_guard_probe_interval_minutes", 10))
+        self.yield_guard_bandwidth_arbitration_enabled = config.get(
+            "yield_guard_bandwidth_arbitration_enabled", True
+        )
+        self.yield_guard_high_pressure_percent = self.__parse_number(
+            config.get("yield_guard_high_pressure_percent", 85)
+        )
+        self.yield_guard_idle_pressure_percent = self.__parse_number(
+            config.get("yield_guard_idle_pressure_percent", 45)
+        )
+        self.yield_guard_idle_release_checks = self.__parse_number(
+            config.get("yield_guard_idle_release_checks", 2)
+        )
+        self.yield_guard_relax_download_limit_kbs = self.__parse_number(
+            config.get("yield_guard_relax_download_limit_kbs", 1024)
+        )
+        self.yield_guard_half_open_download_limit_kbs = self.__parse_number(
+            config.get("yield_guard_half_open_download_limit_kbs", 2048)
+        )
         self.yield_guard_promising_pubtime_minutes = self.__parse_number(
             config.get("yield_guard_promising_pubtime_minutes", 15)
         )
@@ -217,6 +235,12 @@ class BrushConfig:
             "yield_guard_good_pool_min_count",
             "yield_guard_probe_slots",
             "yield_guard_probe_interval_minutes",
+            "yield_guard_bandwidth_arbitration_enabled",
+            "yield_guard_high_pressure_percent",
+            "yield_guard_idle_pressure_percent",
+            "yield_guard_idle_release_checks",
+            "yield_guard_relax_download_limit_kbs",
+            "yield_guard_half_open_download_limit_kbs",
             "yield_guard_promising_pubtime_minutes",
             "yield_guard_rehearsal",
             "yield_guard_detail_log",
@@ -325,6 +349,12 @@ class BrushConfig:
     "yield_guard_good_pool_min_count": 2,
     "yield_guard_probe_slots": 1,
     "yield_guard_probe_interval_minutes": 10,
+    "yield_guard_bandwidth_arbitration_enabled": true,
+    "yield_guard_high_pressure_percent": 85,
+    "yield_guard_idle_pressure_percent": 45,
+    "yield_guard_idle_release_checks": 2,
+    "yield_guard_relax_download_limit_kbs": 1024,
+    "yield_guard_half_open_download_limit_kbs": 2048,
     "yield_guard_promising_pubtime_minutes": 15,
     "yield_guard_rehearsal": true,
     "yield_guard_detail_log": false
@@ -398,7 +428,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.43"
+    plugin_version = "4.3.44"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1549,6 +1579,107 @@ class BrushFlowLowFreq(_PluginBase):
                                                             'model': 'exclude',
                                                             'label': '排除规则',
                                                             'placeholder': '支持正式表达式'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'yield_guard_bandwidth_arbitration_enabled',
+                                                            'label': '下载带宽仲裁'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_high_pressure_percent',
+                                                            'label': '下载高压阈值（%）',
+                                                            'placeholder': '如：85，达到后回退释放任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_idle_pressure_percent',
+                                                            'label': '下载空闲阈值（%）',
+                                                            'placeholder': '如：45，低于后允许逐步放开'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_idle_release_checks',
+                                                            'label': '空闲释放连续检查次数',
+                                                            'placeholder': '如：2，连续空闲后升一档'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_relax_download_limit_kbs',
+                                                            'label': '空闲释放限速（KB/s）',
+                                                            'placeholder': '如：1024，第一档释放速度'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_half_open_download_limit_kbs',
+                                                            'label': '半开放限速（KB/s）',
+                                                            'placeholder': '如：2048，第二档释放速度'
                                                         }
                                                     }
                                                 ]
@@ -2764,6 +2895,12 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_good_pool_min_count": 2,
             "yield_guard_probe_slots": 1,
             "yield_guard_probe_interval_minutes": 10,
+            "yield_guard_bandwidth_arbitration_enabled": True,
+            "yield_guard_high_pressure_percent": 85,
+            "yield_guard_idle_pressure_percent": 45,
+            "yield_guard_idle_release_checks": 2,
+            "yield_guard_relax_download_limit_kbs": 1024,
+            "yield_guard_half_open_download_limit_kbs": 2048,
             "yield_guard_promising_pubtime_minutes": 15,
             "yield_guard_rehearsal": True,
             "yield_guard_detail_log": False,
@@ -3453,6 +3590,91 @@ class BrushFlowLowFreq(_PluginBase):
             effective_bad_checks += 2
         return max(1, int(effective_bad_checks))
 
+    def __build_yield_guard_bandwidth_state(self, brush_config: BrushConfig) -> Dict[str, Any]:
+        if (not getattr(brush_config, "yield_guard_bandwidth_arbitration_enabled", True)
+                or not self.__yield_guard_positive_number(brush_config.maxdlspeed, 0)):
+            return {"pressure": "unknown", "usage_percent": None, "reason": "未配置总下载带宽"}
+
+        avg_upload_speed, avg_download_speed = self.__get_average_bandwidth(sample_count=1, interval=0)
+        if avg_download_speed is None:
+            return {"pressure": "unknown", "usage_percent": None, "reason": "无法获取下载带宽"}
+
+        max_download_bytes = self.__yield_guard_positive_number(brush_config.maxdlspeed, 0) * 1024
+        if max_download_bytes <= 0:
+            return {"pressure": "unknown", "usage_percent": None, "reason": "未配置总下载带宽"}
+
+        usage_percent = max(0.0, float(avg_download_speed)) / max_download_bytes * 100
+        high_percent = self.__yield_guard_positive_number(
+            getattr(brush_config, "yield_guard_high_pressure_percent", None),
+            85
+        )
+        idle_percent = self.__yield_guard_positive_number(
+            getattr(brush_config, "yield_guard_idle_pressure_percent", None),
+            45
+        )
+        if high_percent > 0 and usage_percent >= high_percent:
+            pressure = "high"
+        elif idle_percent > 0 and usage_percent <= idle_percent:
+            pressure = "idle"
+        else:
+            pressure = "normal"
+        return {
+            "pressure": pressure,
+            "usage_percent": usage_percent,
+            "download_speed": avg_download_speed,
+            "upload_speed": avg_upload_speed,
+            "reason": f"下载带宽占用 {usage_percent:.1f}%"
+        }
+
+    def __evaluate_yield_guard_idle_release(self, brush_config: BrushConfig, torrent_task: dict, stage: str,
+                                            bandwidth_pressure: str,
+                                            bandwidth_usage_percent: Optional[float]) -> Tuple[str, str]:
+        if not getattr(brush_config, "yield_guard_bandwidth_arbitration_enabled", True):
+            torrent_task["yield_guard_idle_release_streak"] = 0
+            return "", ""
+
+        releasable_stages = {"strict_limited", "limited", "probing", "relaxed_limited", "half_open"}
+        if stage not in releasable_stages:
+            torrent_task["yield_guard_idle_release_streak"] = 0
+            return "", ""
+
+        if bandwidth_pressure != "idle":
+            if bandwidth_pressure in {"high", "normal"}:
+                torrent_task["yield_guard_idle_release_streak"] = 0
+            return "", ""
+
+        idle_streak = int(self.__yield_guard_positive_number(
+            torrent_task.get("yield_guard_idle_release_streak"), 0
+        )) + 1
+        torrent_task["yield_guard_idle_release_streak"] = idle_streak
+        release_checks = max(1, int(self.__yield_guard_positive_number(
+            getattr(brush_config, "yield_guard_idle_release_checks", None),
+            2
+        )))
+        usage_text = f"{bandwidth_usage_percent:.1f}%" if bandwidth_usage_percent is not None else "未知"
+        if idle_streak < release_checks:
+            return "", (
+                f"上传收益保护：下载带宽空闲 {usage_text}，限速任务等待释放观察 "
+                f"{idle_streak}/{release_checks}"
+            )
+
+        if stage == "strict_limited":
+            next_stage, action, level = "limited", "limit", "limited"
+        elif stage in {"limited", "probing"}:
+            next_stage, action, level = "relaxed_limited", "relax_limit", "relaxed"
+        elif stage == "relaxed_limited":
+            next_stage, action, level = "half_open", "half_limit", "half_open"
+        else:
+            next_stage, action, level = "normal", "restore_limit", "restored"
+
+        torrent_task["yield_guard_stage"] = next_stage
+        torrent_task["yield_guard_release_level"] = level
+        torrent_task["yield_guard_idle_release_streak"] = 0 if action == "restore_limit" else idle_streak
+        if action == "restore_limit":
+            torrent_task["yield_guard_restore_download_limit"] = True
+        reason = f"上传收益保护：下载带宽空闲 {usage_text}，按上传观察逐步放开限速，动作 {action}"
+        return action, reason
+
     def __evaluate_conditions_for_brush(self, torrent, torrent_tasks) -> Tuple[bool, Optional[str]]:
         """
         过滤不符合条件的种子
@@ -3886,6 +4108,7 @@ class BrushFlowLowFreq(_PluginBase):
             if self.__get_hash(torrent)
         }
         yield_guard_pool_states: Dict[str, Dict[str, Any]] = {}
+        yield_guard_bandwidth_states: Dict[str, Dict[str, Any]] = {}
         for torrent in torrents:
             torrent_hash = self.__get_hash(torrent)
             torrent_task = torrent_tasks.get(torrent_hash)
@@ -3904,7 +4127,11 @@ class BrushFlowLowFreq(_PluginBase):
                     torrent_tasks=torrent_tasks,
                     active_hashes=active_hashes
                 )
+                yield_guard_bandwidth_states[site_name] = self.__build_yield_guard_bandwidth_state(
+                    brush_config=brush_config
+                )
             yield_guard_pool_state = yield_guard_pool_states[site_name]
+            yield_guard_bandwidth_state = yield_guard_bandwidth_states.get(site_name)
 
             torrent_info = self.__get_torrent_info(torrent)
             if not self.__is_yield_guard_applicable_torrent(torrent_info=torrent_info):
@@ -3916,7 +4143,8 @@ class BrushFlowLowFreq(_PluginBase):
                 brush_config=brush_config,
                 torrent_info=torrent_info,
                 torrent_task=torrent_task,
-                yield_guard_pool_state=yield_guard_pool_state
+                yield_guard_pool_state=yield_guard_pool_state,
+                yield_guard_bandwidth_state=yield_guard_bandwidth_state
             )
             torrent_task["yield_guard_evaluated_in_check"] = True
             torrent_task["yield_guard_should_delete"] = bool(should_delete)
@@ -4023,13 +4251,23 @@ class BrushFlowLowFreq(_PluginBase):
         pool_mode = torrent_task.get("yield_guard_pool_mode") or "balanced"
         pool_reason = torrent_task.get("yield_guard_pool_reason") or "任务池平衡"
         pool_text = self.__yield_guard_pool_mode_text(pool_mode)
+        bandwidth_pressure = torrent_task.get("yield_guard_bandwidth_pressure") or "unknown"
+        bandwidth_usage_percent = self.__number_or_none(torrent_task.get("yield_guard_bandwidth_usage_percent"))
+        bandwidth_text = {
+            "high": "高压",
+            "idle": "空闲",
+            "normal": "正常",
+            "unknown": "未知"
+        }.get(bandwidth_pressure, bandwidth_pressure)
+        if bandwidth_usage_percent is not None:
+            bandwidth_text = f"{bandwidth_text}{bandwidth_usage_percent:.1f}%"
         title = torrent_task.get("title") or torrent_info.get("title") or torrent_hash
         detail_reason = reason or torrent_task.get("yield_guard_last_reason") or "无"
 
         logger.info(
             f"站点：{site_name}，上传收益保护详细日志："
             f"hash={torrent_hash}，任务={title}，判定={decision}，模式={pool_text}({pool_reason})，"
-            f"阶段={stage}，动作={planned_action}，"
+            f"带宽={bandwidth_text}，阶段={stage}，动作={planned_action}，"
             f"速率=下 {self.__format_speed_kbs(interval_downspeed)}/上 {self.__format_speed_kbs(interval_upspeed)}，"
             f"收益=本轮{self.__format_percent(yield_ratio_percent)}/"
             f"累计{self.__format_percent(cumulative_ratio_percent)}/均上 {self.__format_speed_kbs(avg_upspeed)}，"
@@ -4069,7 +4307,7 @@ class BrushFlowLowFreq(_PluginBase):
         if not isinstance(torrent_task, dict):
             return
         action = str(action or "").strip().lower()
-        if action in {"limit", "strict_limit", "probe", "pause", "restore_limit"}:
+        if action in {"limit", "strict_limit", "relax_limit", "half_limit", "probe", "pause", "restore_limit"}:
             torrent_task["yield_guard_pending_action"] = action
 
     @staticmethod
@@ -4467,7 +4705,9 @@ class BrushFlowLowFreq(_PluginBase):
     @staticmethod
     def __yield_guard_action_value(action: Any, default_value: str) -> str:
         action = str(action or "").strip().lower()
-        return action if action in {"none", "limit", "strict_limit", "probe", "pause", "delete"} else default_value
+        return action if action in {
+            "none", "limit", "strict_limit", "relax_limit", "half_limit", "probe", "pause", "delete"
+        } else default_value
 
     @staticmethod
     def __yield_guard_positive_number(value: Any, default_value: float = 0.0) -> float:
@@ -4489,13 +4729,35 @@ class BrushFlowLowFreq(_PluginBase):
         strict_limit_kbs = max(1.0, normal_limit_kbs * 0.25)
         return int(strict_limit_kbs * 1024)
 
+    def __yield_guard_download_limit_for_action_bytes(self, brush_config: BrushConfig, action: str) -> int:
+        action = str(action or "").strip().lower()
+        if action == "strict_limit":
+            return self.__yield_guard_strict_download_limit_bytes(brush_config)
+        if action == "relax_limit":
+            fallback = self.__yield_guard_positive_number(brush_config.yield_guard_download_limit_kbs, 512) * 2
+            limit_kbs = self.__yield_guard_positive_number(
+                getattr(brush_config, "yield_guard_relax_download_limit_kbs", None),
+                fallback
+            )
+            return int(max(1.0, limit_kbs) * 1024)
+        if action == "half_limit":
+            fallback = self.__yield_guard_positive_number(brush_config.yield_guard_download_limit_kbs, 512) * 4
+            limit_kbs = self.__yield_guard_positive_number(
+                getattr(brush_config, "yield_guard_half_open_download_limit_kbs", None),
+                fallback
+            )
+            return int(max(1.0, limit_kbs) * 1024)
+        limit_kbs = self.__yield_guard_positive_number(brush_config.yield_guard_download_limit_kbs, 512)
+        return int(max(1.0, limit_kbs) * 1024)
+
     @staticmethod
     def __yield_guard_rehearsal_reason(reason: str) -> str:
         return f"上传收益保护演练模式：{reason}，不实际执行"
 
     def __evaluate_yield_guard_for_delete(self, site_name: str, brush_config: BrushConfig,
                                           torrent_info: dict, torrent_task: dict,
-                                          yield_guard_pool_state: Dict[str, Any] = None) -> Tuple[bool, str]:
+                                          yield_guard_pool_state: Dict[str, Any] = None,
+                                          yield_guard_bandwidth_state: Dict[str, Any] = None) -> Tuple[bool, str]:
         """
         评估上传收益保护。这里返回 True 表示应交给现有删种流程删除。
         限速/暂停动作在 check() 的动作层处理；本函数只维护状态和给出决策原因。
@@ -4520,6 +4782,28 @@ class BrushFlowLowFreq(_PluginBase):
         pool_reason = yield_guard_pool_state.get("reason") or "任务池平衡"
         torrent_task["yield_guard_pool_mode"] = pool_mode
         torrent_task["yield_guard_pool_reason"] = pool_reason
+        yield_guard_bandwidth_state = yield_guard_bandwidth_state if isinstance(yield_guard_bandwidth_state, dict) else {}
+        bandwidth_pressure = str(yield_guard_bandwidth_state.get("pressure") or "unknown").strip().lower()
+        bandwidth_usage_percent = self.__number_or_none(yield_guard_bandwidth_state.get("usage_percent"))
+        torrent_task["yield_guard_bandwidth_pressure"] = bandwidth_pressure
+        torrent_task["yield_guard_bandwidth_usage_percent"] = bandwidth_usage_percent
+
+        stage = torrent_task.get("yield_guard_stage") or "normal"
+        if bandwidth_pressure == "high" and stage in {"relaxed_limited", "half_open"}:
+            rollback_stage = "limited" if stage == "relaxed_limited" else "relaxed_limited"
+            rollback_action = "limit" if stage == "relaxed_limited" else "relax_limit"
+            torrent_task["yield_guard_stage"] = rollback_stage
+            torrent_task["yield_guard_release_level"] = "none" if rollback_stage == "limited" else "relaxed"
+            torrent_task["yield_guard_idle_release_streak"] = 0
+            torrent_task["yield_guard_bad_streak"] = max(
+                1,
+                int(self.__yield_guard_positive_number(torrent_task.get("yield_guard_bad_streak"), 0))
+            )
+            self.__set_yield_guard_pending_action(torrent_task, rollback_action)
+            usage_text = f"{bandwidth_usage_percent:.1f}%" if bandwidth_usage_percent is not None else "未知"
+            reason = f"上传收益保护：下载带宽高压 {usage_text}，释放任务回退到 {rollback_stage}"
+            torrent_task["yield_guard_last_reason"] = reason
+            return False, reason
 
         interval_upspeed = self.__number_or_none(torrent_task.get("last_check_interval_upspeed"))
         if interval_upspeed is None:
@@ -4735,14 +5019,35 @@ class BrushFlowLowFreq(_PluginBase):
                     or is_ratio_upload_protected
                     or is_ratio_strongly_healthy
             )
-            if stage in {"limited", "strict_limited", "probing"}:
+            if (
+                    bandwidth_pressure == "idle"
+                    and stage in {"limited", "strict_limited", "probing", "relaxed_limited", "half_open"}
+                    and is_low_upload
+                    and not is_ratio_upload_protected
+            ):
+                restore_ready = False
+            if stage in {"limited", "strict_limited", "probing", "relaxed_limited", "half_open"}:
                 if restore_ready:
                     torrent_task["yield_guard_stage"] = "normal"
                     torrent_task["yield_guard_restore_download_limit"] = True
                     self.__set_yield_guard_pending_action(torrent_task, "restore_limit")
                     torrent_task["yield_guard_probe_started"] = False
                     torrent_task["yield_guard_probe_started_time"] = None
+                    torrent_task["yield_guard_idle_release_streak"] = 0
+                    torrent_task["yield_guard_release_level"] = "restored"
                 else:
+                    release_action, release_reason = self.__evaluate_yield_guard_idle_release(
+                        brush_config=brush_config,
+                        torrent_task=torrent_task,
+                        stage=stage,
+                        bandwidth_pressure=bandwidth_pressure,
+                        bandwidth_usage_percent=bandwidth_usage_percent
+                    )
+                    if release_action:
+                        self.__set_yield_guard_pending_action(torrent_task, release_action)
+                        torrent_task["yield_guard_restore_download_limit"] = False
+                        torrent_task["yield_guard_last_reason"] = release_reason
+                        return False, release_reason
                     torrent_task["yield_guard_restore_download_limit"] = False
             if is_ratio_upload_protected:
                 torrent_task["yield_guard_last_reason"] = (
@@ -5796,6 +6101,8 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_restore_download_limit": False,
             "yield_guard_probe_started": False,
             "yield_guard_probe_started_time": None,
+            "yield_guard_idle_release_streak": 0,
+            "yield_guard_release_level": "none",
             "yield_guard_pending_action": None,
             "yield_guard_low_yield_kind": "none",
             "yield_guard_cumulative_ratio_percent": None,
@@ -5913,6 +6220,11 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_good_pool_min_count": "高收益池最小数量",
             "yield_guard_probe_slots": "收益保护探测名额",
             "yield_guard_probe_interval_minutes": "收益保护探测间隔",
+            "yield_guard_high_pressure_percent": "下载带宽高压阈值",
+            "yield_guard_idle_pressure_percent": "下载带宽空闲阈值",
+            "yield_guard_idle_release_checks": "空闲释放连续检查次数",
+            "yield_guard_relax_download_limit_kbs": "空闲释放下载限速",
+            "yield_guard_half_open_download_limit_kbs": "半开放下载限速",
             "yield_guard_promising_pubtime_minutes": "新发布短窗保护"
         }
 
@@ -6054,6 +6366,12 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_good_pool_min_count": brush_config.yield_guard_good_pool_min_count,
             "yield_guard_probe_slots": brush_config.yield_guard_probe_slots,
             "yield_guard_probe_interval_minutes": brush_config.yield_guard_probe_interval_minutes,
+            "yield_guard_bandwidth_arbitration_enabled": brush_config.yield_guard_bandwidth_arbitration_enabled,
+            "yield_guard_high_pressure_percent": brush_config.yield_guard_high_pressure_percent,
+            "yield_guard_idle_pressure_percent": brush_config.yield_guard_idle_pressure_percent,
+            "yield_guard_idle_release_checks": brush_config.yield_guard_idle_release_checks,
+            "yield_guard_relax_download_limit_kbs": brush_config.yield_guard_relax_download_limit_kbs,
+            "yield_guard_half_open_download_limit_kbs": brush_config.yield_guard_half_open_download_limit_kbs,
             "yield_guard_promising_pubtime_minutes": brush_config.yield_guard_promising_pubtime_minutes,
             "yield_guard_rehearsal": brush_config.yield_guard_rehearsal,
             "yield_guard_detail_log": brush_config.yield_guard_detail_log,
@@ -6338,10 +6656,8 @@ class BrushFlowLowFreq(_PluginBase):
             return False
 
         try:
-            if action == "limit":
-                download_limit = int(self.__yield_guard_positive_number(
-                    brush_config.yield_guard_download_limit_kbs, 512
-                ) * 1024)
+            if action in {"limit", "relax_limit", "half_limit"}:
+                download_limit = self.__yield_guard_download_limit_for_action_bytes(brush_config, action)
                 if getattr(downloader, "qbc", None) and hasattr(downloader.qbc, "torrents_set_download_limit"):
                     downloader.qbc.torrents_set_download_limit(
                         limit=download_limit,
