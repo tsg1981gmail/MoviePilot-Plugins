@@ -6,6 +6,11 @@
 
 ## 版本更新日志
 
+- v4.3.43
+  - “上传收益保护”新增压力策略：可选择自动判断、偏保守、偏激进、宽松探测、均衡处理、竞争淘汰，用于控制低收益任务观察和处理节奏
+  - 新增“任务少时新增策略”：可选择自动放开、保持限制、积极补种；任务少时可放开部分限制，任务多或近期已探测时仍会拦截新增
+  - 补充基于近期日志的回放测试，覆盖持续低收益、偏保守观察、偏激进限速、高平均上传保护和任务少新增策略
+
 - v4.3.42
   - 优化“上传收益保护”任务池策略：任务少时放宽持续低收益观察，任务多或低收益任务占用带宽高时收紧淘汰
   - 新增持续低收益识别：曾经高速下载、累计收益比长期偏低且当前上传仍低的任务，会进入低收益保护链路，避免长期占用下载带宽
@@ -257,6 +262,8 @@
 | 上传收益保护           | `yield_guard_enabled` | 是否启用上传收益保护                 | 默认关闭；仅处理插件托管且未完成的下载中任务，已完成做种任务交给常规删种规则处理；第一版面向 qBittorrent                                                               |
 | 上传收益保护演练模式   | `yield_guard_rehearsal` | 命中低收益动作时只记录日志，不实际限速/暂停/删除 | 默认开启；日志会记录站点、hash、拟动作和触发原因，建议观察 24 小时后再关闭                                         |
 | 上传收益保护详细日志   | `yield_guard_detail_log` | 输出每个任务的关键判定摘要、操作意图和未命中原因 | 默认关闭；开启后记录判定、模式、阶段、动作、速率、本轮/累计收益、样本、连续次数和命中类型，适合观察期排查                     |
+| 上传收益保护压力策略   | `yield_guard_pressure_strategy` | 控制低收益任务观察和处理节奏       | 默认自动判断；可选自动判断、偏保守、偏激进、宽松探测、均衡处理、竞争淘汰。任务多且低收益占带宽时可选偏激进或竞争淘汰；担心误伤晚爆上传时可选偏保守 |
+| 任务少时新增策略       | `yield_guard_small_pool_brush_strategy` | 高收益池已满时是否继续新增探测任务 | 默认自动放开；可选自动放开、保持限制、积极补种。任务少想补更多免费种时选积极补种；想严格控下载量时选保持限制                       |
 | 收益保护高下载阈值（KB/s） | `yield_guard_high_download_kbs` | 检查间下载速度达到该值时参与低收益判断 | 默认 2048                                                                                                          |
 | 收益保护低上传阈值（KB/s） | `yield_guard_low_upload_kbs` | 检查间上传速度低于该值时参与低收益判断 | 默认 200                                                                                                           |
 | 收益保护低收益比阈值（%） | `yield_guard_low_ratio_percent` | 检查间上传/下载收益比低于该值时参与低收益判断 | 默认 8；收益比 = 检查间上传速度 ÷ 检查间下载速度 × 100                                                              |
@@ -344,6 +351,8 @@
 - `yield_guard_low_ratio_percent`：收益保护低收益比阈值（%）
 - `yield_guard_ratio_min_download_kbs`：收益比判断最小下载速度（KB/s）
 - `yield_guard_ratio_protect_upload_kbs`：收益比保护上传阈值（KB/s）
+- `yield_guard_pressure_strategy`：上传收益保护压力策略
+- `yield_guard_small_pool_brush_strategy`：任务少时新增策略
 - `yield_guard_bad_checks`：低收益连续命中次数
 - `yield_guard_min_downloaded_gb`：收益保护最小下载量（GB）
 - `yield_guard_min_progress_percent`：收益保护最小进度（%）
@@ -420,6 +429,8 @@
     "yield_guard_low_ratio_percent": 8,
     "yield_guard_ratio_min_download_kbs": 500,
     "yield_guard_ratio_protect_upload_kbs": 0,
+    "yield_guard_pressure_strategy": "auto",
+    "yield_guard_small_pool_brush_strategy": "auto",
     "yield_guard_bad_checks": 2,
     "yield_guard_min_downloaded_gb": 2,
     "yield_guard_min_progress_percent": 10,

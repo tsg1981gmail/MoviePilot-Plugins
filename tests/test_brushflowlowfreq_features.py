@@ -492,6 +492,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(1, brush_config.yield_guard_probe_slots)
         self.assertEqual(10, brush_config.yield_guard_probe_interval_minutes)
         self.assertEqual(15, brush_config.yield_guard_promising_pubtime_minutes)
+        self.assertEqual("auto", brush_config.yield_guard_pressure_strategy)
+        self.assertEqual("auto", brush_config.yield_guard_small_pool_brush_strategy)
         self.assertTrue(brush_config.yield_guard_rehearsal)
         self.assertFalse(brush_config.yield_guard_detail_log)
 
@@ -502,12 +504,17 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_low_ratio_percent": 8,
             "yield_guard_ratio_min_download_kbs": 500,
             "yield_guard_ratio_protect_upload_kbs": 0,
+            "yield_guard_pressure_strategy": "aggressive",
+            "yield_guard_small_pool_brush_strategy": "strict",
             "yield_guard_detail_log": False,
             "enable_site_config": True,
             "site_config": '[{"sitename": "站点1", "yield_guard_fast_fail_minutes": 3, '
                            '"yield_guard_enabled": false, "yield_guard_low_ratio_percent": 5, '
                            '"yield_guard_ratio_min_download_kbs": 800, '
-                           '"yield_guard_ratio_protect_upload_kbs": 200, "yield_guard_detail_log": true}]',
+                           '"yield_guard_ratio_protect_upload_kbs": 200, '
+                           '"yield_guard_pressure_strategy": "conservative", '
+                           '"yield_guard_small_pool_brush_strategy": "aggressive", '
+                           '"yield_guard_detail_log": true}]',
         })
 
         site_config = brush_config.get_site_config("站点1")
@@ -516,11 +523,15 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(5, site_config.yield_guard_low_ratio_percent)
         self.assertEqual(800, site_config.yield_guard_ratio_min_download_kbs)
         self.assertEqual(200, site_config.yield_guard_ratio_protect_upload_kbs)
+        self.assertEqual("conservative", site_config.yield_guard_pressure_strategy)
+        self.assertEqual("aggressive", site_config.yield_guard_small_pool_brush_strategy)
         self.assertTrue(site_config.yield_guard_detail_log)
         self.assertEqual(12, brush_config.yield_guard_fast_fail_minutes)
         self.assertEqual(8, brush_config.yield_guard_low_ratio_percent)
         self.assertEqual(500, brush_config.yield_guard_ratio_min_download_kbs)
         self.assertEqual(0, brush_config.yield_guard_ratio_protect_upload_kbs)
+        self.assertEqual("aggressive", brush_config.yield_guard_pressure_strategy)
+        self.assertEqual("strict", brush_config.yield_guard_small_pool_brush_strategy)
 
     def test_update_config_persists_yield_guard_values(self):
         plugin = self._new_plugin({
@@ -550,6 +561,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_probe_slots": 2,
             "yield_guard_probe_interval_minutes": 5,
             "yield_guard_promising_pubtime_minutes": 6,
+            "yield_guard_pressure_strategy": "competition",
+            "yield_guard_small_pool_brush_strategy": "aggressive",
             "yield_guard_detail_log": True,
         })
         saved_config = {}
@@ -581,6 +594,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_probe_slots": 2,
             "yield_guard_probe_interval_minutes": 5,
             "yield_guard_promising_pubtime_minutes": 6,
+            "yield_guard_pressure_strategy": "competition",
+            "yield_guard_small_pool_brush_strategy": "aggressive",
             "yield_guard_detail_log": True,
         }
         for key, expected_value in expected_values.items():
@@ -599,6 +614,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_bad_checks": "twice",
             "yield_guard_first_action": "throttle",
             "yield_guard_final_action": "remove",
+            "yield_guard_pressure_strategy": "random",
+            "yield_guard_small_pool_brush_strategy": "always",
         }
         start_error_count = len(self.module.logger.error_messages)
 
@@ -612,12 +629,16 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIsNone(config.get("yield_guard_bad_checks"))
         self.assertEqual("limit", config.get("yield_guard_first_action"))
         self.assertEqual("delete", config.get("yield_guard_final_action"))
+        self.assertEqual("auto", config.get("yield_guard_pressure_strategy"))
+        self.assertEqual("auto", config.get("yield_guard_small_pool_brush_strategy"))
         new_errors = self.module.logger.error_messages[start_error_count:]
         self.assertTrue(any("收益保护高下载阈值" in msg for msg in new_errors))
         self.assertTrue(any("收益保护低收益比阈值" in msg for msg in new_errors))
         self.assertTrue(any("收益比判断最小下载速度" in msg for msg in new_errors))
         self.assertTrue(any("收益比保护上传阈值" in msg for msg in new_errors))
         self.assertTrue(any("低收益首次动作" in msg for msg in new_errors))
+        self.assertTrue(any("上传收益保护压力策略" in msg for msg in new_errors))
+        self.assertTrue(any("任务少时新增策略" in msg for msg in new_errors))
 
     def test_new_torrent_task_initializes_yield_guard_fields(self):
         class FakeDownloader:
@@ -1502,6 +1523,123 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual("limited", torrent_task.get("yield_guard_stage"))
         self.assertIn("低收益", reason)
         self.assertEqual(1, torrent_task.get("yield_guard_effective_bad_checks"))
+
+    def test_yield_guard_conservative_strategy_observes_log_replay_low_yield_longer(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_pressure_strategy": "conservative",
+            "yield_guard_high_download_kbs": 300,
+            "yield_guard_low_upload_kbs": 150,
+            "yield_guard_low_ratio_percent": 8,
+            "yield_guard_ratio_min_download_kbs": 300,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+        })
+        torrent_task = {
+            "last_check_interval_downspeed": int(508.3 * 1024),
+            "last_check_interval_downspeed_valid": True,
+            "last_check_interval_upspeed": int(7.0 * 1024),
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_bad_streak": 1,
+            "yield_guard_stage": "normal",
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+            site_name="天空",
+            brush_config=plugin._brush_config,
+            torrent_info={
+                "downloaded": int(1.02 * 1024 ** 3),
+                "uploaded": int(15 * 1024 ** 2),
+                "total_size": int(10.6 * 1024 ** 3),
+                "avg_upspeed": int(5.7 * 1024),
+            },
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("继续观察", reason)
+        self.assertEqual("normal", torrent_task.get("yield_guard_stage"))
+        self.assertEqual("conservative", torrent_task.get("yield_guard_pool_mode"))
+        self.assertEqual(3, torrent_task.get("yield_guard_effective_bad_checks"))
+
+    def test_yield_guard_aggressive_strategy_limits_first_cctv_log_low_yield_hit(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_pressure_strategy": "aggressive",
+            "yield_guard_high_download_kbs": 300,
+            "yield_guard_low_upload_kbs": 150,
+            "yield_guard_low_ratio_percent": 8,
+            "yield_guard_ratio_min_download_kbs": 300,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+        })
+        torrent_task = {
+            "last_check_interval_downspeed": int(555.3 * 1024),
+            "last_check_interval_downspeed_valid": True,
+            "last_check_interval_upspeed": int(7.3 * 1024),
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_bad_streak": 0,
+            "yield_guard_stage": "normal",
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+            site_name="天空",
+            brush_config=plugin._brush_config,
+            torrent_info={
+                "downloaded": int(0.55 * 1024 ** 3),
+                "uploaded": int(7 * 1024 ** 2),
+                "total_size": int(8.5 * 1024 ** 3),
+                "avg_upspeed": int(16.8 * 1024),
+            },
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("低收益", reason)
+        self.assertEqual("limited", torrent_task.get("yield_guard_stage"))
+        self.assertEqual("aggressive", torrent_task.get("yield_guard_pool_mode"))
+        self.assertEqual(1, torrent_task.get("yield_guard_effective_bad_checks"))
+
+    def test_yield_guard_scream_log_replay_keeps_high_average_upload_protected(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_pressure_strategy": "aggressive",
+            "yield_guard_high_download_kbs": 300,
+            "yield_guard_low_upload_kbs": 150,
+            "yield_guard_low_ratio_percent": 8,
+            "yield_guard_ratio_min_download_kbs": 300,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_good_avg_upload_kbs": 500,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+        })
+        torrent_task = {
+            "last_check_interval_downspeed": int(734.4 * 1024),
+            "last_check_interval_downspeed_valid": True,
+            "last_check_interval_upspeed": int(7.8 * 1024),
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_bad_streak": 0,
+            "yield_guard_stage": "normal",
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+            site_name="天空",
+            brush_config=plugin._brush_config,
+            torrent_info={
+                "downloaded": int(6.10 * 1024 ** 3),
+                "uploaded": int(1.8 * 1024 ** 3),
+                "total_size": int(22.2 * 1024 ** 3),
+                "avg_upspeed": int(710.2 * 1024),
+            },
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("上传表现达标", reason)
+        self.assertTrue(torrent_task.get("yield_guard_good_protected"))
+        self.assertEqual(0, torrent_task.get("yield_guard_bad_streak"))
 
     def test_yield_guard_low_ratio_is_observed_when_interval_upload_reaches_ratio_protect_threshold(self):
         plugin = self._new_qb_plugin({
@@ -2951,6 +3089,125 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("高收益", reason)
 
+    def test_yield_guard_strict_small_pool_strategy_blocks_even_when_task_pool_is_small(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_stop_brush_when_good_pool": True,
+            "yield_guard_good_pool_min_count": 1,
+            "yield_guard_probe_slots": 0,
+            "yield_guard_small_pool_brush_strategy": "strict",
+        })
+        plugin.get_data = lambda key: {
+            "torrents": {
+                "abc": {
+                    "deleted": False,
+                    "yield_guard_good_protected": True,
+                }
+            }
+        }.get(key, {})
+
+        passed, reason = plugin._BrushFlowLowFreq__evaluate_pre_conditions_for_brush(
+            include_network_conditions=False
+        )
+
+        self.assertFalse(passed)
+        self.assertIn("高收益", reason)
+
+    def test_yield_guard_aggressive_small_pool_strategy_allows_more_probe_tasks(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_stop_brush_when_good_pool": True,
+            "yield_guard_good_pool_min_count": 1,
+            "yield_guard_probe_slots": 0,
+            "yield_guard_small_pool_brush_strategy": "aggressive",
+        })
+        tasks = {
+            "good": {
+                "deleted": False,
+                "yield_guard_good_protected": True,
+            }
+        }
+        for index in range(6):
+            tasks[f"probe{index}"] = {
+                "deleted": False,
+                "yield_guard_good_protected": False,
+            }
+        plugin.get_data = lambda key: {
+            "torrents": tasks
+        }.get(key, {})
+
+        passed, reason = plugin._BrushFlowLowFreq__evaluate_pre_conditions_for_brush(
+            include_network_conditions=False
+        )
+
+        self.assertTrue(passed, reason)
+
+    def test_yield_guard_aggressive_small_pool_strategy_still_blocks_recent_probe(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_stop_brush_when_good_pool": True,
+            "yield_guard_good_pool_min_count": 1,
+            "yield_guard_probe_slots": 0,
+            "yield_guard_probe_interval_minutes": 10,
+            "yield_guard_small_pool_brush_strategy": "aggressive",
+        })
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000
+        try:
+            plugin.get_data = lambda key: {
+                "torrents": {
+                    "good": {
+                        "deleted": False,
+                        "yield_guard_good_protected": True,
+                    },
+                    "probe": {
+                        "deleted": False,
+                        "yield_guard_good_protected": False,
+                        "yield_guard_last_probe_time": 700,
+                    },
+                }
+            }.get(key, {})
+
+            passed, reason = plugin._BrushFlowLowFreq__evaluate_pre_conditions_for_brush(
+                include_network_conditions=False
+            )
+        finally:
+            self.module.time.time = original_time
+
+        self.assertFalse(passed)
+        self.assertIn("探测间隔", reason)
+
+    def test_yield_guard_aggressive_small_pool_strategy_still_blocks_when_auto_pool_is_crowded(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_stop_brush_when_good_pool": True,
+            "yield_guard_good_pool_min_count": 1,
+            "yield_guard_probe_slots": 0,
+            "yield_guard_pressure_strategy": "aggressive",
+            "yield_guard_small_pool_brush_strategy": "aggressive",
+        })
+        tasks = {
+            "good": {
+                "deleted": False,
+                "yield_guard_good_protected": True,
+            }
+        }
+        for index in range(12):
+            tasks[f"probe{index}"] = {
+                "deleted": False,
+                "yield_guard_good_protected": False,
+            }
+        plugin.get_data = lambda key: {
+            "torrents": tasks
+        }.get(key, {})
+
+        passed, reason = plugin._BrushFlowLowFreq__evaluate_pre_conditions_for_brush(
+            include_network_conditions=False
+        )
+
+        self.assertFalse(passed)
+        self.assertIn("高收益", reason)
+
     def test_yield_guard_probe_slot_allows_new_brush_when_pool_is_full(self):
         plugin = self._new_qb_plugin({
             "yield_guard_enabled": True,
@@ -3290,6 +3547,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "yield_guard_low_ratio_percent",
             "yield_guard_ratio_min_download_kbs",
             "yield_guard_ratio_protect_upload_kbs",
+            "yield_guard_pressure_strategy",
+            "yield_guard_small_pool_brush_strategy",
             "yield_guard_bad_checks",
             "yield_guard_fast_fail_minutes",
             "yield_guard_first_action",
@@ -3331,6 +3590,14 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(
             models.index("yield_guard_ratio_min_download_kbs") + 1,
             models.index("yield_guard_ratio_protect_upload_kbs")
+        )
+        self.assertEqual(
+            models.index("yield_guard_ratio_protect_upload_kbs") + 1,
+            models.index("yield_guard_pressure_strategy")
+        )
+        self.assertEqual(
+            models.index("yield_guard_pressure_strategy") + 1,
+            models.index("yield_guard_small_pool_brush_strategy")
         )
 
     def test_empty_new_numeric_options_default_to_zero(self):

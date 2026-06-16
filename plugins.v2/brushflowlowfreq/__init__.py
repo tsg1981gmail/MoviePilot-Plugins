@@ -105,6 +105,16 @@ class BrushConfig:
         self.yield_guard_ratio_protect_upload_kbs = self.__parse_number(
             config.get("yield_guard_ratio_protect_upload_kbs", 0)
         )
+        self.yield_guard_pressure_strategy = self.__normalize_choice(
+            config.get("yield_guard_pressure_strategy", "auto"),
+            {"auto", "conservative", "aggressive", "loose", "balanced", "competition"},
+            "auto"
+        )
+        self.yield_guard_small_pool_brush_strategy = self.__normalize_choice(
+            config.get("yield_guard_small_pool_brush_strategy", "auto"),
+            {"auto", "strict", "aggressive"},
+            "auto"
+        )
         self.yield_guard_bad_checks = self.__parse_number(config.get("yield_guard_bad_checks", 2))
         self.yield_guard_min_downloaded_gb = self.__parse_number(config.get("yield_guard_min_downloaded_gb", 2))
         self.yield_guard_min_progress_percent = self.__parse_number(config.get("yield_guard_min_progress_percent", 10))
@@ -190,6 +200,8 @@ class BrushConfig:
             "yield_guard_low_ratio_percent",
             "yield_guard_ratio_min_download_kbs",
             "yield_guard_ratio_protect_upload_kbs",
+            "yield_guard_pressure_strategy",
+            "yield_guard_small_pool_brush_strategy",
             "yield_guard_bad_checks",
             "yield_guard_min_downloaded_gb",
             "yield_guard_min_progress_percent",
@@ -207,7 +219,7 @@ class BrushConfig:
             "yield_guard_probe_interval_minutes",
             "yield_guard_promising_pubtime_minutes",
             "yield_guard_rehearsal",
-            "yield_guard_detail_log"
+            "yield_guard_detail_log",
             # 当新增支持字段时，仅在此处添加字段名
         }
         try:
@@ -296,6 +308,8 @@ class BrushConfig:
     "yield_guard_low_ratio_percent": 8,
     "yield_guard_ratio_min_download_kbs": 500,
     "yield_guard_ratio_protect_upload_kbs": 0,
+    "yield_guard_pressure_strategy": "auto",
+    "yield_guard_small_pool_brush_strategy": "auto",
     "yield_guard_bad_checks": 2,
     "yield_guard_min_downloaded_gb": 2,
     "yield_guard_min_progress_percent": 10,
@@ -324,6 +338,11 @@ class BrushConfig:
         if not self.enable_site_config:
             return self
         return self if not sitename else self.group_site_configs.get(sitename, self)
+
+    @staticmethod
+    def __normalize_choice(value, allowed_values: Set[str], default_value: str) -> str:
+        normalized_value = str(value or default_value).strip().lower()
+        return normalized_value if normalized_value in allowed_values else default_value
 
     @staticmethod
     def __parse_number(value):
@@ -379,7 +398,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.42"
+    plugin_version = "4.3.43"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2039,6 +2058,51 @@ class BrushFlowLowFreq(_PluginBase):
                                                 },
                                                 'content': [
                                                     {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'yield_guard_pressure_strategy',
+                                                            'label': '上传收益保护压力策略',
+                                                            'items': [
+                                                                {'title': '自动判断', 'value': 'auto'},
+                                                                {'title': '偏保守', 'value': 'conservative'},
+                                                                {'title': '偏激进', 'value': 'aggressive'},
+                                                                {'title': '宽松探测', 'value': 'loose'},
+                                                                {'title': '均衡处理', 'value': 'balanced'},
+                                                                {'title': '竞争淘汰', 'value': 'competition'},
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'yield_guard_small_pool_brush_strategy',
+                                                            'label': '任务少时新增策略',
+                                                            'items': [
+                                                                {'title': '自动放开', 'value': 'auto'},
+                                                                {'title': '保持限制', 'value': 'strict'},
+                                                                {'title': '积极补种', 'value': 'aggressive'},
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
                                                         'component': 'VTextField',
                                                         'props': {
                                                             'model': 'yield_guard_bad_checks',
@@ -2682,6 +2746,9 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_low_upload_kbs": 200,
             "yield_guard_low_ratio_percent": 8,
             "yield_guard_ratio_min_download_kbs": 500,
+            "yield_guard_ratio_protect_upload_kbs": 0,
+            "yield_guard_pressure_strategy": "auto",
+            "yield_guard_small_pool_brush_strategy": "auto",
             "yield_guard_bad_checks": 2,
             "yield_guard_min_downloaded_gb": 2,
             "yield_guard_min_progress_percent": 10,
@@ -3247,19 +3314,62 @@ class BrushFlowLowFreq(_PluginBase):
             return False, (f"上传收益保护：高收益任务池 {good_pool_count} 个已达到阈值 {good_pool_min}，"
                            f"最近探测间隔未到，暂时停止新增任务")
 
-        is_loose_pool = pool_state.get("mode") == "loose"
+        pool_mode = pool_state.get("mode") or "balanced"
+        auto_pool_mode = pool_state.get("auto_mode") or pool_mode
+        small_pool_strategy = self.__yield_guard_small_pool_strategy_value(
+            brush_config.yield_guard_small_pool_brush_strategy
+        )
+        is_loose_pool = auto_pool_mode == "loose"
+        if small_pool_strategy == "strict":
+            small_pool_relax = False
+        elif small_pool_strategy == "aggressive":
+            small_pool_relax = auto_pool_mode in {"loose", "balanced"}
+        else:
+            small_pool_relax = is_loose_pool
         probe_slots = int(self.__yield_guard_positive_number(brush_config.yield_guard_probe_slots, 1))
         if probe_slots <= 0:
-            if is_loose_pool:
+            if small_pool_relax:
                 return True, None
             return False, (f"上传收益保护：高收益任务池 {good_pool_count} 个已达到阈值 {good_pool_min}，"
                            f"探测名额已关闭，暂时停止新增任务")
 
-        if probe_count < probe_slots or is_loose_pool:
+        if probe_count < probe_slots or small_pool_relax:
             return True, None
 
         return False, (f"上传收益保护：高收益任务池 {good_pool_count} 个已达到阈值 {good_pool_min}，"
                        f"探测任务 {probe_count} 个已达到名额 {probe_slots}，或最近探测间隔未到，暂时停止新增任务")
+
+    @staticmethod
+    def __yield_guard_pressure_strategy_value(strategy: str) -> str:
+        strategy = str(strategy or "auto").strip().lower()
+        allowed_values = {"auto", "conservative", "aggressive", "loose", "balanced", "competition"}
+        return strategy if strategy in allowed_values else "auto"
+
+    @staticmethod
+    def __yield_guard_small_pool_strategy_value(strategy: str) -> str:
+        strategy = str(strategy or "auto").strip().lower()
+        allowed_values = {"auto", "strict", "aggressive"}
+        return strategy if strategy in allowed_values else "auto"
+
+    def __apply_yield_guard_pressure_strategy(self, brush_config: BrushConfig,
+                                              pool_state: Dict[str, Any] = None) -> Dict[str, Any]:
+        pool_state = dict(pool_state or {})
+        auto_mode = pool_state.get("mode") or "balanced"
+        auto_reason = pool_state.get("reason") or "任务池平衡"
+        pool_state.setdefault("auto_mode", auto_mode)
+        pool_state.setdefault("auto_reason", auto_reason)
+        strategy = self.__yield_guard_pressure_strategy_value(brush_config.yield_guard_pressure_strategy)
+        pool_state["pressure_strategy"] = strategy
+        forced_modes = {
+            "conservative": ("conservative", "用户策略：偏保守"),
+            "aggressive": ("aggressive", "用户策略：偏激进"),
+            "loose": ("loose", "用户策略：宽松探测"),
+            "balanced": ("balanced", "用户策略：均衡处理"),
+            "competition": ("competition", "用户策略：竞争淘汰"),
+        }
+        if strategy in forced_modes:
+            pool_state["mode"], pool_state["reason"] = forced_modes[strategy]
+        return pool_state
 
     def __build_yield_guard_pool_state(self, brush_config: BrushConfig, sitename: str = None,
                                        torrent_tasks: Dict[str, dict] = None,
@@ -3308,7 +3418,7 @@ class BrushFlowLowFreq(_PluginBase):
             mode = "balanced"
             reason = "任务池平衡"
 
-        return {
+        return self.__apply_yield_guard_pressure_strategy(brush_config=brush_config, pool_state={
             "mode": mode,
             "reason": reason,
             "active_count": active_count,
@@ -3317,14 +3427,16 @@ class BrushFlowLowFreq(_PluginBase):
             "loose_threshold": loose_threshold,
             "competition_threshold": competition_threshold,
             "low_pressure_threshold": low_pressure_threshold
-        }
+        })
 
     @staticmethod
     def __yield_guard_pool_mode_text(pool_mode: str) -> str:
         return {
             "loose": "宽松探测",
             "competition": "竞争淘汰",
-            "balanced": "平衡"
+            "balanced": "平衡",
+            "conservative": "偏保守",
+            "aggressive": "偏激进"
         }.get(pool_mode or "balanced", "平衡")
 
     def __yield_guard_effective_bad_checks(self, brush_config: BrushConfig,
@@ -3332,9 +3444,11 @@ class BrushFlowLowFreq(_PluginBase):
                                            persistent_low_yield: bool = False) -> int:
         base_bad_checks = max(1, int(self.__yield_guard_positive_number(brush_config.yield_guard_bad_checks, 2)))
         mode = (yield_guard_pool_state or {}).get("mode") or "balanced"
-        if mode == "competition":
+        if mode in {"competition", "aggressive"}:
             return max(1, base_bad_checks - 1)
         effective_bad_checks = base_bad_checks + (2 if persistent_low_yield else 0)
+        if mode == "conservative":
+            effective_bad_checks += 1
         if mode == "loose" and persistent_low_yield:
             effective_bad_checks += 2
         return max(1, int(effective_bad_checks))
@@ -4398,6 +4512,10 @@ class BrushFlowLowFreq(_PluginBase):
 
         if not isinstance(yield_guard_pool_state, dict):
             yield_guard_pool_state = {"mode": "balanced", "reason": "任务池平衡"}
+        yield_guard_pool_state = self.__apply_yield_guard_pressure_strategy(
+            brush_config=brush_config,
+            pool_state=yield_guard_pool_state
+        )
         pool_mode = yield_guard_pool_state.get("mode") or "balanced"
         pool_reason = yield_guard_pool_state.get("reason") or "任务池平衡"
         torrent_task["yield_guard_pool_mode"] = pool_mode
@@ -5837,6 +5955,30 @@ class BrushFlowLowFreq(_PluginBase):
             else:
                 config[attr] = normalized_value
 
+        yield_guard_choice_defaults = {
+            "yield_guard_pressure_strategy": (
+                "上传收益保护压力策略",
+                "auto",
+                {"auto", "conservative", "aggressive", "loose", "balanced", "competition"}
+            ),
+            "yield_guard_small_pool_brush_strategy": (
+                "任务少时新增策略",
+                "auto",
+                {"auto", "strict", "aggressive"}
+            ),
+        }
+        for attr, (desc, default_value, allowed_values) in yield_guard_choice_defaults.items():
+            value = config.get(attr)
+            if value in (None, ""):
+                continue
+            normalized_value = str(value).strip().lower()
+            if normalized_value not in allowed_values:
+                self.__log_and_notify_error(f"站点刷流任务出错，{desc}设置错误：{value}")
+                config[attr] = default_value
+                found_error = True
+            else:
+                config[attr] = normalized_value
+
         active_time_range = config.get("active_time_range")
         if active_time_range and not self.__is_valid_time_range(time_range=active_time_range):
             self.__log_and_notify_error(f"站点刷流任务出错，开启时间段设置错误：{active_time_range}")
@@ -5895,6 +6037,8 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_low_ratio_percent": brush_config.yield_guard_low_ratio_percent,
             "yield_guard_ratio_min_download_kbs": brush_config.yield_guard_ratio_min_download_kbs,
             "yield_guard_ratio_protect_upload_kbs": brush_config.yield_guard_ratio_protect_upload_kbs,
+            "yield_guard_pressure_strategy": brush_config.yield_guard_pressure_strategy,
+            "yield_guard_small_pool_brush_strategy": brush_config.yield_guard_small_pool_brush_strategy,
             "yield_guard_bad_checks": brush_config.yield_guard_bad_checks,
             "yield_guard_min_downloaded_gb": brush_config.yield_guard_min_downloaded_gb,
             "yield_guard_min_progress_percent": brush_config.yield_guard_min_progress_percent,
