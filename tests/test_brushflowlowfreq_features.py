@@ -1378,6 +1378,131 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIn("低收益", reason)
         self.assertEqual("limited", torrent_task.get("yield_guard_stage"))
 
+    def test_yield_guard_persistent_low_yield_triggers_even_when_current_download_is_low(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_low_upload_kbs": 150,
+            "yield_guard_low_ratio_percent": 8,
+            "yield_guard_ratio_min_download_kbs": 500,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+            "yield_guard_good_avg_upload_kbs": 500,
+            "yield_guard_fast_fail_minutes": 10,
+        })
+        torrent_task = {
+            "last_check_interval_downspeed": 120 * 1024,
+            "last_check_interval_downspeed_valid": True,
+            "last_check_interval_upspeed": 4 * 1024,
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_bad_streak": 3,
+            "yield_guard_stage": "normal",
+            "yield_guard_good_protected": False,
+            "yield_guard_promising_protected": False,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+            site_name="站点1",
+            brush_config=plugin._brush_config,
+            torrent_info={
+                "downloaded": 10 * 1024 ** 3,
+                "uploaded": 200 * 1024 ** 2,
+                "total_size": 50 * 1024 ** 3,
+                "avg_upspeed": 20 * 1024,
+            },
+            torrent_task=torrent_task,
+            yield_guard_pool_state={"mode": "balanced", "reason": "任务池平衡"},
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("持续低收益", reason)
+        self.assertEqual("limited", torrent_task.get("yield_guard_stage"))
+        self.assertEqual("持续低收益", torrent_task.get("yield_guard_low_yield_kind"))
+
+    def test_yield_guard_loose_pool_observes_persistent_low_yield_for_more_rounds(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_low_upload_kbs": 150,
+            "yield_guard_low_ratio_percent": 8,
+            "yield_guard_ratio_min_download_kbs": 500,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+            "yield_guard_good_avg_upload_kbs": 500,
+            "yield_guard_fast_fail_minutes": 10,
+        })
+        torrent_task = {
+            "last_check_interval_downspeed": 120 * 1024,
+            "last_check_interval_downspeed_valid": True,
+            "last_check_interval_upspeed": 4 * 1024,
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_bad_streak": 3,
+            "yield_guard_stage": "normal",
+            "yield_guard_good_protected": False,
+            "yield_guard_promising_protected": False,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+            site_name="站点1",
+            brush_config=plugin._brush_config,
+            torrent_info={
+                "downloaded": 10 * 1024 ** 3,
+                "uploaded": 200 * 1024 ** 2,
+                "total_size": 50 * 1024 ** 3,
+                "avg_upspeed": 20 * 1024,
+            },
+            torrent_task=torrent_task,
+            yield_guard_pool_state={"mode": "loose", "reason": "活跃任务少"},
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("继续观察", reason)
+        self.assertEqual("normal", torrent_task.get("yield_guard_stage"))
+        self.assertEqual("loose", torrent_task.get("yield_guard_pool_mode"))
+        self.assertGreater(torrent_task.get("yield_guard_effective_bad_checks"), 4)
+
+    def test_yield_guard_competition_pool_tightens_low_yield_observation(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_high_download_kbs": 300,
+            "yield_guard_low_upload_kbs": 150,
+            "yield_guard_low_ratio_percent": 8,
+            "yield_guard_ratio_min_download_kbs": 300,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+            "yield_guard_good_avg_upload_kbs": 500,
+            "yield_guard_fast_fail_minutes": 10,
+        })
+        torrent_task = {
+            "last_check_interval_downspeed": 900 * 1024,
+            "last_check_interval_downspeed_valid": True,
+            "last_check_interval_upspeed": 10 * 1024,
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_bad_streak": 0,
+            "yield_guard_stage": "normal",
+            "yield_guard_good_protected": False,
+            "yield_guard_promising_protected": False,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+            site_name="站点1",
+            brush_config=plugin._brush_config,
+            torrent_info={
+                "downloaded": 2 * 1024 ** 3,
+                "uploaded": 20 * 1024 ** 2,
+                "total_size": 20 * 1024 ** 3,
+                "avg_upspeed": 20 * 1024,
+            },
+            torrent_task=torrent_task,
+            yield_guard_pool_state={"mode": "competition", "reason": "低收益任务占用下载带宽"},
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertEqual("limited", torrent_task.get("yield_guard_stage"))
+        self.assertIn("低收益", reason)
+        self.assertEqual(1, torrent_task.get("yield_guard_effective_bad_checks"))
+
     def test_yield_guard_low_ratio_is_observed_when_interval_upload_reaches_ratio_protect_threshold(self):
         plugin = self._new_qb_plugin({
             "yield_guard_enabled": True,
@@ -2278,8 +2403,12 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         new_logs = self.module.logger.info_messages[start_info_count:]
         self.assertTrue(any("上传收益保护详细日志" in msg for msg in new_logs), new_logs)
-        self.assertTrue(any("检查间上传 1024.0 KB/s" in msg for msg in new_logs), new_logs)
-        self.assertTrue(any("判定=高收益保护" in msg for msg in new_logs), new_logs)
+        detail_logs = [msg for msg in new_logs if "上传收益保护详细日志" in msg]
+        self.assertTrue(any("判定=高收益保护" in msg for msg in detail_logs), new_logs)
+        self.assertTrue(any("模式=" in msg and "阶段=normal" in msg and "动作=none" in msg for msg in detail_logs), new_logs)
+        self.assertTrue(any("速率=下" in msg and "/上 1024.0 KB/s" in msg for msg in detail_logs), new_logs)
+        self.assertTrue(any("收益=本轮" in msg and "样本=" in msg and "连续=" in msg for msg in detail_logs), new_logs)
+        self.assertFalse(any("条件：" in msg for msg in detail_logs), detail_logs)
         self.assertTrue(any("高收益保护 1 个" in msg for msg in new_logs), new_logs)
 
     def test_check_logs_yield_guard_detail_miss_reason_when_upload_is_low_but_download_not_high(self):
@@ -2358,10 +2487,10 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         new_logs = self.module.logger.info_messages[start_info_count:]
         self.assertTrue(
-            any("判定原因=检查间下载" in msg and "低于高下载阈值" in msg for msg in new_logs),
+            any("原因=上传收益保护：未命中低收益条件" in msg for msg in new_logs),
             new_logs
         )
-        self.assertTrue(any("高下载=否" in msg for msg in new_logs), new_logs)
+        self.assertTrue(any("命中=none" in msg and "速率=下 100.0 KB/s/上 10.0 KB/s" in msg for msg in new_logs), new_logs)
 
     def test_check_logs_yield_guard_detail_for_low_ratio_hit(self):
         class FakeDownloader:
@@ -2444,9 +2573,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         new_logs = self.module.logger.info_messages[start_info_count:]
         self.assertTrue(any("判定=低收益观察/动作" in msg for msg in new_logs), new_logs)
-        self.assertTrue(any("判定原因=收益比 4.0% 低于低收益比阈值 8%" in msg for msg in new_logs), new_logs)
-        self.assertTrue(any("收益比 4.0%" in msg and "阈值 8%" in msg for msg in new_logs), new_logs)
-        self.assertTrue(any("低收益比=是" in msg for msg in new_logs), new_logs)
+        self.assertTrue(any("命中=瞬时低收益" in msg for msg in new_logs), new_logs)
+        self.assertTrue(any("收益=本轮4.0%" in msg and "累计0.6%" in msg for msg in new_logs), new_logs)
+        self.assertFalse(any("低收益比=是" in msg for msg in new_logs), new_logs)
 
     def test_check_skips_yield_guard_for_completed_torrents(self):
         class FakeDownloader:
@@ -2771,7 +2900,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertEqual(["good"], delete_hashes)
 
-    def test_yield_guard_good_pool_soft_stop_blocks_new_brush_without_probe_slot(self):
+    def test_yield_guard_good_pool_soft_stop_allows_new_brush_when_task_pool_is_small(self):
         plugin = self._new_qb_plugin({
             "yield_guard_enabled": True,
             "yield_guard_stop_brush_when_good_pool": True,
@@ -2785,6 +2914,34 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     "yield_guard_good_protected": True,
                 }
             }
+        }.get(key, {})
+
+        passed, reason = plugin._BrushFlowLowFreq__evaluate_pre_conditions_for_brush(
+            include_network_conditions=False
+        )
+
+        self.assertTrue(passed, reason)
+
+    def test_yield_guard_good_pool_soft_stop_blocks_new_brush_when_task_pool_is_busy(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_stop_brush_when_good_pool": True,
+            "yield_guard_good_pool_min_count": 1,
+            "yield_guard_probe_slots": 0,
+        })
+        busy_tasks = {
+            "good": {
+                "deleted": False,
+                "yield_guard_good_protected": True,
+            }
+        }
+        for index in range(6):
+            busy_tasks[f"probe{index}"] = {
+                "deleted": False,
+                "yield_guard_good_protected": False,
+            }
+        plugin.get_data = lambda key: {
+            "torrents": busy_tasks
         }.get(key, {})
 
         passed, reason = plugin._BrushFlowLowFreq__evaluate_pre_conditions_for_brush(

@@ -379,7 +379,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.41"
+    plugin_version = "4.3.42"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -3211,6 +3211,11 @@ class BrushFlowLowFreq(_PluginBase):
         if not torrent_tasks:
             return True, None
 
+        pool_state = self.__build_yield_guard_pool_state(
+            brush_config=brush_config,
+            sitename=sitename,
+            torrent_tasks=torrent_tasks
+        )
         now = time.time()
         good_pool_count = 0
         probe_count = 0
@@ -3238,16 +3243,101 @@ class BrushFlowLowFreq(_PluginBase):
         if good_pool_min <= 0 or good_pool_count < good_pool_min:
             return True, None
 
+        if recent_probe_exists:
+            return False, (f"上传收益保护：高收益任务池 {good_pool_count} 个已达到阈值 {good_pool_min}，"
+                           f"最近探测间隔未到，暂时停止新增任务")
+
+        is_loose_pool = pool_state.get("mode") == "loose"
         probe_slots = int(self.__yield_guard_positive_number(brush_config.yield_guard_probe_slots, 1))
         if probe_slots <= 0:
+            if is_loose_pool:
+                return True, None
             return False, (f"上传收益保护：高收益任务池 {good_pool_count} 个已达到阈值 {good_pool_min}，"
                            f"探测名额已关闭，暂时停止新增任务")
 
-        if probe_count < probe_slots and not recent_probe_exists:
+        if probe_count < probe_slots or is_loose_pool:
             return True, None
 
         return False, (f"上传收益保护：高收益任务池 {good_pool_count} 个已达到阈值 {good_pool_min}，"
                        f"探测任务 {probe_count} 个已达到名额 {probe_slots}，或最近探测间隔未到，暂时停止新增任务")
+
+    def __build_yield_guard_pool_state(self, brush_config: BrushConfig, sitename: str = None,
+                                       torrent_tasks: Dict[str, dict] = None,
+                                       active_hashes: Set[str] = None) -> Dict[str, Any]:
+        torrent_tasks = torrent_tasks if isinstance(torrent_tasks, dict) else (self.get_data("torrents") or {})
+        normalized_active_hashes = None
+        if active_hashes is not None:
+            normalized_active_hashes = {
+                self.__normalize_hash(hash_value) for hash_value in active_hashes if hash_value
+            }
+
+        active_count = 0
+        good_count = 0
+        low_count = 0
+        for task_hash, task in torrent_tasks.items():
+            if not isinstance(task, dict) or task.get("deleted"):
+                continue
+            normalized_hash = self.__normalize_hash(task_hash)
+            if normalized_active_hashes is not None and normalized_hash not in normalized_active_hashes:
+                continue
+            if sitename and task.get("site_name") != sitename:
+                continue
+            active_count += 1
+            if task.get("yield_guard_good_protected"):
+                good_count += 1
+            stage = task.get("yield_guard_stage") or "normal"
+            bad_streak = int(self.__yield_guard_positive_number(task.get("yield_guard_bad_streak"), 0))
+            if stage in {"limited", "strict_limited", "paused", "probing"} or bad_streak > 0:
+                low_count += 1
+
+        good_pool_min = max(1, int(self.__yield_guard_positive_number(
+            brush_config.yield_guard_good_pool_min_count, 2
+        )))
+        probe_slots = max(0, int(self.__yield_guard_positive_number(brush_config.yield_guard_probe_slots, 1)))
+        loose_threshold = max(3, good_pool_min + max(probe_slots, 1) + 2)
+        competition_threshold = max(loose_threshold + 4, good_pool_min * 4, 12)
+        low_pressure_threshold = max(3, int(active_count * 0.25))
+
+        if active_count <= loose_threshold:
+            mode = "loose"
+            reason = "活跃任务少，放宽探测"
+        elif active_count >= competition_threshold or (low_count >= low_pressure_threshold and active_count > loose_threshold):
+            mode = "competition"
+            reason = "低收益任务占用下载带宽，收紧淘汰"
+        else:
+            mode = "balanced"
+            reason = "任务池平衡"
+
+        return {
+            "mode": mode,
+            "reason": reason,
+            "active_count": active_count,
+            "good_count": good_count,
+            "low_count": low_count,
+            "loose_threshold": loose_threshold,
+            "competition_threshold": competition_threshold,
+            "low_pressure_threshold": low_pressure_threshold
+        }
+
+    @staticmethod
+    def __yield_guard_pool_mode_text(pool_mode: str) -> str:
+        return {
+            "loose": "宽松探测",
+            "competition": "竞争淘汰",
+            "balanced": "平衡"
+        }.get(pool_mode or "balanced", "平衡")
+
+    def __yield_guard_effective_bad_checks(self, brush_config: BrushConfig,
+                                           yield_guard_pool_state: Dict[str, Any] = None,
+                                           persistent_low_yield: bool = False) -> int:
+        base_bad_checks = max(1, int(self.__yield_guard_positive_number(brush_config.yield_guard_bad_checks, 2)))
+        mode = (yield_guard_pool_state or {}).get("mode") or "balanced"
+        if mode == "competition":
+            return max(1, base_bad_checks - 1)
+        effective_bad_checks = base_bad_checks + (2 if persistent_low_yield else 0)
+        if mode == "loose" and persistent_low_yield:
+            effective_bad_checks += 2
+        return max(1, int(effective_bad_checks))
 
     def __evaluate_conditions_for_brush(self, torrent, torrent_tasks) -> Tuple[bool, Optional[str]]:
         """
@@ -3676,6 +3766,12 @@ class BrushFlowLowFreq(_PluginBase):
         good_protected_count = 0
         low_yield_count = 0
         reason_samples = []
+        active_hashes = {
+            self.__normalize_hash(self.__get_hash(torrent))
+            for torrent in torrents
+            if self.__get_hash(torrent)
+        }
+        yield_guard_pool_states: Dict[str, Dict[str, Any]] = {}
         for torrent in torrents:
             torrent_hash = self.__get_hash(torrent)
             torrent_task = torrent_tasks.get(torrent_hash)
@@ -3687,6 +3783,14 @@ class BrushFlowLowFreq(_PluginBase):
             brush_config = self.__get_brush_config(sitename=site_name)
             if not brush_config.yield_guard_enabled:
                 continue
+            if site_name not in yield_guard_pool_states:
+                yield_guard_pool_states[site_name] = self.__build_yield_guard_pool_state(
+                    brush_config=brush_config,
+                    sitename=site_name,
+                    torrent_tasks=torrent_tasks,
+                    active_hashes=active_hashes
+                )
+            yield_guard_pool_state = yield_guard_pool_states[site_name]
 
             torrent_info = self.__get_torrent_info(torrent)
             if not self.__is_yield_guard_applicable_torrent(torrent_info=torrent_info):
@@ -3697,7 +3801,8 @@ class BrushFlowLowFreq(_PluginBase):
                 site_name=site_name,
                 brush_config=brush_config,
                 torrent_info=torrent_info,
-                torrent_task=torrent_task
+                torrent_task=torrent_task,
+                yield_guard_pool_state=yield_guard_pool_state
             )
             torrent_task["yield_guard_evaluated_in_check"] = True
             torrent_task["yield_guard_should_delete"] = bool(should_delete)
@@ -3755,58 +3860,30 @@ class BrushFlowLowFreq(_PluginBase):
         interval_upspeed = self.__number_or_none(torrent_task.get("last_check_interval_upspeed"))
         avg_upspeed = self.__number_or_none(torrent_info.get("avg_upspeed"))
         downloaded = self.__number_or_none(torrent_info.get("downloaded")) or 0
+        uploaded = self.__number_or_none(torrent_info.get("uploaded"))
+        if uploaded is None:
+            uploaded = self.__number_or_none(torrent_task.get("uploaded"))
         total_size = self.__number_or_none(torrent_info.get("total_size")) or 0
         progress_percent = (downloaded / total_size * 100) if total_size > 0 else 0
-
-        high_download_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_high_download_kbs) * 1024
-        low_upload_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_low_upload_kbs) * 1024
-        low_ratio_percent = self.__yield_guard_positive_number(brush_config.yield_guard_low_ratio_percent)
-        ratio_min_download_bytes = (
-                self.__yield_guard_positive_number(brush_config.yield_guard_ratio_min_download_kbs) * 1024
-        )
-        ratio_protect_upload_bytes = (
-                self.__yield_guard_positive_number(brush_config.yield_guard_ratio_protect_upload_kbs) * 1024
-        )
-        min_downloaded_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_min_downloaded_gb) * 1024 ** 3
-        min_progress_percent = self.__yield_guard_positive_number(brush_config.yield_guard_min_progress_percent)
-        bad_checks = max(1, int(self.__yield_guard_positive_number(brush_config.yield_guard_bad_checks, 2)))
-
         downspeed_valid = bool(torrent_task.get("last_check_interval_downspeed_valid",
                                                 torrent_info.get("last_check_interval_downspeed_valid", False)))
         upspeed_valid = bool(torrent_task.get("last_check_interval_upspeed_valid",
                                               torrent_info.get("last_check_interval_upspeed_valid", False)))
-        is_high_download = high_download_bytes > 0 and interval_downspeed is not None and interval_downspeed >= high_download_bytes
-        is_low_upload = interval_upspeed is not None and interval_upspeed <= low_upload_bytes
         yield_ratio_percent = self.__calculate_yield_guard_ratio_percent(
             interval_upspeed=interval_upspeed,
             interval_downspeed=interval_downspeed
         )
-        has_ratio_download = (
-                ratio_min_download_bytes > 0
-                and interval_downspeed is not None
-                and interval_downspeed >= ratio_min_download_bytes
-        )
-        is_low_ratio = (
-                low_ratio_percent > 0
-                and has_ratio_download
-                and yield_ratio_percent is not None
-                and yield_ratio_percent <= low_ratio_percent
-        )
-        is_absolute_low_yield = is_high_download and is_low_upload
-        is_ratio_upload_protected = (
-                is_low_ratio
-                and ratio_protect_upload_bytes > 0
-                and interval_upspeed is not None
-                and interval_upspeed >= ratio_protect_upload_bytes
-        )
+        cumulative_ratio_percent = self.__number_or_none(torrent_task.get("yield_guard_cumulative_ratio_percent"))
+        if cumulative_ratio_percent is None:
+            cumulative_ratio_percent = (
+                self.__calculate_yield_guard_ratio_percent(
+                    interval_upspeed=uploaded,
+                    interval_downspeed=downloaded
+                )
+                if uploaded is not None
+                else None
+            )
         stage = torrent_task.get("yield_guard_stage") or "normal"
-        is_limited_low_upload = stage in {"limited", "strict_limited", "probing"} and is_low_upload
-        sample_checks = []
-        if min_downloaded_bytes > 0:
-            sample_checks.append(downloaded >= min_downloaded_bytes)
-        if min_progress_percent > 0:
-            sample_checks.append(progress_percent >= min_progress_percent)
-        has_enough_sample = any(sample_checks) if sample_checks else True
 
         if torrent_task.get("yield_guard_good_protected"):
             decision = "高收益保护"
@@ -3819,92 +3896,31 @@ class BrushFlowLowFreq(_PluginBase):
         else:
             decision = "未命中低收益"
 
-        decision_reasons = []
-        if decision in {"未命中低收益", "采样未就绪", "低收益观察/动作"}:
-            if not (downspeed_valid and upspeed_valid):
-                decision_reasons.append("采样未就绪")
-            else:
-                if is_absolute_low_yield:
-                    decision_reasons.append(
-                        f"检查间下载 {self.__format_speed_kbs(interval_downspeed)} 达到高下载阈值 "
-                        f"{brush_config.yield_guard_high_download_kbs} KB/s，"
-                        f"检查间上传 {self.__format_speed_kbs(interval_upspeed)} 低于低上传阈值 "
-                        f"{brush_config.yield_guard_low_upload_kbs} KB/s"
-                    )
-                if is_low_ratio:
-                    decision_reasons.append(
-                        f"收益比 {self.__format_percent(yield_ratio_percent)} 低于低收益比阈值 "
-                        f"{brush_config.yield_guard_low_ratio_percent}%"
-                    )
-                if is_ratio_upload_protected:
-                    decision_reasons.append(
-                        f"检查间上传 {self.__format_speed_kbs(interval_upspeed)} 达到收益比保护上传阈值 "
-                        f"{brush_config.yield_guard_ratio_protect_upload_kbs} KB/s，继续观察"
-                    )
-                if is_limited_low_upload and not is_high_download and not is_low_ratio:
-                    decision_reasons.append("任务已限速且上传仍低，保持收益保护并继续按低收益处理")
-                if not is_high_download and not is_low_ratio and not is_limited_low_upload:
-                    decision_reasons.append(
-                        f"检查间下载 {self.__format_speed_kbs(interval_downspeed)} 低于高下载阈值 "
-                        f"{brush_config.yield_guard_high_download_kbs} KB/s"
-                    )
-                if not is_low_upload and not is_low_ratio:
-                    decision_reasons.append(
-                        f"检查间上传 {self.__format_speed_kbs(interval_upspeed)} 高于低上传阈值 "
-                        f"{brush_config.yield_guard_low_upload_kbs} KB/s"
-                    )
-                if not is_low_ratio:
-                    if not has_ratio_download:
-                        decision_reasons.append(
-                            f"检查间下载 {self.__format_speed_kbs(interval_downspeed)} 低于收益比判断最小下载速度 "
-                            f"{brush_config.yield_guard_ratio_min_download_kbs} KB/s"
-                        )
-                    elif yield_ratio_percent is None:
-                        decision_reasons.append("收益比无法计算")
-                    else:
-                        decision_reasons.append(
-                            f"收益比 {self.__format_percent(yield_ratio_percent)} 高于低收益比阈值 "
-                            f"{brush_config.yield_guard_low_ratio_percent}%"
-                        )
-                if not has_enough_sample:
-                    decision_reasons.append("下载量和进度未达到收益保护最小样本门槛")
-                if (
-                        is_absolute_low_yield
-                        or (is_low_ratio and not is_ratio_upload_protected)
-                        or is_limited_low_upload
-                ) and has_enough_sample:
-                    bad_streak = int(self.__yield_guard_positive_number(torrent_task.get("yield_guard_bad_streak"), 0))
-                    if bad_streak < bad_checks:
-                        decision_reasons.append(f"低收益连续命中 {bad_streak}/{bad_checks}，仍在观察")
-        decision_reason = "；".join(decision_reasons) if decision_reasons else (reason or "已命中保护/动作条件")
-
         planned_action = (
             "delete" if should_delete
             else self.__get_yield_guard_planned_action(torrent_task=torrent_task) or "none"
         )
+        bad_streak = int(self.__yield_guard_positive_number(torrent_task.get("yield_guard_bad_streak"), 0))
+        effective_bad_checks = int(self.__yield_guard_positive_number(
+            torrent_task.get("yield_guard_effective_bad_checks"),
+            self.__yield_guard_effective_bad_checks(brush_config=brush_config)
+        ))
+        low_yield_kind = torrent_task.get("yield_guard_low_yield_kind") or "none"
+        pool_mode = torrent_task.get("yield_guard_pool_mode") or "balanced"
+        pool_reason = torrent_task.get("yield_guard_pool_reason") or "任务池平衡"
+        pool_text = self.__yield_guard_pool_mode_text(pool_mode)
+        title = torrent_task.get("title") or torrent_info.get("title") or torrent_hash
+        detail_reason = reason or torrent_task.get("yield_guard_last_reason") or "无"
 
         logger.info(
             f"站点：{site_name}，上传收益保护详细日志："
-            f"hash={torrent_hash}，任务={torrent_task.get('title', '')}|{torrent_task.get('description', '')}，"
-            f"判定={decision}，判定原因={decision_reason}，意图={planned_action}，阶段={stage}，"
-            f"检查间下载 {self.__format_speed_kbs(interval_downspeed)}，"
-            f"检查间上传 {self.__format_speed_kbs(interval_upspeed)}，"
-            f"平均上传 {self.__format_speed_kbs(avg_upspeed)}，"
-            f"已下载 {downloaded / 1024 ** 3:.2f} GB，进度 {progress_percent:.1f}%，"
-            f"连续低收益 {int(self.__yield_guard_positive_number(torrent_task.get('yield_guard_bad_streak'), 0))}/{bad_checks}，"
-            f"条件：采样={'是' if downspeed_valid and upspeed_valid else '否'}，"
-            f"高下载={'是' if is_high_download else '否'}(阈值 {brush_config.yield_guard_high_download_kbs} KB/s)，"
-            f"低上传={'是' if is_low_upload else '否'}(阈值 {brush_config.yield_guard_low_upload_kbs} KB/s)，"
-            f"收益比 {self.__format_percent(yield_ratio_percent)}，"
-            f"低收益比={'是' if is_low_ratio else '否'}"
-            f"(阈值 {brush_config.yield_guard_low_ratio_percent}%/"
-            f"最小下载 {brush_config.yield_guard_ratio_min_download_kbs} KB/s)，"
-            f"低收益比上传保护={'是' if is_ratio_upload_protected else '否'}"
-            f"(阈值 {brush_config.yield_guard_ratio_protect_upload_kbs} KB/s)，"
-            f"限速后低上传={'是' if is_limited_low_upload else '否'}，"
-            f"样本足够={'是' if has_enough_sample else '否'}"
-            f"(下载阈值 {brush_config.yield_guard_min_downloaded_gb} GB/进度阈值 {brush_config.yield_guard_min_progress_percent}%)，"
-            f"原因：{reason or '无'}"
+            f"hash={torrent_hash}，任务={title}，判定={decision}，模式={pool_text}({pool_reason})，"
+            f"阶段={stage}，动作={planned_action}，"
+            f"速率=下 {self.__format_speed_kbs(interval_downspeed)}/上 {self.__format_speed_kbs(interval_upspeed)}，"
+            f"收益=本轮{self.__format_percent(yield_ratio_percent)}/"
+            f"累计{self.__format_percent(cumulative_ratio_percent)}/均上 {self.__format_speed_kbs(avg_upspeed)}，"
+            f"样本={downloaded / 1024 ** 3:.2f}GB/{progress_percent:.1f}%，"
+            f"连续={bad_streak}/{effective_bad_checks}，命中={low_yield_kind}，原因={detail_reason}"
         )
 
     @staticmethod
@@ -4327,6 +4343,11 @@ class BrushFlowLowFreq(_PluginBase):
         torrent_task["yield_guard_restore_download_limit"] = False
         torrent_task["yield_guard_probe_started"] = False
         torrent_task["yield_guard_probe_started_time"] = None
+        torrent_task["yield_guard_low_yield_kind"] = "none"
+        torrent_task["yield_guard_cumulative_ratio_percent"] = None
+        torrent_task["yield_guard_effective_bad_checks"] = None
+        torrent_task["yield_guard_pool_mode"] = "balanced"
+        torrent_task["yield_guard_pool_reason"] = ""
         torrent_task["yield_guard_last_reason"] = "上传收益保护：已完成做种，跳过"
 
     @staticmethod
@@ -4359,7 +4380,8 @@ class BrushFlowLowFreq(_PluginBase):
         return f"上传收益保护演练模式：{reason}，不实际执行"
 
     def __evaluate_yield_guard_for_delete(self, site_name: str, brush_config: BrushConfig,
-                                          torrent_info: dict, torrent_task: dict) -> Tuple[bool, str]:
+                                          torrent_info: dict, torrent_task: dict,
+                                          yield_guard_pool_state: Dict[str, Any] = None) -> Tuple[bool, str]:
         """
         评估上传收益保护。这里返回 True 表示应交给现有删种流程删除。
         限速/暂停动作在 check() 的动作层处理；本函数只维护状态和给出决策原因。
@@ -4374,10 +4396,30 @@ class BrushFlowLowFreq(_PluginBase):
             self.__reset_yield_guard_runtime_state_for_skip(torrent_task)
             return False, ""
 
+        if not isinstance(yield_guard_pool_state, dict):
+            yield_guard_pool_state = {"mode": "balanced", "reason": "任务池平衡"}
+        pool_mode = yield_guard_pool_state.get("mode") or "balanced"
+        pool_reason = yield_guard_pool_state.get("reason") or "任务池平衡"
+        torrent_task["yield_guard_pool_mode"] = pool_mode
+        torrent_task["yield_guard_pool_reason"] = pool_reason
+
         interval_upspeed = self.__number_or_none(torrent_task.get("last_check_interval_upspeed"))
         if interval_upspeed is None:
             interval_upspeed = self.__number_or_none(torrent_info.get("last_check_interval_upspeed"))
         avg_upspeed = self.__number_or_none(torrent_info.get("avg_upspeed"))
+        uploaded = self.__number_or_none(torrent_info.get("uploaded"))
+        if uploaded is None:
+            uploaded = self.__number_or_none(torrent_task.get("uploaded"))
+        downloaded_for_ratio = self.__number_or_none(torrent_info.get("downloaded")) or 0
+        cumulative_ratio_percent = (
+            self.__calculate_yield_guard_ratio_percent(
+                interval_upspeed=uploaded,
+                interval_downspeed=downloaded_for_ratio
+            )
+            if uploaded is not None
+            else None
+        )
+        torrent_task["yield_guard_cumulative_ratio_percent"] = cumulative_ratio_percent
 
         good_upload_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_good_upload_kbs) * 1024
         good_avg_bytes = self.__yield_guard_positive_number(brush_config.yield_guard_good_avg_upload_kbs) * 1024
@@ -4394,6 +4436,11 @@ class BrushFlowLowFreq(_PluginBase):
                 torrent_task["yield_guard_probe_started"] = False
                 torrent_task["yield_guard_probe_started_time"] = None
             torrent_task["yield_guard_bad_streak"] = 0
+            torrent_task["yield_guard_low_yield_kind"] = "none"
+            torrent_task["yield_guard_effective_bad_checks"] = self.__yield_guard_effective_bad_checks(
+                brush_config=brush_config,
+                yield_guard_pool_state=yield_guard_pool_state
+            )
             torrent_task["yield_guard_last_reason"] = "上传收益保护：上传表现达标，跳过易误伤删种规则"
             return False, torrent_task["yield_guard_last_reason"]
 
@@ -4403,7 +4450,11 @@ class BrushFlowLowFreq(_PluginBase):
         )
         torrent_task["yield_guard_promising_protected"] = short_window
 
-        bad_checks = max(1, int(self.__yield_guard_positive_number(brush_config.yield_guard_bad_checks, 2)))
+        bad_checks = self.__yield_guard_effective_bad_checks(
+            brush_config=brush_config,
+            yield_guard_pool_state=yield_guard_pool_state
+        )
+        torrent_task["yield_guard_effective_bad_checks"] = bad_checks
         bad_streak = int(self.__yield_guard_positive_number(torrent_task.get("yield_guard_bad_streak"), 0))
         stage = torrent_task.get("yield_guard_stage") or "normal"
         first_transfer_time = torrent_task.get("first_downloaded_time")
@@ -4450,6 +4501,7 @@ class BrushFlowLowFreq(_PluginBase):
                                               torrent_info.get("last_check_interval_upspeed_valid", False)))
         if not (downspeed_valid and upspeed_valid):
             torrent_task["yield_guard_bad_streak"] = 0
+            torrent_task["yield_guard_low_yield_kind"] = "none"
             torrent_task["yield_guard_last_reason"] = "上传收益保护：采样未就绪"
             return False, torrent_task["yield_guard_last_reason"]
 
@@ -4518,9 +4570,41 @@ class BrushFlowLowFreq(_PluginBase):
         if min_progress_percent > 0:
             sample_checks.append(progress_percent >= min_progress_percent)
         has_enough_sample = any(sample_checks) if sample_checks else True
+        is_cumulative_low_ratio = (
+                low_ratio_percent > 0
+                and cumulative_ratio_percent is not None
+                and cumulative_ratio_percent <= low_ratio_percent
+        )
+        is_persistent_low_yield = (
+                has_enough_sample
+                and is_cumulative_low_ratio
+                and (yield_ratio_percent is None or yield_ratio_percent <= low_ratio_percent)
+                and is_low_upload
+                and is_avg_upload_low
+                and not is_ratio_upload_protected
+        )
+        if is_persistent_low_yield:
+            is_low_yield = True
+
+        if is_limited_low_yield:
+            low_yield_kind = "限速后低收益"
+        elif is_absolute_low_yield or (is_low_ratio and not is_ratio_upload_protected):
+            low_yield_kind = "瞬时低收益"
+        elif is_persistent_low_yield:
+            low_yield_kind = "持续低收益"
+        else:
+            low_yield_kind = "none"
+        bad_checks = self.__yield_guard_effective_bad_checks(
+            brush_config=brush_config,
+            yield_guard_pool_state=yield_guard_pool_state,
+            persistent_low_yield=low_yield_kind == "持续低收益"
+        )
+        torrent_task["yield_guard_effective_bad_checks"] = bad_checks
+        torrent_task["yield_guard_low_yield_kind"] = low_yield_kind if is_low_yield and has_enough_sample else "none"
 
         if not (is_low_yield and has_enough_sample):
             torrent_task["yield_guard_bad_streak"] = 0
+            torrent_task["yield_guard_low_yield_kind"] = "none"
             stage = torrent_task.get("yield_guard_stage") or "normal"
             restore_ratio_percent = low_ratio_percent * 1.5 if low_ratio_percent > 0 else 0
             is_ratio_strongly_healthy = (
@@ -4577,7 +4661,10 @@ class BrushFlowLowFreq(_PluginBase):
         torrent_task["yield_guard_bad_records"] = records[-20:]
 
         if bad_streak < bad_checks:
-            reason = f"上传收益保护：低收益命中 {bad_streak}/{bad_checks} 次，继续观察"
+            if low_yield_kind == "持续低收益":
+                reason = f"上传收益保护：持续低收益命中 {bad_streak}/{bad_checks} 次，继续观察"
+            else:
+                reason = f"上传收益保护：低收益命中 {bad_streak}/{bad_checks} 次，继续观察"
             torrent_task["yield_guard_last_reason"] = reason
             return False, reason
 
@@ -4620,7 +4707,8 @@ class BrushFlowLowFreq(_PluginBase):
             action = "pause"
             pending_action = action
 
-        reason = (f"上传收益保护：低收益，下载 {interval_downspeed / 1024:.1f} KB/s，"
+        reason_kind = low_yield_kind if low_yield_kind != "none" else "低收益"
+        reason = (f"上传收益保护：{reason_kind}，下载 {interval_downspeed / 1024:.1f} KB/s，"
                   f"上传 {interval_upspeed / 1024:.1f} KB/s，连续 {bad_streak} 次，动作 {action}")
         torrent_task["yield_guard_last_reason"] = reason
 
@@ -4629,8 +4717,13 @@ class BrushFlowLowFreq(_PluginBase):
             self.__set_yield_guard_pending_action(torrent_task, pending_action)
             return False, reason
         if action == "strict_limit":
-            reason = (f"上传收益保护：持续低收益比，下载 {interval_downspeed / 1024:.1f} KB/s，"
-                      f"上传 {interval_upspeed / 1024:.1f} KB/s，连续 {bad_streak} 次，动作 严格限速")
+            if low_yield_kind == "持续低收益":
+                reason = (f"上传收益保护：持续低收益，累计收益比 "
+                          f"{self.__format_percent(cumulative_ratio_percent)}，"
+                          f"平均上传 {self.__format_speed_kbs(avg_upspeed)}，连续 {bad_streak} 次，动作 严格限速")
+            else:
+                reason = (f"上传收益保护：持续低收益比，下载 {interval_downspeed / 1024:.1f} KB/s，"
+                          f"上传 {interval_upspeed / 1024:.1f} KB/s，连续 {bad_streak} 次，动作 严格限速")
             torrent_task["yield_guard_last_reason"] = reason
             torrent_task["yield_guard_stage"] = "strict_limited"
             self.__set_yield_guard_pending_action(torrent_task, pending_action)
@@ -5586,6 +5679,11 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_probe_started": False,
             "yield_guard_probe_started_time": None,
             "yield_guard_pending_action": None,
+            "yield_guard_low_yield_kind": "none",
+            "yield_guard_cumulative_ratio_percent": None,
+            "yield_guard_effective_bad_checks": None,
+            "yield_guard_pool_mode": "balanced",
+            "yield_guard_pool_reason": "",
             "yield_guard_last_reason": ""
         }
 
