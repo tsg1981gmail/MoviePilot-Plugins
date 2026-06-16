@@ -1604,7 +1604,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(applied)
         self.assertEqual([(["abcdef"], 128 * 1024)], downloader.qbc.download_limits)
 
-    def test_yield_guard_probe_action_resumes_and_applies_strict_download_limit(self):
+    def test_yield_guard_probe_action_resumes_and_applies_normal_download_limit(self):
         class FakeQbc:
             def __init__(self):
                 self.resumed = []
@@ -1638,7 +1638,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertTrue(applied)
         self.assertEqual([["abcdef"]], downloader.qbc.resumed)
-        self.assertEqual([(["abcdef"], 128 * 1024)], downloader.qbc.download_limits)
+        self.assertEqual([(["abcdef"], 512 * 1024)], downloader.qbc.download_limits)
 
     def test_yield_guard_restore_limit_action_calls_qb_download_limit_with_configured_default(self):
         class FakeQbc:
@@ -1783,6 +1783,193 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertTrue(applied)
         self.assertEqual([["abcdef"]], downloader.qbc.paused)
+
+    def test_check_does_not_repeat_pause_action_while_pause_window_open(self):
+        class FakeQbc:
+            def __init__(self):
+                self.paused = []
+
+            def torrents_pause(self, torrent_hashes):
+                self.paused.append(torrent_hashes)
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+            def get_torrents(self):
+                return [{
+                    "hash": "abcdef",
+                    "name": "paused yield torrent",
+                    "tags": "刷流",
+                    "state": "pausedDL",
+                    "progress": 0.1,
+                    "downloaded": 1024 ** 3,
+                    "uploaded": 0,
+                    "total_size": 10 * 1024 ** 3,
+                    "ratio": 0,
+                    "added_on": 1,
+                    "completion_on": 0,
+                    "last_activity": 1,
+                    "tracker": "tracker",
+                }], None
+
+            def delete_torrents(self, ids, delete_file=True):
+                self.deleted = ids
+                return True
+
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_fast_fail_minutes": 10,
+            "yield_guard_final_action": "delete",
+            "freeleech": "",
+            "hr": "no",
+        }, downloader=FakeDownloader())
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
+        torrent_tasks = {
+            "abcdef": {
+                "site": 1,
+                "site_name": "站点1",
+                "title": "paused yield torrent",
+                "description": "desc",
+                "hit_and_run": False,
+                "time": 0,
+                "downloaded": 1024 ** 3,
+                "uploaded": 0,
+                "total_size": 10 * 1024 ** 3,
+                "ratio": 0,
+                "seeding_time": 0,
+                "last_check_time": 1000,
+                "last_check_uploaded": 0,
+                "last_check_downloaded": 1024 ** 3,
+                "first_downloaded_time": 1,
+                "yield_guard_bad_streak": 4,
+                "yield_guard_stage": "paused",
+                "yield_guard_paused_time": 1000,
+                "yield_guard_good_protected": False,
+                "yield_guard_promising_protected": False,
+                "deleted": False,
+            }
+        }
+        plugin.get_data = lambda key: {
+            "torrents": torrent_tasks,
+            "unmanaged": {}
+        }.get(key, {})
+        plugin.save_data = lambda *args, **kwargs: None
+
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000 + 5 * 60
+        try:
+            plugin.check()
+        finally:
+            self.module.time.time = original_time
+
+        self.assertEqual([], plugin.downloader.qbc.paused)
+        self.assertEqual("paused", torrent_tasks["abcdef"].get("yield_guard_stage"))
+
+    def test_check_does_not_repeat_probe_action_while_probe_window_open(self):
+        class FakeQbc:
+            def __init__(self):
+                self.resumed = []
+                self.download_limits = []
+
+            def torrents_resume(self, torrent_hashes):
+                self.resumed.append(torrent_hashes)
+
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
+                self.download_limits.append((torrent_hashes, limit))
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+            def get_torrents(self):
+                return [{
+                    "hash": "abcdef",
+                    "name": "probing yield torrent",
+                    "tags": "刷流",
+                    "state": "downloading",
+                    "progress": 0.05,
+                    "downloaded": 32 * 1024 ** 2,
+                    "uploaded": 512,
+                    "total_size": 1024 ** 3,
+                    "ratio": 0,
+                    "added_on": 1,
+                    "completion_on": 0,
+                    "last_activity": 1,
+                    "tracker": "tracker",
+                }], None
+
+            def delete_torrents(self, ids, delete_file=True):
+                self.deleted = ids
+                return True
+
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_fast_fail_minutes": 10,
+            "yield_guard_final_action": "delete",
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 3,
+            "freeleech": "",
+            "hr": "no",
+        }, downloader=FakeDownloader())
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
+        torrent_tasks = {
+            "abcdef": {
+                "site": 1,
+                "site_name": "站点1",
+                "title": "probing yield torrent",
+                "description": "desc",
+                "hit_and_run": False,
+                "time": 0,
+                "downloaded": 30 * 1024 ** 2,
+                "uploaded": 0,
+                "total_size": 1024 ** 3,
+                "ratio": 0,
+                "seeding_time": 0,
+                "last_check_time": 1000,
+                "last_check_uploaded": 0,
+                "last_check_downloaded": 30 * 1024 ** 2,
+                "first_downloaded_time": 1,
+                "yield_guard_bad_streak": 4,
+                "yield_guard_stage": "probing",
+                "yield_guard_probe_started": True,
+                "yield_guard_probe_started_time": 1000,
+                "yield_guard_restore_download_limit": False,
+                "yield_guard_good_protected": False,
+                "yield_guard_promising_protected": False,
+                "deleted": False,
+            }
+        }
+        plugin.get_data = lambda key: {
+            "torrents": torrent_tasks,
+            "unmanaged": {}
+        }.get(key, {})
+        plugin.save_data = lambda *args, **kwargs: None
+
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000 + 5 * 60
+        try:
+            plugin.check()
+        finally:
+            self.module.time.time = original_time
+
+        self.assertEqual([], plugin.downloader.qbc.resumed)
+        self.assertEqual([], plugin.downloader.qbc.download_limits)
+        self.assertEqual("probing", torrent_tasks["abcdef"].get("yield_guard_stage"))
 
     def test_yield_guard_rehearsal_does_not_call_qb_action(self):
         class FakeQbc:
