@@ -1028,8 +1028,187 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertFalse(should_delete, reason)
         self.assertIn("低收益", reason)
-        self.assertEqual("paused", torrent_task.get("yield_guard_stage"))
+        self.assertEqual("strict_limited", torrent_task.get("yield_guard_stage"))
         self.assertFalse(torrent_task.get("yield_guard_restore_download_limit"))
+
+    def test_yield_guard_healthy_ratio_does_not_count_as_low_yield_when_upload_is_below_low_threshold(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_high_download_kbs": 300,
+            "yield_guard_low_upload_kbs": 150,
+            "yield_guard_low_ratio_percent": 8,
+            "yield_guard_ratio_min_download_kbs": 300,
+            "yield_guard_bad_checks": 1,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+        })
+        torrent_task = {
+            "last_check_interval_downspeed": int(437.6 * 1024),
+            "last_check_interval_downspeed_valid": True,
+            "last_check_interval_upspeed": int(140.3 * 1024),
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_bad_streak": 1,
+            "yield_guard_stage": "normal",
+            "yield_guard_restore_download_limit": False,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+            site_name="站点1",
+            brush_config=plugin._brush_config,
+            torrent_info={
+                "downloaded": 5 * 1024 ** 3,
+                "total_size": 20 * 1024 ** 3,
+                "avg_upspeed": 70 * 1024,
+            },
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("未命中", reason)
+        self.assertEqual(0, torrent_task.get("yield_guard_bad_streak"))
+        self.assertEqual("normal", torrent_task.get("yield_guard_stage"))
+
+    def test_yield_guard_persistent_low_ratio_moves_limited_task_to_strict_limit_before_pause(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_high_download_kbs": 300,
+            "yield_guard_low_upload_kbs": 150,
+            "yield_guard_low_ratio_percent": 8,
+            "yield_guard_ratio_min_download_kbs": 300,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+            "yield_guard_second_action": "pause",
+        })
+        torrent_task = {
+            "last_check_interval_downspeed": 2 * 1024 * 1024,
+            "last_check_interval_downspeed_valid": True,
+            "last_check_interval_upspeed": 20 * 1024,
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_bad_streak": 2,
+            "yield_guard_stage": "limited",
+            "yield_guard_restore_download_limit": False,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+            site_name="站点1",
+            brush_config=plugin._brush_config,
+            torrent_info={
+                "downloaded": 5 * 1024 ** 3,
+                "total_size": 20 * 1024 ** 3,
+                "avg_upspeed": 30 * 1024,
+            },
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("严格限速", reason)
+        self.assertEqual("strict_limited", torrent_task.get("yield_guard_stage"))
+
+    def test_yield_guard_strict_limited_task_pauses_after_persistent_near_zero_upload(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_high_download_kbs": 300,
+            "yield_guard_low_upload_kbs": 150,
+            "yield_guard_low_ratio_percent": 8,
+            "yield_guard_ratio_min_download_kbs": 300,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_min_downloaded_gb": 0,
+            "yield_guard_min_progress_percent": 0,
+        })
+        torrent_task = {
+            "last_check_interval_downspeed": 128 * 1024,
+            "last_check_interval_downspeed_valid": True,
+            "last_check_interval_upspeed": 1 * 1024,
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_bad_streak": 3,
+            "yield_guard_stage": "strict_limited",
+            "yield_guard_restore_download_limit": False,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+            site_name="站点1",
+            brush_config=plugin._brush_config,
+            torrent_info={
+                "downloaded": 5 * 1024 ** 3,
+                "total_size": 20 * 1024 ** 3,
+                "avg_upspeed": 5 * 1024,
+            },
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("暂停", reason)
+        self.assertEqual("paused", torrent_task.get("yield_guard_stage"))
+
+    def test_yield_guard_paused_task_enters_probe_before_final_delete(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_fast_fail_minutes": 1,
+            "yield_guard_final_action": "delete",
+        })
+        original_get_task_elapsed_minutes = plugin._BrushFlowLowFreq__get_task_elapsed_minutes
+        plugin._BrushFlowLowFreq__get_task_elapsed_minutes = lambda value: 5
+        try:
+            should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+                site_name="站点1",
+                brush_config=plugin._brush_config,
+                torrent_info={
+                    "downloaded": 1000,
+                    "total_size": 2000,
+                    "avg_upspeed": 0,
+                },
+                torrent_task={
+                    "first_downloaded_time": 1,
+                    "last_check_interval_downspeed": 0,
+                    "last_check_interval_downspeed_valid": True,
+                    "last_check_interval_upspeed": 0,
+                    "last_check_interval_upspeed_valid": True,
+                    "yield_guard_bad_streak": 2,
+                    "yield_guard_stage": "paused",
+                    "yield_guard_good_protected": False,
+                    "yield_guard_promising_protected": False,
+                },
+            )
+        finally:
+            plugin._BrushFlowLowFreq__get_task_elapsed_minutes = original_get_task_elapsed_minutes
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("恢复探测", reason)
+
+    def test_yield_guard_probe_failure_allows_final_delete(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_bad_checks": 2,
+            "yield_guard_final_action": "delete",
+        })
+        torrent_task = {
+            "last_check_interval_downspeed": 128 * 1024,
+            "last_check_interval_downspeed_valid": True,
+            "last_check_interval_upspeed": 1 * 1024,
+            "last_check_interval_upspeed_valid": True,
+            "yield_guard_bad_streak": 3,
+            "yield_guard_stage": "probing",
+            "yield_guard_probe_started": True,
+            "yield_guard_restore_download_limit": False,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_yield_guard_for_delete(
+            site_name="站点1",
+            brush_config=plugin._brush_config,
+            torrent_info={
+                "downloaded": 5 * 1024 ** 3,
+                "total_size": 20 * 1024 ** 3,
+                "avg_upspeed": 5 * 1024,
+            },
+            torrent_task=torrent_task,
+        )
+
+        self.assertTrue(should_delete, reason)
+        self.assertIn("探测失败", reason)
 
     def test_yield_guard_low_ratio_triggers_when_download_below_high_download_threshold(self):
         plugin = self._new_qb_plugin({
@@ -1181,7 +1360,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIn("低收益", reason)
         self.assertEqual("limited", torrent_task.get("yield_guard_stage"))
 
-    def test_yield_guard_short_window_allows_deletion_after_fast_fail_minutes(self):
+    def test_yield_guard_short_window_keeps_paused_task_for_probe_after_fast_fail_minutes(self):
         plugin = self._new_qb_plugin({
             "yield_guard_enabled": True,
             "yield_guard_rehearsal": False,
@@ -1230,8 +1409,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             plugin._BrushFlowLowFreq__get_task_elapsed_minutes = original_get_task_elapsed_minutes
 
-        self.assertTrue(should_delete, reason)
-        self.assertIn("低收益", reason)
+        self.assertFalse(should_delete, reason)
+        self.assertIn("暂停", reason)
 
     def test_yield_guard_limit_action_calls_qb_download_limit(self):
         class FakeQbc:
@@ -1263,6 +1442,73 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertTrue(applied)
         self.assertEqual([(["abcdef"], 512 * 1024)], downloader.qbc.download_limits)
+
+    def test_yield_guard_strict_limit_action_calls_qb_download_limit_with_tighter_limit(self):
+        class FakeQbc:
+            def __init__(self):
+                self.download_limits = []
+
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
+                self.download_limits.append((torrent_hashes, limit))
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_download_limit_kbs": 512,
+        }, downloader=downloader)
+
+        applied = plugin._BrushFlowLowFreq__apply_qb_yield_guard_action(
+            torrent_hash="abcdef",
+            action="strict_limit",
+            brush_config=plugin._brush_config,
+        )
+
+        self.assertTrue(applied)
+        self.assertEqual([(["abcdef"], 128 * 1024)], downloader.qbc.download_limits)
+
+    def test_yield_guard_probe_action_resumes_and_applies_strict_download_limit(self):
+        class FakeQbc:
+            def __init__(self):
+                self.resumed = []
+                self.download_limits = []
+
+            def torrents_resume(self, torrent_hashes):
+                self.resumed.append(torrent_hashes)
+
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
+                self.download_limits.append((torrent_hashes, limit))
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "yield_guard_rehearsal": False,
+            "yield_guard_download_limit_kbs": 512,
+        }, downloader=downloader)
+
+        applied = plugin._BrushFlowLowFreq__apply_qb_yield_guard_action(
+            torrent_hash="abcdef",
+            action="probe",
+            brush_config=plugin._brush_config,
+        )
+
+        self.assertTrue(applied)
+        self.assertEqual([["abcdef"]], downloader.qbc.resumed)
+        self.assertEqual([(["abcdef"], 128 * 1024)], downloader.qbc.download_limits)
 
     def test_yield_guard_restore_limit_action_calls_qb_download_limit_with_configured_default(self):
         class FakeQbc:
@@ -2035,7 +2281,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertFalse(getattr(plugin.downloader, "deleted", None))
 
-    def test_check_deletes_yield_guard_delete_even_when_dynamic_threshold_not_reached(self):
+    def test_check_deletes_yield_guard_probe_failure_even_when_dynamic_threshold_not_reached(self):
         class FakeDownloader:
             def __init__(self):
                 self.deleted = []
@@ -2116,8 +2362,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 "last_check_time": 1,
                 "last_check_uploaded": 0,
                 "last_check_downloaded": 0,
-                "yield_guard_bad_streak": 0,
-                "yield_guard_stage": "normal",
+                "yield_guard_bad_streak": 2,
+                "yield_guard_stage": "probing",
+                "yield_guard_probe_started": True,
                 "yield_guard_good_protected": False,
                 "yield_guard_promising_protected": False,
                 "deleted": False,
@@ -2414,7 +2661,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             plugin._BrushFlowLowFreq__get_pubminutes = original_get_pubminutes
 
         self.assertFalse(should_delete, reason)
-        self.assertIn("动作 pause", reason)
+        self.assertIn("动作 暂停", reason)
 
     def test_yield_guard_paused_task_final_delete_after_window_without_downspeed(self):
         plugin = self._new_qb_plugin({
@@ -2450,8 +2697,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             plugin._BrushFlowLowFreq__get_task_elapsed_minutes = original_get_task_elapsed_minutes
 
-        self.assertTrue(should_delete, reason)
-        self.assertIn("最终删除", reason)
+        self.assertFalse(should_delete, reason)
+        self.assertIn("恢复探测", reason)
 
     def test_yield_guard_rehearsal_blocks_paused_final_delete(self):
         plugin = self._new_qb_plugin({
@@ -2489,8 +2736,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             plugin._BrushFlowLowFreq__get_task_elapsed_minutes = original_get_task_elapsed_minutes
 
         self.assertFalse(should_delete, reason)
-        self.assertIn("演练模式", reason)
-        self.assertIn("最终删除", reason)
+        self.assertIn("恢复探测", reason)
         self.assertEqual(reason, torrent_task.get("yield_guard_last_reason"))
 
     def test_yield_guard_rehearsal_blocks_immediate_delete_action(self):
@@ -2531,12 +2777,11 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         )
 
         self.assertFalse(should_delete, reason)
-        self.assertIn("演练模式", reason)
-        self.assertIn("动作 delete", reason)
-        self.assertEqual("normal", torrent_task.get("yield_guard_stage"))
+        self.assertIn("动作 暂停", reason)
+        self.assertEqual("paused", torrent_task.get("yield_guard_stage"))
         self.assertEqual(reason, torrent_task.get("yield_guard_last_reason"))
         new_logs = self.module.logger.info_messages[start_info_count:]
-        self.assertTrue(any("演练模式" in msg and "动作 delete" in msg for msg in new_logs))
+        self.assertFalse(any("动作=delete" in msg for msg in new_logs))
 
     def test_get_form_exposes_yield_guard_controls(self):
         plugin = self._new_qb_plugin()
