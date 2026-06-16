@@ -379,7 +379,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.39"
+    plugin_version = "4.3.40"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -4325,6 +4325,7 @@ class BrushFlowLowFreq(_PluginBase):
         torrent_task["yield_guard_stage"] = "normal"
         torrent_task["yield_guard_restore_download_limit"] = False
         torrent_task["yield_guard_probe_started"] = False
+        torrent_task["yield_guard_probe_started_time"] = None
         torrent_task["yield_guard_last_reason"] = "上传收益保护：已完成做种，跳过"
 
     @staticmethod
@@ -4389,6 +4390,8 @@ class BrushFlowLowFreq(_PluginBase):
             if torrent_task.get("yield_guard_stage") in {"limited", "strict_limited", "probing"}:
                 torrent_task["yield_guard_stage"] = "normal"
                 torrent_task["yield_guard_restore_download_limit"] = True
+                torrent_task["yield_guard_probe_started"] = False
+                torrent_task["yield_guard_probe_started_time"] = None
             torrent_task["yield_guard_bad_streak"] = 0
             torrent_task["yield_guard_last_reason"] = "上传收益保护：上传表现达标，跳过易误伤删种规则"
             return False, torrent_task["yield_guard_last_reason"]
@@ -4412,12 +4415,21 @@ class BrushFlowLowFreq(_PluginBase):
             if short_window:
                 torrent_task["yield_guard_last_reason"] = short_window_reason or "上传收益保护：仍处于短窗保护"
                 return False, torrent_task["yield_guard_last_reason"]
-            if fast_fail_minutes <= 0 or (transfer_elapsed_minutes is not None and transfer_elapsed_minutes >= fast_fail_minutes):
+            paused_time = torrent_task.get("yield_guard_paused_time")
+            paused_elapsed_minutes = (
+                self.__get_task_elapsed_minutes(paused_time) if paused_time is not None else None
+            )
+            if paused_elapsed_minutes is None and fast_fail_minutes > 0:
+                torrent_task["yield_guard_paused_time"] = time.time()
+                torrent_task["yield_guard_last_reason"] = "上传收益保护：已暂停，但尚未超过快速淘汰窗口"
+                return False, torrent_task["yield_guard_last_reason"]
+            if fast_fail_minutes <= 0 or paused_elapsed_minutes >= fast_fail_minutes:
                 final_action = self.__yield_guard_action_value(brush_config.yield_guard_final_action, "delete")
                 if final_action == "delete":
                     reason = f"上传收益保护：低收益暂停已超过快速淘汰窗口，先恢复探测 1 轮再决定是否最终删除"
                     torrent_task["yield_guard_stage"] = "probing"
                     torrent_task["yield_guard_probe_started"] = True
+                    torrent_task["yield_guard_probe_started_time"] = time.time()
                     torrent_task["yield_guard_last_reason"] = reason
                     return False, reason
                 reason = f"上传收益保护：低收益，已超过快速淘汰窗口，动作 {final_action}"
@@ -4506,13 +4518,42 @@ class BrushFlowLowFreq(_PluginBase):
 
         if not (is_low_yield and has_enough_sample):
             torrent_task["yield_guard_bad_streak"] = 0
-            if torrent_task.get("yield_guard_stage") in {"limited", "strict_limited", "probing"}:
-                torrent_task["yield_guard_stage"] = "normal"
-                torrent_task["yield_guard_restore_download_limit"] = True
+            stage = torrent_task.get("yield_guard_stage") or "normal"
+            restore_ratio_percent = low_ratio_percent * 1.5 if low_ratio_percent > 0 else 0
+            is_ratio_strongly_healthy = (
+                    restore_ratio_percent > 0
+                    and yield_ratio_percent is not None
+                    and yield_ratio_percent >= restore_ratio_percent
+            )
+            restore_ready = (
+                    not is_low_upload
+                    or is_ratio_upload_protected
+                    or is_ratio_strongly_healthy
+            )
+            if stage in {"limited", "strict_limited", "probing"}:
+                if restore_ready:
+                    torrent_task["yield_guard_stage"] = "normal"
+                    torrent_task["yield_guard_restore_download_limit"] = True
+                    torrent_task["yield_guard_probe_started"] = False
+                    torrent_task["yield_guard_probe_started_time"] = None
+                else:
+                    torrent_task["yield_guard_restore_download_limit"] = False
             if is_ratio_upload_protected:
                 torrent_task["yield_guard_last_reason"] = (
                     f"上传收益保护：收益比偏低但检查间上传 {interval_upspeed / 1024:.1f} KB/s "
                     f"达到收益比保护上传阈值 {brush_config.yield_guard_ratio_protect_upload_kbs} KB/s，继续观察"
+                )
+            elif (
+                    stage in {"limited", "strict_limited", "probing"}
+                    and not restore_ready
+                    and is_high_download
+                    and is_low_upload
+                    and is_ratio_healthy
+            ):
+                torrent_task["yield_guard_last_reason"] = (
+                    f"上传收益保护：检查间上传 {interval_upspeed / 1024:.1f} KB/s 低于上传阈值，"
+                    f"收益比 {yield_ratio_percent:.1f}% 已高于低收益比阈值 "
+                    f"{brush_config.yield_guard_low_ratio_percent}%，但恢复幅度不足，保持限速继续观察"
                 )
             elif is_high_download and is_low_upload and is_ratio_healthy:
                 torrent_task["yield_guard_last_reason"] = (
@@ -4546,8 +4587,18 @@ class BrushFlowLowFreq(_PluginBase):
         elif stage == "strict_limited":
             action = "pause" if is_near_zero_upload and is_avg_upload_low else "strict_limit"
         elif stage == "probing":
-            final_action = self.__yield_guard_action_value(brush_config.yield_guard_final_action, "delete")
-            action = "delete" if final_action == "delete" else final_action
+            probe_started_time = torrent_task.get("yield_guard_probe_started_time")
+            probe_elapsed_minutes = (
+                self.__get_task_elapsed_minutes(probe_started_time) if probe_started_time is not None else None
+            )
+            if probe_elapsed_minutes is None and fast_fail_minutes > 0:
+                torrent_task["yield_guard_probe_started_time"] = time.time()
+                action = "probe"
+            elif fast_fail_minutes > 0 and probe_elapsed_minutes < fast_fail_minutes:
+                action = "probe"
+            else:
+                final_action = self.__yield_guard_action_value(brush_config.yield_guard_final_action, "delete")
+                action = "delete" if final_action == "delete" else final_action
         else:
             action = self.__yield_guard_action_value(brush_config.yield_guard_final_action, "delete")
 
@@ -4568,6 +4619,13 @@ class BrushFlowLowFreq(_PluginBase):
                       f"上传 {interval_upspeed / 1024:.1f} KB/s，连续 {bad_streak} 次，动作 严格限速")
             torrent_task["yield_guard_last_reason"] = reason
             torrent_task["yield_guard_stage"] = "strict_limited"
+            return False, reason
+        if action == "probe":
+            reason = (f"上传收益保护：恢复探测中，下载 {interval_downspeed / 1024:.1f} KB/s，"
+                      f"上传 {interval_upspeed / 1024:.1f} KB/s，连续 {bad_streak} 次，继续观察")
+            torrent_task["yield_guard_last_reason"] = reason
+            torrent_task["yield_guard_stage"] = "probing"
+            torrent_task["yield_guard_probe_started"] = True
             return False, reason
         if action == "pause":
             reason = (f"上传收益保护：严格限速后上传仍接近 0，下载 {interval_downspeed / 1024:.1f} KB/s，"
@@ -5509,6 +5567,7 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_promising_protected": False,
             "yield_guard_restore_download_limit": False,
             "yield_guard_probe_started": False,
+            "yield_guard_probe_started_time": None,
             "yield_guard_last_reason": ""
         }
 
