@@ -2917,11 +2917,24 @@ class BrushFlowLowFreq(_PluginBase):
         if not torrents:
             return [
                 {
-                    'component': 'div',
-                    'text': '暂无数据',
-                    'props': {
-                        'class': 'text-center',
-                    }
+                    'component': 'VRow',
+                    'content': self.__get_total_elements() + self.__get_daily_transfer_elements() + [
+                        {
+                            'component': 'VCol',
+                            'props': {
+                                'cols': 12,
+                            },
+                            'content': [
+                                {
+                                    'component': 'div',
+                                    'text': '暂无数据',
+                                    'props': {
+                                        'class': 'text-center',
+                                    }
+                                }
+                            ]
+                        }
+                    ]
                 }
             ]
         else:
@@ -2990,7 +3003,7 @@ class BrushFlowLowFreq(_PluginBase):
         return [
             {
                 'component': 'VRow',
-                'content': self.__get_total_elements() + [
+                'content': self.__get_total_elements() + self.__get_daily_transfer_elements() + [
                     # 种子明细
                     {
                         'component': 'VCol',
@@ -3873,6 +3886,9 @@ class BrushFlowLowFreq(_PluginBase):
 
             # 先更新刷流任务的最新状态，上下传，分享率
             self.__update_torrent_tasks_state(torrents=check_torrents, torrent_tasks=torrent_tasks)
+
+            # 更新每日上传/下载增量统计
+            self.__update_daily_transfer_statistics(torrent_tasks=torrent_tasks)
 
             # 更新刷流任务列表中在下载器中删除的种子为删除状态
             self.__update_undeleted_torrents_missing_in_downloader(torrent_tasks, torrent_check_hashes, seeding_torrents)
@@ -6163,6 +6179,284 @@ class BrushFlowLowFreq(_PluginBase):
         self.save_data("statistic", statistic_info)
         self.save_data("torrents", torrent_tasks)
 
+    def __get_daily_stat_date(self, now: Optional[datetime] = None) -> str:
+        """
+        获取每日统计日期。
+        """
+        if isinstance(now, datetime):
+            return now.strftime("%Y-%m-%d")
+
+        try:
+            return datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%Y-%m-%d")
+        except Exception:
+            return datetime.now().strftime("%Y-%m-%d")
+
+    def __get_daily_stat_timestamp(self, now: Optional[datetime] = None) -> int:
+        """
+        获取每日统计更新时间戳。
+        """
+        if isinstance(now, datetime):
+            return int(now.timestamp())
+        return int(time.time())
+
+    def __get_daily_statistic_info(self) -> Dict[str, dict]:
+        """
+        获取每日上传/下载统计数据。
+        """
+        daily_statistic = self.get_data("daily_statistic") or {}
+        return daily_statistic if isinstance(daily_statistic, dict) else {}
+
+    def __update_daily_transfer_statistics(self, torrent_tasks: Dict[str, dict],
+                                           now: Optional[datetime] = None) -> None:
+        """
+        根据插件托管任务的累计上传/下载量，更新每日增量统计。
+        """
+        if not isinstance(torrent_tasks, dict):
+            return
+
+        daily_statistic = self.__get_daily_statistic_info()
+        stat_date = self.__get_daily_stat_date(now=now)
+        updated_at = self.__get_daily_stat_timestamp(now=now)
+
+        for task_hash, task in torrent_tasks.items():
+            if not isinstance(task, dict):
+                continue
+
+            uploaded = self.__number_or_none(task.get("uploaded"))
+            downloaded = self.__number_or_none(task.get("downloaded"))
+            if uploaded is None or downloaded is None:
+                continue
+
+            last_uploaded = self.__number_or_none(task.get("daily_stat_last_uploaded"))
+            last_downloaded = self.__number_or_none(task.get("daily_stat_last_downloaded"))
+            if last_uploaded is None or last_downloaded is None:
+                task["daily_stat_last_date"] = stat_date
+                task["daily_stat_last_uploaded"] = int(uploaded)
+                task["daily_stat_last_downloaded"] = int(downloaded)
+                continue
+
+            upload_delta = uploaded - last_uploaded
+            download_delta = downloaded - last_downloaded
+
+            task["daily_stat_last_date"] = stat_date
+            task["daily_stat_last_uploaded"] = int(uploaded)
+            task["daily_stat_last_downloaded"] = int(downloaded)
+
+            if upload_delta < 0 or download_delta < 0:
+                logger.warning(f"每日流量统计跳过异常增量，任务 {task_hash} 上传增量 {upload_delta}，"
+                               f"下载增量 {download_delta}")
+                continue
+
+            if upload_delta <= 0 and download_delta <= 0:
+                continue
+
+            daily_record = daily_statistic.get(stat_date)
+            if not isinstance(daily_record, dict):
+                daily_record = {
+                    "date": stat_date,
+                    "uploaded": 0,
+                    "downloaded": 0,
+                    "task_count": 0,
+                    "updated_at": updated_at,
+                }
+
+            daily_record["date"] = stat_date
+            daily_record["uploaded"] = int((self.__number_or_none(daily_record.get("uploaded")) or 0) + upload_delta)
+            daily_record["downloaded"] = int(
+                (self.__number_or_none(daily_record.get("downloaded")) or 0) + download_delta
+            )
+            if task.get("daily_stat_counted_date") != stat_date:
+                daily_record["task_count"] = int(
+                    (self.__number_or_none(daily_record.get("task_count")) or 0) + 1
+                )
+                task["daily_stat_counted_date"] = stat_date
+            daily_record["updated_at"] = updated_at
+            daily_statistic[stat_date] = daily_record
+
+        self.save_data("daily_statistic", daily_statistic)
+        self.save_data("torrents", torrent_tasks)
+
+    @staticmethod
+    def __format_daily_stat_updated_at(updated_at: Any) -> str:
+        """
+        格式化每日统计更新时间。
+        """
+        try:
+            timestamp = float(updated_at)
+            if timestamp <= 0:
+                return "N/A"
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+        except (TypeError, ValueError):
+            return "N/A"
+
+    def __get_daily_transfer_elements(self) -> List[dict]:
+        """
+        组装每日上传/下载统计页面元素。
+        """
+        daily_statistic = self.__get_daily_statistic_info()
+        stat_date = self.__get_daily_stat_date()
+        today_record = daily_statistic.get(stat_date) if isinstance(daily_statistic.get(stat_date), dict) else {}
+        today_uploaded = StringUtils.str_filesize((today_record or {}).get("uploaded") or 0)
+        today_downloaded = StringUtils.str_filesize((today_record or {}).get("downloaded") or 0)
+
+        history_records = [
+            value for key, value in sorted(daily_statistic.items(), key=lambda item: str(item[0]), reverse=True)
+            if isinstance(value, dict)
+        ][:30]
+
+        if history_records:
+            history_rows = [
+                {
+                    'component': 'tr',
+                    'props': {
+                        'class': 'text-sm'
+                    },
+                    'content': [
+                        {
+                            'component': 'td',
+                            'props': {
+                                'class': 'text-no-wrap'
+                            },
+                            'text': record.get("date") or ""
+                        },
+                        {
+                            'component': 'td',
+                            'text': StringUtils.str_filesize(record.get("uploaded") or 0)
+                        },
+                        {
+                            'component': 'td',
+                            'text': StringUtils.str_filesize(record.get("downloaded") or 0)
+                        },
+                        {
+                            'component': 'td',
+                            'text': record.get("task_count") or 0
+                        },
+                        {
+                            'component': 'td',
+                            'props': {
+                                'class': 'text-no-wrap'
+                            },
+                            'text': self.__format_daily_stat_updated_at(record.get("updated_at"))
+                        }
+                    ]
+                } for record in history_records
+            ]
+            history_content = [
+                {
+                    'component': 'VTable',
+                    'props': {
+                        'hover': True,
+                        'density': 'compact'
+                    },
+                    'content': [
+                        {
+                            'component': 'thead',
+                            'props': {
+                                'class': 'text-no-wrap'
+                            },
+                            'content': [
+                                {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '日期'},
+                                {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '上传量'},
+                                {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '下载量'},
+                                {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '参与任务数'},
+                                {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '更新时间'}
+                            ]
+                        },
+                        {
+                            'component': 'tbody',
+                            'content': history_rows
+                        }
+                    ]
+                }
+            ]
+        else:
+            history_content = [
+                {
+                    'component': 'div',
+                    'props': {
+                        'class': 'text-center text-disabled py-4'
+                    },
+                    'text': '暂无每日流量统计'
+                }
+            ]
+
+        return [
+            {
+                'component': 'VCol',
+                'props': {
+                    'cols': 12,
+                },
+                'content': [
+                    {
+                        'component': 'VCard',
+                        'props': {
+                            'variant': 'tonal',
+                        },
+                        'content': [
+                            {
+                                'component': 'VCardText',
+                                'content': [
+                                    {
+                                        'component': 'div',
+                                        'props': {
+                                            'class': 'text-subtitle-1 font-weight-medium mb-3'
+                                        },
+                                        'text': '每日流量统计'
+                                    },
+                                    {
+                                        'component': 'div',
+                                        'props': {
+                                            'class': 'd-flex flex-wrap ga-6 mb-3'
+                                        },
+                                        'content': [
+                                            {
+                                                'component': 'div',
+                                                'content': [
+                                                    {
+                                                        'component': 'div',
+                                                        'props': {
+                                                            'class': 'text-caption'
+                                                        },
+                                                        'text': '今日上传量'
+                                                    },
+                                                    {
+                                                        'component': 'div',
+                                                        'props': {
+                                                            'class': 'text-h6'
+                                                        },
+                                                        'text': today_uploaded
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'div',
+                                                'content': [
+                                                    {
+                                                        'component': 'div',
+                                                        'props': {
+                                                            'class': 'text-caption'
+                                                        },
+                                                        'text': '今日下载量'
+                                                    },
+                                                    {
+                                                        'component': 'div',
+                                                        'props': {
+                                                            'class': 'text-h6'
+                                                        },
+                                                        'text': today_downloaded
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ] + history_content
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+
     def __get_brush_config(self, sitename: str = None) -> BrushConfig:
         """
         获取BrushConfig
@@ -7707,6 +8001,7 @@ class BrushFlowLowFreq(_PluginBase):
         self.save_data("archived", {})
         self.save_data("unmanaged", {})
         self.save_data("statistic", {})
+        self.save_data("daily_statistic", {})
 
     def __get_statistic_info(self) -> Dict[str, int]:
         """

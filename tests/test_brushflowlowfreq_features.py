@@ -150,6 +150,13 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         plugin._brush_config = self.module.BrushConfig(config)
         return plugin
 
+    @staticmethod
+    def _attach_memory_store(plugin, initial=None):
+        store = dict(initial or {})
+        plugin.get_data = lambda key, *args: store.get(key)
+        plugin.save_data = lambda key, value, *args: store.__setitem__(key, value)
+        return store
+
     def _new_qb_plugin(self, config=None, downloader=None):
         plugin = self._new_plugin({
             "downloader": "qb",
@@ -3987,6 +3994,232 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             self.module.time.sleep = original_sleep
 
         self.assertEqual(expected_hash, torrent_hash)
+
+    def test_daily_transfer_statistics_first_run_only_initializes_baseline(self):
+        plugin = self._new_plugin({})
+        store = self._attach_memory_store(plugin)
+        tasks = {
+            "hash1": {
+                "uploaded": 1000,
+                "downloaded": 2000,
+            }
+        }
+
+        plugin._BrushFlowLowFreq__update_daily_transfer_statistics(
+            torrent_tasks=tasks,
+            now=datetime(2026, 6, 22, 10, 0, 0),
+        )
+
+        self.assertEqual({}, store["daily_statistic"])
+        self.assertEqual("2026-06-22", tasks["hash1"]["daily_stat_last_date"])
+        self.assertEqual(1000, tasks["hash1"]["daily_stat_last_uploaded"])
+        self.assertEqual(2000, tasks["hash1"]["daily_stat_last_downloaded"])
+
+    def test_daily_transfer_statistics_accumulates_same_day_deltas(self):
+        plugin = self._new_plugin({})
+        store = self._attach_memory_store(plugin)
+        tasks = {
+            "hash1": {
+                "uploaded": 1000,
+                "downloaded": 2000,
+            }
+        }
+        plugin._BrushFlowLowFreq__update_daily_transfer_statistics(
+            torrent_tasks=tasks,
+            now=datetime(2026, 6, 22, 10, 0, 0),
+        )
+
+        tasks["hash1"]["uploaded"] = 1500
+        tasks["hash1"]["downloaded"] = 2600
+        plugin._BrushFlowLowFreq__update_daily_transfer_statistics(
+            torrent_tasks=tasks,
+            now=datetime(2026, 6, 22, 10, 5, 0),
+        )
+
+        daily = store["daily_statistic"]["2026-06-22"]
+        self.assertEqual(500, daily["uploaded"])
+        self.assertEqual(600, daily["downloaded"])
+        self.assertEqual(1, daily["task_count"])
+        self.assertEqual("2026-06-22", tasks["hash1"]["daily_stat_counted_date"])
+
+        tasks["hash1"]["uploaded"] = 1700
+        tasks["hash1"]["downloaded"] = 2900
+        plugin._BrushFlowLowFreq__update_daily_transfer_statistics(
+            torrent_tasks=tasks,
+            now=datetime(2026, 6, 22, 10, 10, 0),
+        )
+
+        daily = store["daily_statistic"]["2026-06-22"]
+        self.assertEqual(700, daily["uploaded"])
+        self.assertEqual(900, daily["downloaded"])
+        self.assertEqual(1, daily["task_count"])
+
+    def test_daily_transfer_statistics_aggregates_multiple_tasks(self):
+        plugin = self._new_plugin({})
+        store = self._attach_memory_store(plugin)
+        tasks = {
+            "hash1": {"uploaded": 1000, "downloaded": 2000},
+            "hash2": {"uploaded": 3000, "downloaded": 4000},
+        }
+        plugin._BrushFlowLowFreq__update_daily_transfer_statistics(
+            torrent_tasks=tasks,
+            now=datetime(2026, 6, 22, 10, 0, 0),
+        )
+
+        tasks["hash1"].update({"uploaded": 1300, "downloaded": 2400})
+        tasks["hash2"].update({"uploaded": 3800, "downloaded": 4500})
+        plugin._BrushFlowLowFreq__update_daily_transfer_statistics(
+            torrent_tasks=tasks,
+            now=datetime(2026, 6, 22, 10, 5, 0),
+        )
+
+        daily = store["daily_statistic"]["2026-06-22"]
+        self.assertEqual(1100, daily["uploaded"])
+        self.assertEqual(900, daily["downloaded"])
+        self.assertEqual(2, daily["task_count"])
+
+    def test_daily_transfer_statistics_refreshes_baseline_on_counter_reset(self):
+        plugin = self._new_plugin({})
+        store = self._attach_memory_store(plugin, {
+            "daily_statistic": {
+                "2026-06-22": {
+                    "date": "2026-06-22",
+                    "uploaded": 500,
+                    "downloaded": 600,
+                    "task_count": 1,
+                    "updated_at": 1,
+                }
+            }
+        })
+        tasks = {
+            "hash1": {
+                "uploaded": 900,
+                "downloaded": 1800,
+                "daily_stat_last_date": "2026-06-22",
+                "daily_stat_last_uploaded": 1000,
+                "daily_stat_last_downloaded": 2000,
+                "daily_stat_counted_date": "2026-06-22",
+            }
+        }
+
+        plugin._BrushFlowLowFreq__update_daily_transfer_statistics(
+            torrent_tasks=tasks,
+            now=datetime(2026, 6, 22, 10, 5, 0),
+        )
+
+        daily = store["daily_statistic"]["2026-06-22"]
+        self.assertEqual(500, daily["uploaded"])
+        self.assertEqual(600, daily["downloaded"])
+        self.assertEqual(900, tasks["hash1"]["daily_stat_last_uploaded"])
+        self.assertEqual(1800, tasks["hash1"]["daily_stat_last_downloaded"])
+
+    def test_daily_transfer_statistics_creates_new_record_after_date_change(self):
+        plugin = self._new_plugin({})
+        store = self._attach_memory_store(plugin)
+        tasks = {
+            "hash1": {
+                "uploaded": 1000,
+                "downloaded": 2000,
+            }
+        }
+        plugin._BrushFlowLowFreq__update_daily_transfer_statistics(
+            torrent_tasks=tasks,
+            now=datetime(2026, 6, 22, 23, 59, 0),
+        )
+
+        tasks["hash1"]["uploaded"] = 1300
+        tasks["hash1"]["downloaded"] = 2400
+        plugin._BrushFlowLowFreq__update_daily_transfer_statistics(
+            torrent_tasks=tasks,
+            now=datetime(2026, 6, 23, 0, 1, 0),
+        )
+
+        self.assertNotIn("2026-06-22", store["daily_statistic"])
+        daily = store["daily_statistic"]["2026-06-23"]
+        self.assertEqual(300, daily["uploaded"])
+        self.assertEqual(400, daily["downloaded"])
+        self.assertEqual(1, daily["task_count"])
+        self.assertEqual("2026-06-23", tasks["hash1"]["daily_stat_last_date"])
+
+    def test_clear_tasks_clears_daily_statistic(self):
+        plugin = self._new_plugin({})
+        store = self._attach_memory_store(plugin, {
+            "daily_statistic": {
+                "2026-06-22": {
+                    "date": "2026-06-22",
+                    "uploaded": 100,
+                    "downloaded": 200,
+                    "task_count": 1,
+                    "updated_at": 1,
+                }
+            }
+        })
+
+        plugin._BrushFlowLowFreq__clear_tasks()
+
+        self.assertEqual({}, store["daily_statistic"])
+
+    def test_get_page_includes_daily_transfer_history(self):
+        plugin = self._new_plugin({})
+        self._attach_memory_store(plugin, {
+            "torrents": {
+                "hash1": {
+                    "site_name": "站点1",
+                    "title": "torrent",
+                    "size": 100,
+                    "uploaded": 1000,
+                    "downloaded": 2000,
+                    "ratio": 0.5,
+                    "hit_and_run": False,
+                    "seeding_time": 3600,
+                    "deleted": False,
+                    "time": 1,
+                }
+            },
+            "daily_statistic": {
+                "2026-06-22": {
+                    "date": "2026-06-22",
+                    "uploaded": 123,
+                    "downloaded": 456,
+                    "task_count": 1,
+                    "updated_at": 1782067200,
+                }
+            }
+        })
+
+        page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
+
+        self.assertIn("每日流量统计", page_text)
+        self.assertIn("今日上传量", page_text)
+        self.assertIn("今日下载量", page_text)
+        self.assertIn("2026-06-22", page_text)
+        self.assertIn("123", page_text)
+        self.assertIn("456", page_text)
+
+    def test_get_page_shows_daily_transfer_empty_state(self):
+        plugin = self._new_plugin({})
+        self._attach_memory_store(plugin, {
+            "torrents": {
+                "hash1": {
+                    "site_name": "站点1",
+                    "title": "torrent",
+                    "size": 100,
+                    "uploaded": 1000,
+                    "downloaded": 2000,
+                    "ratio": 0.5,
+                    "hit_and_run": False,
+                    "seeding_time": 3600,
+                    "deleted": False,
+                    "time": 1,
+                }
+            },
+            "daily_statistic": {}
+        })
+
+        page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
+
+        self.assertIn("每日流量统计", page_text)
+        self.assertIn("暂无每日流量统计", page_text)
 
 
 if __name__ == "__main__":
