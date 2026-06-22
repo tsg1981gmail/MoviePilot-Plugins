@@ -1,38 +1,40 @@
-# Daily Transfer Statistics Design
+# 每日上传下载统计设计
 
-## Background
+## 背景
 
-The `brushflowlowfreq` plugin already records cumulative uploaded and downloaded bytes for each managed torrent task during the periodic `check()` flow. The current aggregate statistic stored under `statistic` only exposes total and active uploaded/downloaded amounts. It does not preserve daily upload/download increments, so users cannot see how much traffic the plugin contributed today or on previous days.
+`brushflowlowfreq` 插件现在已经会在定时 `check()` 流程里同步每个托管刷流任务的累计上传量和累计下载量。现有 `statistic` 只保存总上传、总下载、活跃上传、活跃下载等汇总数据，没有保存每天的上传/下载增量，所以用户看不到插件今天贡献了多少流量，也看不到历史每天的记录。
 
-The requested feature is a daily upload/download statistic inside the plugin, with a history view. The statistic must only include torrent tasks managed by this plugin. It must not include unrelated downloader tasks.
+本功能要在插件内增加“每日上传量、每日下载量统计”和“历史记录查看”。统计口径只包含本插件托管的刷流任务，不统计下载器里的其它任务。
 
-## Goals
+## 目标
 
-1. Track daily uploaded and downloaded increments for plugin-managed torrent tasks.
-2. Show today's uploaded/downloaded amount in the plugin data page.
-3. Let users view historical daily records from the plugin data page.
-4. Avoid counting historical cumulative traffic as today's traffic after upgrade.
-5. Keep the implementation small and compatible with the existing plugin data model.
+1. 按天统计插件托管任务产生的上传和下载增量。
+2. 在插件数据页展示今日上传量和今日下载量。
+3. 在插件数据页展示每日历史记录。
+4. 升级后首次检查不能把存量任务的历史累计上传/下载误算到今天。
+5. 尽量复用现有数据结构和页面渲染方式，保持改动小。
 
-## Non-Goals
+## 不做的内容
 
-- Do not count global downloader traffic.
-- Do not count unmanaged downloader tasks.
-- Do not add per-site or per-torrent daily drilldown in the first version.
-- Do not add export, charts, or configurable retention in the first version.
-- Do not change existing total statistic semantics.
+- 不统计下载器全局流量。
+- 不统计非插件托管任务。
+- 第一版不做按站点、按种子的每日明细。
+- 第一版不做导出、图表、历史保留天数配置。
+- 不改变现有总统计 `statistic` 的语义。
 
-## Recommended Approach
+## 推荐方案
 
-Use cumulative counter differencing during the existing `check()` flow.
+使用“累计值差分”的方式统计每日流量。
 
-Each managed torrent task already receives current cumulative `uploaded` and `downloaded` values from the downloader. The daily statistics module will compare those values against per-task daily statistic baselines. Valid positive deltas will be added to the current local date's daily record.
+插件每次检查时已经能拿到托管任务当前的累计 `uploaded` 和 `downloaded`。每日统计模块只需要把当前累计值和上一次记录的统计基线做差，得到本轮新增上传量和新增下载量，然后累加到当天记录里。
 
-This approach is preferred because it uses data the plugin already owns, preserves the "plugin-managed tasks only" scope, and avoids relying on downloader-wide transfer counters that would include unrelated tasks.
+这个方案最适合当前插件，因为它只使用插件已经维护的托管任务数据，天然满足“只统计插件托管任务”的口径，也不会把下载器里的其它任务算进去。
 
-## Data Model
+## 数据结构
 
-Add a new persisted plugin data key:
+新增一个插件持久化数据键：`daily_statistic`。
+
+示例：
 
 ```json
 {
@@ -48,15 +50,15 @@ Add a new persisted plugin data key:
 }
 ```
 
-Daily record fields:
+每日记录字段含义：
 
-- `date`: local date in `YYYY-MM-DD` format.
-- `uploaded`: bytes uploaded during that date by plugin-managed tasks.
-- `downloaded`: bytes downloaded during that date by plugin-managed tasks.
-- `task_count`: number of distinct managed tasks that contributed a valid positive delta on that date.
-- `updated_at`: Unix timestamp of the most recent update.
+- `date`：日期，格式为 `YYYY-MM-DD`。
+- `uploaded`：当天插件托管任务产生的上传增量，单位字节。
+- `downloaded`：当天插件托管任务产生的下载增量，单位字节。
+- `task_count`：当天参与统计的托管任务数量。
+- `updated_at`：这条每日记录最近一次更新时间，Unix 时间戳。
 
-Add per-task baseline fields to managed torrent task dictionaries:
+每个托管任务新增统计基线字段：
 
 ```json
 {
@@ -66,72 +68,76 @@ Add per-task baseline fields to managed torrent task dictionaries:
 }
 ```
 
-These fields are only accounting baselines. They do not replace the existing `uploaded`, `downloaded`, or `statistic` fields.
+这些字段只用于每日统计基线，不替代现有的 `uploaded`、`downloaded`、`statistic`。
 
-## Date and Timezone
+## 日期和时区
 
-Daily buckets use the MoviePilot timezone. The implementation should prefer `settings.TZ` when available and fall back to the process local timezone if timezone creation fails.
+每日统计按 MoviePilot 配置的时区分天。
 
-The date key is generated at accounting time, not from torrent publish time or add time.
+实现时优先使用 `settings.TZ`。如果时区创建失败，则回退到进程本地日期，必要时记录一条警告日志。
 
-## Accounting Flow
+日期按统计发生时间生成，不使用种子发布时间或添加时间。
 
-The accounting flow runs after downloader state has been merged into `torrent_tasks` in `check()`.
+## 统计流程
 
-For each plugin-managed task:
+每日统计在 `check()` 里同步完下载器状态后执行，也就是在托管任务的 `uploaded` / `downloaded` 已经更新之后执行。
 
-1. Skip tasks with invalid or missing cumulative `uploaded` or `downloaded` values.
-2. Read the per-task baseline fields.
-3. If no baseline exists, initialize the baseline to the current cumulative values and do not add any daily traffic.
-4. If the current local date differs from `daily_stat_last_date`, reset the baseline date to the current date and use the previous cumulative values as the comparison base. This allows transfer since the last check to be counted into the new day without importing all historical traffic.
-5. Compute:
+对每个插件托管任务执行以下逻辑：
+
+1. 如果任务缺少有效的累计 `uploaded` 或 `downloaded`，跳过这个任务。
+2. 读取任务上的每日统计基线字段。
+3. 如果任务没有基线，说明是首次参与每日统计，只把当前累计值写成基线，不增加当天流量。
+4. 如果当前日期和 `daily_stat_last_date` 不一致，说明跨天了。仍然用上次基线和当前累计值做差，把两次检查之间的增量计入当前日期，然后把任务基线日期更新为当前日期。这样不会把所有历史累计量导入今天。
+5. 计算本轮增量：
 
    ```text
-   upload_delta = current_uploaded - daily_stat_last_uploaded
-   download_delta = current_downloaded - daily_stat_last_downloaded
+   上传增量 = 当前累计上传量 - 上次统计基线上传量
+   下载增量 = 当前累计下载量 - 上次统计基线下载量
    ```
 
-6. If either delta is negative, treat the task as a counter reset. Refresh its baseline to the current cumulative values and skip adding traffic for this task in this check.
-7. Add positive deltas to the current date's `daily_statistic` record.
-8. If either delta is positive, count the task once in that day's contributing task set for the current accounting run.
-9. Update the task baseline to the current cumulative values and current date.
-10. Save `daily_statistic` and `torrents` with the existing persistence helpers.
+6. 如果上传增量或下载增量出现负数，说明下载器计数可能回退或任务数据异常。本轮不计入每日统计，只刷新基线，避免产生负统计。
+7. 将正数上传/下载增量累加到当天 `daily_statistic` 记录。
+8. 只要上传或下载有正增量，这个任务就计入当天参与任务数。
+9. 更新任务基线为当前累计上传/下载和当前日期。
+10. 使用现有 `save_data` 保存 `daily_statistic` 和 `torrents`。
 
-The first check after upgrade only establishes baselines. It must not count each task's existing cumulative uploaded/downloaded amount as today's traffic.
+升级后的第一次检查只建立基线，不把存量任务已有的累计上传/下载算进今天。
 
-## History Display
+## 历史记录展示
 
-Update `get_page()` to include a daily traffic section above or near the existing torrent detail table.
+在 `get_page()` 插件数据页里增加“每日流量统计”区域，放在现有种子明细表上方或附近。
 
-The section should show:
+这个区域展示：
 
-- Today's uploaded amount.
-- Today's downloaded amount.
-- A table of recent daily records.
+- 今日上传量。
+- 今日下载量。
+- 最近每日历史记录表。
 
-Recommended first-version table columns:
+第一版历史表字段：
 
-- Date
-- Uploaded
-- Downloaded
-- Contributing tasks
-- Updated at
+- 日期
+- 上传量
+- 下载量
+- 参与任务数
+- 更新时间
 
-The first version should render the recent history directly in the data page instead of requiring an API endpoint. This follows the current plugin pattern, where `get_page()` returns Vuetify component JSON and `get_api()` is unused.
+第一版建议直接把历史表渲染在插件数据页里，不新增 API。原因是当前插件页面本来就是通过 `get_page()` 返回 Vuetify 组件 JSON，`get_api()` 目前没有使用。
 
-Sort history by date descending. Show a bounded recent list, such as the latest 30 records, to keep the page readable. Keep all persisted records unless a future retention setting is added.
+历史记录按日期倒序展示。页面上只展示最近 30 条左右，避免页面过长；持久化数据先全部保留，后续确实需要时再加“保留最近 N 天”的配置。
 
-If there are no daily records, show a compact empty state such as `暂无每日流量统计`.
+如果还没有每日统计数据，展示简短空状态：`暂无每日流量统计`。
 
-## Dashboard
+## 仪表盘
 
-The first version does not need to change `get_dashboard()`. The daily section in `get_page()` is enough to satisfy viewing today's amount and historical records.
+第一版不改 `get_dashboard()`。
 
-If a later iteration needs dashboard support, it can reuse the same `daily_statistic` data and add today's upload/download cards next to the existing total cards.
+数据页里的每日统计区域已经能满足“看今日数据”和“看历史记录”的需求。后续如果希望仪表盘也展示今日上传/下载，可以复用同一份 `daily_statistic` 数据，在现有总量卡片旁边加今日卡片。
 
-## Clear Data Behavior
+## 清除统计数据
 
-`__clear_tasks()` should clear the new `daily_statistic` data key together with existing plugin data:
+`__clear_tasks()` 需要同时清空新增的 `daily_statistic`。
+
+清除后以下数据都应为空：
 
 - `torrents`
 - `archived`
@@ -139,69 +145,69 @@ If a later iteration needs dashboard support, it can reuse the same `daily_stati
 - `statistic`
 - `daily_statistic`
 
-This keeps the existing "clear statistics" action semantically complete.
+这样“清除统计数据”的含义仍然完整。
 
-## Error Handling
+## 异常处理
 
-Invalid task counters should not break the `check()` flow.
+每日统计不能影响主 `check()` 流程。
 
-Rules:
+处理规则：
 
-- Missing or non-numeric uploaded/downloaded values: skip daily accounting for that task.
-- Negative deltas: refresh baseline and skip that task for the current check.
-- Malformed `daily_statistic`: treat it as empty and rebuild from future deltas.
-- Timezone failures: fall back to a plain local date and log a warning if useful.
+- 任务缺少上传/下载累计值，或值不是数字：跳过这个任务。
+- 增量为负数：刷新基线，跳过本轮统计，避免把每日统计减掉。
+- `daily_statistic` 数据格式损坏：当作空数据处理，后续从新增量重新统计。
+- 时区异常：回退到本地日期，必要时记录警告。
 
-## Implementation Units
+## 建议实现单元
 
-Keep the change inside `plugins.v2/brushflowlowfreq/__init__.py` unless tests reveal a need for helpers.
+第一版改动保持在 `plugins.v2/brushflowlowfreq/__init__.py` 内，除非测试时发现必须拆分。
 
-Suggested private methods:
+建议新增私有方法：
 
 - `__get_daily_statistic_info() -> Dict[str, dict]`
 - `__get_daily_stat_date(now: Optional[datetime] = None) -> str`
 - `__update_daily_transfer_statistics(torrent_tasks: Dict[str, dict]) -> None`
 - `__get_daily_transfer_elements() -> List[dict]`
 
-The statistic update method should be mostly pure accounting over dictionaries, so unit tests can call it directly through name-mangled access without needing a real downloader.
+每日统计更新方法尽量只处理字典数据，方便单元测试直接通过 name-mangled 私有方法调用，不依赖真实下载器。
 
-## Integration Points
+## 接入点
 
-1. New managed torrent tasks can omit baseline fields. The first `check()` initializes them.
-2. Existing managed tasks from older versions also initialize baselines on first check.
-3. `check()` calls `__update_daily_transfer_statistics(torrent_tasks)` after `__update_torrent_tasks_state(...)` and before final persistence.
-4. `get_page()` renders daily history from `daily_statistic`.
-5. `__clear_tasks()` clears `daily_statistic`.
+1. 新增任务可以不初始化每日统计基线，首次 `check()` 自动补齐。
+2. 老版本已有任务也在首次 `check()` 自动补齐基线。
+3. `check()` 在 `__update_torrent_tasks_state(...)` 之后调用 `__update_daily_transfer_statistics(torrent_tasks)`。
+4. `get_page()` 从 `daily_statistic` 渲染每日历史记录。
+5. `__clear_tasks()` 清空 `daily_statistic`。
 
-## Tests
+## 测试计划
 
-Add focused tests in `tests/test_brushflowlowfreq_features.py`:
+在 `tests/test_brushflowlowfreq_features.py` 增加聚焦测试：
 
-1. First daily accounting call initializes baselines and records no traffic.
-2. A later call on the same date records uploaded/downloaded deltas.
-3. Multiple tasks on the same date aggregate into one record.
-4. Negative uploaded/downloaded deltas refresh baselines and do not subtract from the daily record.
-5. A date change creates or updates the new date's record without importing all historical traffic.
-6. `__clear_tasks()` clears `daily_statistic`.
-7. `get_page()` includes the daily history section when records exist.
-8. `get_page()` shows a daily-statistic empty state when torrent task data exists but no daily records exist.
+1. 首次每日统计只建立基线，不记录流量。
+2. 同一天第二次统计能正确记录上传/下载增量。
+3. 多个任务同一天的增量能汇总到同一条每日记录。
+4. 上传/下载累计值回退时刷新基线，不产生负统计。
+5. 跨天时创建或更新新日期记录，不导入全部历史累计量。
+6. `__clear_tasks()` 会清空 `daily_statistic`。
+7. 有每日记录时，`get_page()` 包含每日历史统计区域。
+8. 有种子数据但还没有每日统计时，`get_page()` 展示每日统计空状态。
 
-## Risks and Tradeoffs
+## 风险和取舍
 
-| Risk | Mitigation |
+| 风险 | 处理方式 |
 | --- | --- |
-| First day after upgrade misses traffic before the first post-upgrade check | Expected and safer than overcounting old cumulative totals |
-| Transfer across midnight is assigned to the date of the next check | Acceptable for a 150-second check interval; exact midnight splitting is unnecessary for this plugin |
-| Downloader counter resets could lose one interval | Negative deltas are skipped to avoid corrupting daily totals |
-| History grows forever | Store compact daily records; add retention later only if needed |
-| UI becomes too dense | Show only recent records in the page while retaining all stored records |
+| 升级当天第一次检查前的流量不会被计入 | 接受这个取舍，比把历史累计量误算到今天更安全 |
+| 跨午夜两次检查之间的流量会计入下一天 | 检查间隔只有 150 秒左右，精确切午夜收益不大，先接受 |
+| 下载器计数回退会丢失一个检查间隔的统计 | 跳过异常增量，优先保证每日总量不被污染 |
+| 历史记录一直增长 | 每天一条数据，体积很小；后续需要时再加保留天数 |
+| 数据页内容变多 | 页面只展示最近 30 条，持久化仍保留完整历史 |
 
-## Acceptance Criteria
+## 验收标准
 
-- Daily statistics only include plugin-managed torrent tasks.
-- Existing cumulative totals continue to work as before.
-- First check after upgrade does not add old cumulative uploaded/downloaded values to today.
-- Same-day positive deltas are accumulated under the current local date.
-- Historical daily records are visible from the plugin data page.
-- Clearing plugin statistics clears daily history too.
-- Unit tests cover the core accounting and page rendering behavior.
+- 每日统计只包含插件托管刷流任务。
+- 现有总统计继续保持原有行为。
+- 升级后第一次检查不会把老任务累计上传/下载算进今天。
+- 同一天的正向增量会累加到当前日期。
+- 插件数据页可以看到每日历史记录。
+- 清除统计数据会同时清除每日历史。
+- 单元测试覆盖核心统计逻辑和页面渲染行为。
