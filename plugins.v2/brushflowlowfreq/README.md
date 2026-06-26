@@ -6,6 +6,11 @@
 
 ## 版本更新日志
 
+- v4.3.46
+  - 低分享率规则支持一次性判断后限速观察：达到检测时间后只判断一次分享率
+  - 分享率不达标时可降低单种下载速度，不再每轮重复用低分享率删种
+  - 检查间上传速度连续达到恢复阈值后自动恢复下载限速
+
 - v4.3.45
   - 新增每日上传量和下载量统计，只统计插件托管的刷流任务，不统计下载器里的其它任务
   - 插件数据页新增“每日流量统计”，可查看今日上传/下载量和最近历史记录
@@ -244,7 +249,10 @@
 | 是否筛选已做种？       | `filter_seeding_torrents` | 控制已完成/已做种任务是否参与全部删种规则 | 默认开启，保持原行为；关闭后已完成/已做种任务仅允许 `seed_time` 删除，其它删种规则跳过；未完成任务仍正常判断       |
 | 分享率                 | `seed_ratio`         | 达到设定分享率后删除任务             |                                                                                                                   |
 | 有下载数据后分钟数     | `seed_ratio_check_minutes` | 设置低分享率删除规则的计时阈值       | 示例：30，首次有下载数据后开始判断低分享率                                                                     |
-| 有下载数据后最低分享率 | `seed_ratio_min_30m` | 达到“任务添加后分钟数”后，低于设定值时删除任务 | 示例：0.5，任务添加30分钟后若分享率 < 0.5 则删除                                                                  |
+| 有下载数据后最低分享率 | `seed_ratio_min_30m` | 达到“任务添加后分钟数”后判断低分享率 | 默认低于设定值时删除任务；若配置“低分享率下载限速”，则只判断一次并改为限速观察                                    |
+| 低分享率下载限速（KB/s） | `seed_ratio_limit_download_kbs` | 低分享率一次性检测不达标后限制下载速度 | 默认 0（关闭）；开启后低分享率不再直接删种，恢复前也不重复判断分享率                                                |
+| 低分享率恢复上传阈值（KB/s） | `seed_ratio_limit_restore_upspeed_kbs` | 限速后检查间上传速度达到该值时计入恢复达标 | 默认 0，使用 `interval_upspeed` 作为恢复阈值；建议单独配置更清晰                                                   |
+| 低分享率恢复连续次数   | `seed_ratio_limit_restore_count` | 连续多少次检查间上传速度达标后恢复下载速度 | 默认 3；恢复时将下载限速恢复为 `dl_speed`，未配置 `dl_speed` 时恢复为 0                                             |
 | 失去免费即删种         | `delete_when_no_free` | 检测到种子已不免费或免费临期后立即删除 | 开启后会访问种子详情页校验免费状态；仅对原本免费加入的种子生效，校验失败时跳过不删                                  |
 | 免费临期删种阈值（分钟） | `delete_free_remaining_minutes` | 设置免费剩余不足多少分钟时删种       | 默认 5；仅在 `delete_when_no_free` 开启时生效；已失去免费按 0 分钟处理                                             |
 | 上传量（GB）           | `seed_size`          | 达到设定上传量后删除任务             |                                                                                                                   |
@@ -344,6 +352,9 @@
 - `include_second_page`：选种包含第二页
 - `skip_rules_downloading_threshold`：下载保护阈值
 - `seed_ratio_speed_protect`：分享率保护速度阈值（KB/s）
+- `seed_ratio_limit_download_kbs`：低分享率下载限速（KB/s）
+- `seed_ratio_limit_restore_upspeed_kbs`：低分享率恢复上传阈值（KB/s）
+- `seed_ratio_limit_restore_count`：低分享率恢复连续次数
 - `seed_ratio`：分享率
 - `seed_ratio_check_minutes`：有下载数据后分钟数
 - `seed_ratio_min_30m`：有下载数据后最低分享率
@@ -433,6 +444,9 @@
     "seed_ratio": "",
     "seed_ratio_check_minutes": 30,
     "seed_ratio_min_30m": "",
+    "seed_ratio_limit_download_kbs": 0,
+    "seed_ratio_limit_restore_upspeed_kbs": 0,
+    "seed_ratio_limit_restore_count": 3,
     "delete_when_no_free": false,
     "delete_free_remaining_minutes": 5,
     "seed_size": "",

@@ -510,6 +510,191 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(brush_config.yield_guard_rehearsal)
         self.assertFalse(brush_config.yield_guard_detail_log)
 
+    def test_low_ratio_limit_options_default_disabled_and_configurable(self):
+        default_config = self.module.BrushConfig({})
+        custom_config = self.module.BrushConfig({
+            "seed_ratio_limit_download_kbs": 256,
+            "seed_ratio_limit_restore_upspeed_kbs": 128,
+            "seed_ratio_limit_restore_count": 2,
+        })
+
+        self.assertEqual(0, default_config.seed_ratio_limit_download_kbs)
+        self.assertEqual(0, default_config.seed_ratio_limit_restore_upspeed_kbs)
+        self.assertEqual(3, default_config.seed_ratio_limit_restore_count)
+        self.assertEqual(256, custom_config.seed_ratio_limit_download_kbs)
+        self.assertEqual(128, custom_config.seed_ratio_limit_restore_upspeed_kbs)
+        self.assertEqual(2, custom_config.seed_ratio_limit_restore_count)
+
+    def test_low_ratio_once_limits_download_instead_of_deleting_when_configured(self):
+        plugin = self._new_qb_plugin({
+            "seed_ratio_check_minutes": 30,
+            "seed_ratio_min_30m": 0.5,
+            "seed_ratio_limit_download_kbs": 256,
+            "seed_ratio_limit_restore_upspeed_kbs": 100,
+            "seed_ratio_limit_restore_count": 2,
+            "interval_upspeed": "",
+        })
+        torrent_info = {
+            "seeding_time": 3600,
+            "ratio": 0.1,
+            "uploaded": 100,
+            "downloaded": 1000,
+            "total_size": 1000,
+            "dltime": 3600,
+            "avg_upspeed": 0,
+            "iatime": 0,
+        }
+        torrent_task = {
+            "site_name": "站点1",
+            "time": 0,
+            "first_downloaded_time": 1,
+            "first_uploaded_time": 1,
+            "hit_and_run": False,
+        }
+        original_get_task_elapsed_minutes = plugin._BrushFlowLowFreq__get_task_elapsed_minutes
+        plugin._BrushFlowLowFreq__get_task_elapsed_minutes = lambda value: 60
+        try:
+            should_delete, reason = plugin._BrushFlowLowFreq__evaluate_conditions_for_delete(
+                site_name="站点1",
+                torrent_info=torrent_info,
+                torrent_task=torrent_task,
+            )
+        finally:
+            plugin._BrushFlowLowFreq__get_task_elapsed_minutes = original_get_task_elapsed_minutes
+
+        self.assertFalse(should_delete, reason)
+        self.assertTrue(torrent_task.get("seed_ratio_once_checked"))
+        self.assertFalse(torrent_task.get("seed_ratio_once_passed"))
+        self.assertFalse(torrent_task.get("seed_ratio_limit_active"))
+        self.assertEqual("limit", torrent_task.get("seed_ratio_limit_pending_action"))
+        self.assertIn("低分享率", reason)
+
+    def test_low_ratio_limit_action_calls_qb_download_limit(self):
+        class FakeQbc:
+            def __init__(self):
+                self.download_limits = []
+
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
+                self.download_limits.append((torrent_hashes, limit))
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "seed_ratio_limit_download_kbs": 256,
+        }, downloader=downloader)
+        torrent_task = {
+            "seed_ratio_limit_active": True,
+            "seed_ratio_limit_pending_action": "limit",
+        }
+
+        applied = plugin._BrushFlowLowFreq__apply_seed_ratio_limit_action_for_task(
+            torrent_hash="abcdef",
+            torrent_task=torrent_task,
+            brush_config=plugin._brush_config,
+            site_name="站点1",
+            reason="低分享率一次性检测未达标",
+        )
+
+        self.assertTrue(applied)
+        self.assertEqual([(["abcdef"], 256 * 1024)], downloader.qbc.download_limits)
+        self.assertIsNone(torrent_task.get("seed_ratio_limit_pending_action"))
+
+    def test_low_ratio_limit_skips_when_yield_guard_runtime_stage_is_active(self):
+        plugin = self._new_qb_plugin({
+            "yield_guard_enabled": True,
+            "seed_ratio_check_minutes": 30,
+            "seed_ratio_min_30m": 0.5,
+            "seed_ratio_limit_download_kbs": 256,
+        })
+        torrent_info = {
+            "seeding_time": 3600,
+            "ratio": 0.1,
+            "uploaded": 100,
+            "downloaded": 1000,
+            "total_size": 1000,
+            "dltime": 3600,
+            "avg_upspeed": 0,
+            "iatime": 0,
+        }
+        torrent_task = {
+            "site_name": "站点1",
+            "first_downloaded_time": 1,
+            "first_uploaded_time": 1,
+            "yield_guard_evaluated_in_check": True,
+            "yield_guard_should_delete": False,
+            "yield_guard_good_protected": False,
+            "yield_guard_stage": "limited",
+            "yield_guard_last_reason": "上传收益保护：低收益，动作 limit",
+        }
+        original_get_task_elapsed_minutes = plugin._BrushFlowLowFreq__get_task_elapsed_minutes
+        plugin._BrushFlowLowFreq__get_task_elapsed_minutes = lambda value: 60
+        try:
+            should_delete, reason = plugin._BrushFlowLowFreq__evaluate_conditions_for_delete(
+                site_name="站点1",
+                torrent_info=torrent_info,
+                torrent_task=torrent_task,
+            )
+        finally:
+            plugin._BrushFlowLowFreq__get_task_elapsed_minutes = original_get_task_elapsed_minutes
+
+        self.assertFalse(should_delete, reason)
+        self.assertIsNone(torrent_task.get("seed_ratio_limit_pending_action"))
+        self.assertFalse(torrent_task.get("seed_ratio_limit_active"))
+        self.assertIn("上传收益保护", reason)
+
+    def test_low_ratio_pending_limit_does_not_evaluate_restore_before_action_applies(self):
+        plugin = self._new_qb_plugin({
+            "seed_ratio_limit_download_kbs": 256,
+            "seed_ratio_limit_restore_upspeed_kbs": 100,
+            "seed_ratio_limit_restore_count": 1,
+        })
+        torrent_task = {
+            "seed_ratio_limit_active": False,
+            "seed_ratio_limit_pending_action": "limit",
+            "last_check_interval_upspeed": 120 * 1024,
+            "last_check_interval_upspeed_valid": True,
+        }
+
+        restored, reason = plugin._BrushFlowLowFreq__evaluate_seed_ratio_limit_restore(
+            brush_config=plugin._brush_config,
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(restored, reason)
+        self.assertEqual("limit", torrent_task.get("seed_ratio_limit_pending_action"))
+        self.assertEqual([], torrent_task.get("seed_ratio_limit_restore_hit_records", []))
+
+    def test_low_ratio_limit_restores_after_consecutive_good_interval_uploads(self):
+        plugin = self._new_qb_plugin({
+            "seed_ratio_limit_download_kbs": 256,
+            "seed_ratio_limit_restore_upspeed_kbs": 100,
+            "seed_ratio_limit_restore_count": 2,
+        })
+        torrent_task = {
+            "seed_ratio_limit_active": True,
+            "seed_ratio_once_checked": True,
+            "seed_ratio_once_passed": False,
+            "last_check_interval_upspeed": 120 * 1024,
+            "last_check_interval_upspeed_valid": True,
+            "seed_ratio_limit_restore_hit_records": [1],
+        }
+
+        restored, reason = plugin._BrushFlowLowFreq__evaluate_seed_ratio_limit_restore(
+            brush_config=plugin._brush_config,
+            torrent_task=torrent_task,
+        )
+
+        self.assertTrue(restored, reason)
+        self.assertEqual([1, 1], torrent_task.get("seed_ratio_limit_restore_hit_records"))
+        self.assertEqual("restore_limit", torrent_task.get("seed_ratio_limit_pending_action"))
+        self.assertIn("连续达标 2/2 次", reason)
+
     def test_yield_guard_site_config_overrides_global_values(self):
         brush_config = self.module.BrushConfig({
             "yield_guard_enabled": True,

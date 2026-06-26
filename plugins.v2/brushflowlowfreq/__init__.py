@@ -95,6 +95,13 @@ class BrushConfig:
         self.include_second_page = config.get("include_second_page", False)
         self.skip_rules_downloading_threshold = self.__parse_number(config.get("skip_rules_downloading_threshold", 0)) or 0
         self.seed_ratio_speed_protect = self.__parse_number(config.get("seed_ratio_speed_protect", 0)) or 0
+        self.seed_ratio_limit_download_kbs = self.__parse_number(config.get("seed_ratio_limit_download_kbs", 0)) or 0
+        self.seed_ratio_limit_restore_upspeed_kbs = self.__parse_number(
+            config.get("seed_ratio_limit_restore_upspeed_kbs", 0)
+        ) or 0
+        self.seed_ratio_limit_restore_count = self.__parse_number(
+            config.get("seed_ratio_limit_restore_count", 3)
+        ) or 3
         self.yield_guard_enabled = config.get("yield_guard_enabled", False)
         self.yield_guard_high_download_kbs = self.__parse_number(config.get("yield_guard_high_download_kbs", 2048))
         self.yield_guard_low_upload_kbs = self.__parse_number(config.get("yield_guard_low_upload_kbs", 200))
@@ -212,6 +219,9 @@ class BrushConfig:
             "include_second_page",
             "skip_rules_downloading_threshold",
             "seed_ratio_speed_protect",
+            "seed_ratio_limit_download_kbs",
+            "seed_ratio_limit_restore_upspeed_kbs",
+            "seed_ratio_limit_restore_count",
             "yield_guard_enabled",
             "yield_guard_high_download_kbs",
             "yield_guard_low_upload_kbs",
@@ -326,6 +336,9 @@ class BrushConfig:
     "include_second_page": false,
     "skip_rules_downloading_threshold": 0,
     "seed_ratio_speed_protect": 0,
+    "seed_ratio_limit_download_kbs": 0,
+    "seed_ratio_limit_restore_upspeed_kbs": 0,
+    "seed_ratio_limit_restore_count": 3,
     "yield_guard_enabled": false,
     "yield_guard_high_download_kbs": 2048,
     "yield_guard_low_upload_kbs": 200,
@@ -428,7 +441,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.45"
+    plugin_version = "4.3.46"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1782,7 +1795,58 @@ class BrushFlowLowFreq(_PluginBase):
                                                         'props': {
                                                             'model': 'seed_ratio_min_30m',
                                                             'label': '任务添加后最低分享率',
-                                                            'placeholder': '达到上述分钟数后，低于时删除任务'
+                                                            'placeholder': '达到上述分钟数后，低于时删除任务；开启低分享率限速后改为限速观察'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_limit_download_kbs',
+                                                            'label': '低分享率下载限速（KB/s）',
+                                                            'placeholder': '如：256，分享率一次性检测不达标后限制下载，0=关闭'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_limit_restore_upspeed_kbs',
+                                                            'label': '低分享率恢复上传阈值（KB/s）',
+                                                            'placeholder': '如：100，检查间上传达到后计入恢复达标；0=使用检查间上传阈值'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_limit_restore_count',
+                                                            'label': '低分享率恢复连续次数',
+                                                            'placeholder': '如：3，连续达标后恢复下载速度'
                                                         }
                                                     }
                                                 ]
@@ -2872,6 +2936,9 @@ class BrushFlowLowFreq(_PluginBase):
             "interval_upspeed_rehearsal": False,
             "skip_rules_downloading_threshold": 0,
             "seed_ratio_speed_protect": 0,
+            "seed_ratio_limit_download_kbs": 0,
+            "seed_ratio_limit_restore_upspeed_kbs": 0,
+            "seed_ratio_limit_restore_count": 3,
             "yield_guard_enabled": False,
             "yield_guard_high_download_kbs": 2048,
             "yield_guard_low_upload_kbs": 200,
@@ -3308,6 +3375,15 @@ class BrushFlowLowFreq(_PluginBase):
                 "interval_upspeed_hit_records": [],
                 "first_downloaded_time": None,
                 "first_uploaded_time": None,
+                "seed_ratio_once_checked": False,
+                "seed_ratio_once_passed": None,
+                "seed_ratio_once_checked_at": None,
+                "seed_ratio_once_checked_ratio": None,
+                "seed_ratio_limit_active": False,
+                "seed_ratio_limit_pending_action": None,
+                "seed_ratio_limit_last_action_time": None,
+                "seed_ratio_limit_restore_hit_records": [],
+                "seed_ratio_limit_last_reason": "",
                 "deleted": False,
                 "time": time.time()
             }
@@ -3965,6 +4041,15 @@ class BrushFlowLowFreq(_PluginBase):
                                                                                             downloading_count=downloading_count) or []
                     need_delete_hashes.extend(not_proxy_delete_hashes)
 
+                seed_ratio_action_skip_hashes = set(
+                    self.__normalize_hash(hash_value) for hash_value in need_delete_hashes if hash_value
+                )
+                self.__apply_seed_ratio_limit_actions(
+                    torrents=check_torrents,
+                    torrent_tasks=torrent_tasks,
+                    skip_hashes=seed_ratio_action_skip_hashes
+                )
+
                 if need_delete_hashes:
                     need_delete_hashes = list(dict.fromkeys([hash_value for hash_value in need_delete_hashes if hash_value]))
                     # 如果是QB，则重新汇报Tracker
@@ -4207,6 +4292,41 @@ class BrushFlowLowFreq(_PluginBase):
                 f"待删除 {delete_count} 个，已记录/执行动作 {action_count} 个"
                 f"{'；样例：' + sample_text if sample_text else ''}"
             )
+
+    def __apply_seed_ratio_limit_actions(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
+                                         skip_hashes: Optional[Set[str]] = None) -> None:
+        """
+        执行低分享率一次性检测产生的下载限速/恢复动作。
+        """
+        if not torrents:
+            return
+
+        skip_hashes = skip_hashes or set()
+        action_count = 0
+        for torrent in torrents:
+            torrent_hash = self.__normalize_hash(self.__get_hash(torrent))
+            if not torrent_hash or torrent_hash in skip_hashes:
+                continue
+            torrent_task = torrent_tasks.get(torrent_hash)
+            if not torrent_task or torrent_task.get("deleted"):
+                continue
+            action = str(torrent_task.get("seed_ratio_limit_pending_action") or "").strip().lower()
+            if action not in {"limit", "restore_limit"}:
+                continue
+            site_name = torrent_task.get("site_name", "")
+            brush_config = self.__get_brush_config(sitename=site_name)
+            reason = torrent_task.get("seed_ratio_limit_last_reason") or "低分享率一次性检测动作"
+            if self.__apply_seed_ratio_limit_action_for_task(
+                    torrent_hash=torrent_hash,
+                    torrent_task=torrent_task,
+                    brush_config=brush_config,
+                    site_name=site_name,
+                    reason=reason):
+                action_count += 1
+                logger.info(f"站点：{site_name}，{reason}，已执行低分享率限速动作：{action}")
+
+        if action_count > 0:
+            logger.info(f"低分享率限速：本轮已执行动作 {action_count} 个")
 
     def __log_yield_guard_detail_if_enabled(self, site_name: str, brush_config: BrushConfig, torrent_hash: str,
                                             torrent_info: dict, torrent_task: dict, should_delete: bool,
@@ -4481,7 +4601,11 @@ class BrushFlowLowFreq(_PluginBase):
                 "last_check_interval_seconds", "last_check_interval_uploaded",
                 "last_check_interval_upspeed_valid", "last_check_interval_reason",
                 "interval_upspeed_hit_records", "first_downloaded_time",
-                "first_uploaded_time"
+                "first_uploaded_time", "seed_ratio_once_checked",
+                "seed_ratio_once_passed", "seed_ratio_once_checked_at",
+                "seed_ratio_once_checked_ratio", "seed_ratio_limit_active",
+                "seed_ratio_limit_pending_action", "seed_ratio_limit_last_action_time",
+                "seed_ratio_limit_restore_hit_records", "seed_ratio_limit_last_reason"
             }:
                 merged_task[key] = value
         return merged_task
@@ -5217,6 +5341,150 @@ class BrushFlowLowFreq(_PluginBase):
 
         return False, ""
 
+    @staticmethod
+    def __positive_float(value: Any, default_value: float = 0.0) -> float:
+        try:
+            if value in (None, ""):
+                return default_value
+            number = float(value)
+            return number if number > 0 else default_value
+        except (TypeError, ValueError):
+            return default_value
+
+    @staticmethod
+    def __positive_int(value: Any, default_value: int = 1) -> int:
+        try:
+            if value in (None, ""):
+                return default_value
+            return max(1, int(float(value)))
+        except (TypeError, ValueError):
+            return default_value
+
+    def __is_seed_ratio_limit_enabled(self, brush_config: BrushConfig) -> bool:
+        return self.__positive_float(getattr(brush_config, "seed_ratio_limit_download_kbs", 0), 0.0) > 0
+
+    def __seed_ratio_limit_restore_threshold_kbs(self, brush_config: BrushConfig) -> float:
+        threshold = self.__positive_float(getattr(brush_config, "seed_ratio_limit_restore_upspeed_kbs", 0), 0.0)
+        if threshold > 0:
+            return threshold
+        return self.__positive_float(getattr(brush_config, "interval_upspeed", 0), 0.0)
+
+    def __mark_seed_ratio_once_result(self, torrent_task: dict, passed: bool, ratio: Optional[float]) -> None:
+        torrent_task["seed_ratio_once_checked"] = True
+        torrent_task["seed_ratio_once_passed"] = bool(passed)
+        torrent_task["seed_ratio_once_checked_at"] = time.time()
+        torrent_task["seed_ratio_once_checked_ratio"] = ratio
+
+    def __evaluate_seed_ratio_limit_restore(self, brush_config: BrushConfig, torrent_task: dict) -> Tuple[bool, str]:
+        """
+        低分享率限速后，检查本轮上传速度是否连续达到恢复阈值。
+        """
+        if not torrent_task.get("seed_ratio_limit_active"):
+            return False, ""
+
+        threshold_kb = self.__seed_ratio_limit_restore_threshold_kbs(brush_config=brush_config)
+        if threshold_kb <= 0:
+            return False, "低分享率限速观察中，未配置恢复上传阈值"
+
+        required_count = self.__positive_int(getattr(brush_config, "seed_ratio_limit_restore_count", 3), 3)
+        if not torrent_task.get("last_check_interval_upspeed_valid"):
+            reason = torrent_task.get("last_check_interval_reason") or "采样尚未就绪"
+            return False, f"低分享率限速观察中，检查间上传速度：{reason}"
+
+        interval_speed = torrent_task.get("last_check_interval_upspeed")
+        if not isinstance(interval_speed, (int, float)):
+            return False, "低分享率限速观察中，检查间上传速度采样异常"
+
+        is_good_speed = interval_speed >= threshold_kb * 1024
+        records = torrent_task.get("seed_ratio_limit_restore_hit_records")
+        if not isinstance(records, list):
+            records = []
+        records = [1 if bool(record) else 0 for record in records if isinstance(record, (int, float, bool))]
+        records.append(1 if is_good_speed else 0)
+        max_keep = max(required_count, 20)
+        if len(records) > max_keep:
+            records = records[-max_keep:]
+        torrent_task["seed_ratio_limit_restore_hit_records"] = records
+
+        consecutive_hit_count = 0
+        for record in reversed(records):
+            if record == 1:
+                consecutive_hit_count += 1
+            else:
+                break
+
+        if consecutive_hit_count >= required_count:
+            reason = (f"低分享率限速后检查间上传速度 {interval_speed / 1024:.1f} KB/s，"
+                      f"达到恢复阈值 {threshold_kb:.1f} KB/s，连续达标 "
+                      f"{consecutive_hit_count}/{required_count} 次，恢复下载速度")
+            torrent_task["seed_ratio_limit_pending_action"] = "restore_limit"
+            torrent_task["seed_ratio_limit_last_reason"] = reason
+            return True, reason
+
+        reason = (f"低分享率限速观察中，检查间上传速度 {interval_speed / 1024:.1f} KB/s，"
+                  f"恢复阈值 {threshold_kb:.1f} KB/s，连续达标 "
+                  f"{consecutive_hit_count}/{required_count} 次")
+        torrent_task["seed_ratio_limit_last_reason"] = reason
+        return False, reason
+
+    def __evaluate_seed_ratio_once_limit(self, brush_config: BrushConfig, torrent_task: dict,
+                                         ratio: Optional[float], downloaded_elapsed_minutes: Optional[float],
+                                         ratio_check_minutes: float, download_protection_active: bool,
+                                         yield_guard_good_protected: bool, speed_protection_active: bool) \
+            -> Tuple[bool, str]:
+        """
+        低分享率限速模式：达到时间后只判断一次分享率，失败后进入下载限速观察。
+        """
+        if not (brush_config.seed_ratio_min_30m and self.__is_seed_ratio_limit_enabled(brush_config)):
+            return False, ""
+
+        if download_protection_active:
+            return False, "下载保护已跳过最低分享率一次性判断"
+        if yield_guard_good_protected:
+            return False, torrent_task.get("yield_guard_last_reason") or "上传收益保护已跳过最低分享率一次性判断"
+
+        if torrent_task.get("seed_ratio_limit_active"):
+            _, restore_reason = self.__evaluate_seed_ratio_limit_restore(
+                brush_config=brush_config,
+                torrent_task=torrent_task
+            )
+            return False, restore_reason
+
+        if torrent_task.get("seed_ratio_once_checked"):
+            return False, "最低分享率已完成一次性判断，后续不再重复判断"
+
+        if downloaded_elapsed_minutes is None or downloaded_elapsed_minutes < float(ratio_check_minutes):
+            return False, ""
+
+        if speed_protection_active:
+            self.__mark_seed_ratio_once_result(torrent_task=torrent_task, passed=True, ratio=ratio)
+            reason = "分享率一次性检测时平均上传速度已达到保护阈值，视为通过"
+            torrent_task["seed_ratio_limit_last_reason"] = reason
+            return False, reason
+
+        try:
+            min_ratio = float(brush_config.seed_ratio_min_30m)
+        except (TypeError, ValueError):
+            return False, "最低分享率配置无效，已跳过一次性判断"
+
+        if ratio is None:
+            return False, "分享率为空，已跳过最低分享率一次性判断"
+
+        ratio_value = float(ratio)
+        if ratio_value >= min_ratio:
+            self.__mark_seed_ratio_once_result(torrent_task=torrent_task, passed=True, ratio=ratio_value)
+            reason = f"分享率一次性检测通过：分享率 {ratio_value:.2f}，不低于 {min_ratio}"
+            torrent_task["seed_ratio_limit_last_reason"] = reason
+            return False, reason
+
+        self.__mark_seed_ratio_once_result(torrent_task=torrent_task, passed=False, ratio=ratio_value)
+        torrent_task["seed_ratio_limit_pending_action"] = "limit"
+        torrent_task["seed_ratio_limit_restore_hit_records"] = []
+        reason = (f"低分享率一次性检测未达标：有下载数据 {downloaded_elapsed_minutes:.0f} 分钟后"
+                  f"分享率 {ratio_value:.2f}，低于 {min_ratio}，限制下载速度")
+        torrent_task["seed_ratio_limit_last_reason"] = reason
+        return False, reason
+
     def __evaluate_conditions_for_delete(self, site_name: str, torrent_info: dict, torrent_task: dict,
                                           downloading_count: int = 0) \
             -> Tuple[bool, str]:
@@ -5288,15 +5556,43 @@ class BrushFlowLowFreq(_PluginBase):
             avg_upspeed_kb = float(torrent_info.get("avg_upspeed")) / 1024
             if avg_upspeed_kb >= float(brush_config.seed_ratio_speed_protect):
                 speed_protection_active = True
+
+        seed_ratio_limit_enabled = self.__is_seed_ratio_limit_enabled(brush_config=brush_config)
+        yield_guard_runtime_active = (
+                brush_config.yield_guard_enabled
+                and not yield_guard_good_protected
+                and str(torrent_task.get("yield_guard_stage") or "normal") != "normal"
+        )
+        if yield_guard_runtime_active:
+            seed_ratio_limit_reason = (
+                    torrent_task.get("yield_guard_last_reason")
+                    or "上传收益保护限速/暂停中，已跳过低分享率限速动作"
+            )
+        else:
+            _, seed_ratio_limit_reason = self.__evaluate_seed_ratio_once_limit(
+                brush_config=brush_config,
+                torrent_task=torrent_task,
+                ratio=ratio,
+                downloaded_elapsed_minutes=downloaded_elapsed_minutes,
+                ratio_check_minutes=float(ratio_check_minutes),
+                download_protection_active=download_protection_active,
+                yield_guard_good_protected=yield_guard_good_protected,
+                speed_protection_active=speed_protection_active
+            )
+        seed_ratio_limit_active = bool(torrent_task.get("seed_ratio_limit_active"))
         interval_should_delete, interval_reason = self.__evaluate_interval_upspeed_condition_for_delete(
             site_name=site_name,
             brush_config=brush_config,
             torrent_task=torrent_task,
-            task_elapsed_minutes=uploaded_elapsed_minutes if not download_protection_active else 0
+            task_elapsed_minutes=uploaded_elapsed_minutes
+            if not download_protection_active and not seed_ratio_limit_active else 0
         )
         if download_protection_active:
             interval_should_delete = False
             interval_reason = "下载保护已跳过检查间上传速度规则"
+        if seed_ratio_limit_active:
+            interval_should_delete = False
+            interval_reason = seed_ratio_limit_reason or "低分享率限速观察中，已跳过检查间低速删种规则"
 
         reason = "未能满足设置的删除条件"
 
@@ -5314,6 +5610,7 @@ class BrushFlowLowFreq(_PluginBase):
             if brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
                 return True, f"H&R种子，分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
             if (brush_config.seed_ratio_min_30m and not download_protection_active
+                    and not seed_ratio_limit_enabled
                     and not yield_guard_good_protected
                     and not speed_protection_active
                     and downloaded_elapsed_minutes is not None
@@ -5321,6 +5618,8 @@ class BrushFlowLowFreq(_PluginBase):
                     and ratio is not None and ratio < float(brush_config.seed_ratio_min_30m)):
                 return True, (f"H&R种子，有下载数据 {downloaded_elapsed_minutes:.0f} 分钟后分享率 {ratio:.2f}，"
                               f"低于 {brush_config.seed_ratio_min_30m}")
+            if seed_ratio_limit_reason:
+                return False, seed_ratio_limit_reason
             return False, "H&R种子，未能满足设置的H&R删除条件"
 
         # 处理其他场景，1. 不是H&R种子；2. 是H&R种子但没有特定条件配置
@@ -5330,6 +5629,7 @@ class BrushFlowLowFreq(_PluginBase):
         elif brush_config.seed_ratio and ratio is not None and ratio >= float(brush_config.seed_ratio):
             reason = f"分享率 {ratio:.2f}，大于 {brush_config.seed_ratio}"
         elif (brush_config.seed_ratio_min_30m and not download_protection_active
+              and not seed_ratio_limit_enabled
               and not yield_guard_good_protected
               and not speed_protection_active
               and downloaded_elapsed_minutes is not None
@@ -5356,6 +5656,8 @@ class BrushFlowLowFreq(_PluginBase):
                 return False, torrent_task.get("yield_guard_last_reason") or "上传收益保护已跳过易误伤删种规则"
             if yield_guard_reason:
                 return False, yield_guard_reason
+            if seed_ratio_limit_reason:
+                return False, seed_ratio_limit_reason
             return False, interval_reason if interval_reason else reason
 
         return True, reason if not hit_and_run else "H&R种子（未设置H&R条件），" + reason
@@ -6093,6 +6395,15 @@ class BrushFlowLowFreq(_PluginBase):
             "interval_upspeed_hit_records": [],
             "first_downloaded_time": None,
             "first_uploaded_time": None,
+            "seed_ratio_once_checked": False,
+            "seed_ratio_once_passed": None,
+            "seed_ratio_once_checked_at": None,
+            "seed_ratio_once_checked_ratio": None,
+            "seed_ratio_limit_active": False,
+            "seed_ratio_limit_pending_action": None,
+            "seed_ratio_limit_last_action_time": None,
+            "seed_ratio_limit_restore_hit_records": [],
+            "seed_ratio_limit_last_reason": "",
             "deleted": False,
             "time": torrent_info.get("add_on", time.time())
         }
@@ -6495,6 +6806,9 @@ class BrushFlowLowFreq(_PluginBase):
             "interval_upspeed_start_minutes": "有上传数据后开始低速统计分钟数",
             "skip_rules_downloading_threshold": "下载保护阈值",
             "seed_ratio_speed_protect": "分享率保护速度阈值",
+            "seed_ratio_limit_download_kbs": "低分享率下载限速",
+            "seed_ratio_limit_restore_upspeed_kbs": "低分享率恢复上传阈值",
+            "seed_ratio_limit_restore_count": "低分享率恢复连续达标次数",
             "seed_inactivetime": "未活动时间",
             "up_speed": "单任务上传限速",
             "dl_speed": "单任务下载限速",
@@ -6637,6 +6951,9 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_ratio_check_minutes": brush_config.seed_ratio_check_minutes,
             "skip_rules_downloading_threshold": brush_config.skip_rules_downloading_threshold,
             "seed_ratio_speed_protect": brush_config.seed_ratio_speed_protect,
+            "seed_ratio_limit_download_kbs": brush_config.seed_ratio_limit_download_kbs,
+            "seed_ratio_limit_restore_upspeed_kbs": brush_config.seed_ratio_limit_restore_upspeed_kbs,
+            "seed_ratio_limit_restore_count": brush_config.seed_ratio_limit_restore_count,
             "yield_guard_enabled": brush_config.yield_guard_enabled,
             "yield_guard_high_download_kbs": brush_config.yield_guard_high_download_kbs,
             "yield_guard_low_upload_kbs": brush_config.yield_guard_low_upload_kbs,
@@ -7021,6 +7338,78 @@ class BrushFlowLowFreq(_PluginBase):
         except Exception as err:
             logger.error(f"上传收益保护执行 qB 动作失败，hash={torrent_hash}，动作={action}，错误：{err}")
         return False
+
+    def __apply_qb_seed_ratio_limit_action(self, torrent_hash: str, action: str, brush_config: BrushConfig,
+                                           site_name: str = "", reason: str = "") -> bool:
+        """
+        执行低分享率限速/恢复下载限速动作。
+        """
+        if not torrent_hash:
+            return False
+        action = str(action or "").strip().lower()
+        if action not in {"limit", "restore_limit"}:
+            return False
+
+        downloader = self.downloader
+        if not downloader:
+            return False
+
+        if action == "limit":
+            download_limit = int(self.__positive_float(
+                getattr(brush_config, "seed_ratio_limit_download_kbs", 0), 0.0
+            ) * 1024)
+            if download_limit <= 0:
+                return False
+        else:
+            download_limit = int(self.__positive_float(getattr(brush_config, "dl_speed", 0), 0.0) * 1024)
+
+        try:
+            if getattr(downloader, "qbc", None) and hasattr(downloader.qbc, "torrents_set_download_limit"):
+                downloader.qbc.torrents_set_download_limit(
+                    limit=download_limit,
+                    torrent_hashes=[torrent_hash]
+                )
+                return True
+            if hasattr(downloader, "change_torrent"):
+                downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)
+                return True
+        except Exception as err:
+            logger.error(
+                f"低分享率限速执行 qB 动作失败，站点：{site_name}，hash={torrent_hash}，"
+                f"动作={action}，原因={reason}，错误：{err}"
+            )
+        return False
+
+    def __apply_seed_ratio_limit_action_for_task(self, torrent_hash: str, torrent_task: dict,
+                                                 brush_config: BrushConfig, site_name: str = "",
+                                                 reason: str = "") -> bool:
+        """
+        处理低分享率限速动作的任务状态。
+        """
+        if not torrent_hash or not torrent_task:
+            return False
+        action = str(torrent_task.get("seed_ratio_limit_pending_action") or "").strip().lower()
+        if action not in {"limit", "restore_limit"}:
+            return False
+
+        handled = self.__apply_qb_seed_ratio_limit_action(
+            torrent_hash=torrent_hash,
+            action=action,
+            brush_config=brush_config,
+            site_name=site_name,
+            reason=reason
+        )
+        if not handled:
+            return False
+
+        torrent_task["seed_ratio_limit_last_action_time"] = time.time()
+        torrent_task.pop("seed_ratio_limit_pending_action", None)
+        if action == "limit":
+            torrent_task["seed_ratio_limit_active"] = True
+        elif action == "restore_limit":
+            torrent_task["seed_ratio_limit_active"] = False
+            torrent_task["seed_ratio_limit_restore_hit_records"] = []
+        return True
 
     def __apply_yield_guard_action_for_task(self, torrent_hash: str, torrent_task: dict, action: str,
                                             brush_config: BrushConfig, site_name: str = "",
