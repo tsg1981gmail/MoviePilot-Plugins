@@ -301,9 +301,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(should_delete, reason)
         self.assertIn("已不免费", reason)
 
-    def test_completed_torrents_only_use_seed_time_even_when_filter_seeding_torrents_on(self):
+    def test_completed_torrents_use_legacy_434_ratio_delete_rule(self):
         plugin = self._new_plugin({
-            "filter_seeding_torrents": True,
             "seed_ratio": 1.0,
         })
         torrent_info = {
@@ -323,18 +322,17 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             torrent_task={"site_name": "站点1", "time": 0},
         )
 
-        self.assertFalse(should_delete, reason)
-        self.assertIn("已做种", reason)
+        self.assertTrue(should_delete, reason)
+        self.assertIn("分享率", reason)
 
-    def test_filter_seeding_torrents_off_only_seed_time_for_seeding_torrents(self):
+    def test_completed_torrents_use_legacy_434_upload_size_delete_rule(self):
         plugin = self._new_plugin({
-            "filter_seeding_torrents": False,
-            "seed_ratio": 1.0,
+            "seed_size": 1,
         })
         torrent_info = {
             "seeding_time": 3600,
-            "ratio": 2.0,
-            "uploaded": 0,
+            "ratio": 0,
+            "uploaded": 2 * 1024 ** 3,
             "downloaded": 100,
             "total_size": 100,
             "dltime": 0,
@@ -348,12 +346,11 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             torrent_task={"site_name": "站点1", "time": 0},
         )
 
-        self.assertFalse(should_delete, reason)
-        self.assertIn("已做种", reason)
+        self.assertTrue(should_delete, reason)
+        self.assertIn("上传量", reason)
 
-    def test_filter_seeding_torrents_off_skips_no_free_delete_for_seeding_torrents(self):
+    def test_no_free_delete_is_not_part_of_legacy_434_common_delete_flow(self):
         plugin = self._new_plugin({
-            "filter_seeding_torrents": False,
             "delete_when_no_free": True,
             "delete_free_remaining_minutes": 5,
         })
@@ -380,11 +377,10 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         )
 
         self.assertFalse(should_delete, reason)
-        self.assertIn("已做种", reason)
+        self.assertEqual("未能满足设置的删除条件", reason)
 
-    def test_filter_seeding_torrents_off_allows_seed_time_for_seeding_torrents(self):
+    def test_legacy_434_allows_seed_time_for_seeding_torrents(self):
         plugin = self._new_plugin({
-            "filter_seeding_torrents": False,
             "seed_time": 1,
             "seed_ratio": 1.0,
         })
@@ -408,9 +404,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(should_delete, reason)
         self.assertIn("做种时间", reason)
 
-    def test_filter_seeding_torrents_off_keeps_download_timeout_for_incomplete_torrents(self):
+    def test_legacy_434_keeps_download_timeout_for_incomplete_torrents(self):
         plugin = self._new_plugin({
-            "filter_seeding_torrents": False,
             "download_time": 1,
         })
         torrent_info = {
@@ -433,7 +428,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(should_delete, reason)
         self.assertIn("下载耗时", reason)
 
-    def test_downloading_torrent_ignores_upload_related_delete_rules(self):
+    def test_downloading_torrent_uses_legacy_434_delete_rules_without_upload_protection_overlap(self):
         plugin = self._new_plugin({
             "seed_time": 1,
             "seed_size": 1,
@@ -457,8 +452,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             torrent_task={"site_name": "站点1", "time": 0, "hit_and_run": False},
         )
 
-        self.assertFalse(should_delete, reason)
-        self.assertEqual("未能满足设置的删除条件", reason)
+        self.assertTrue(should_delete, reason)
+        self.assertIn("上传量", reason)
 
     def test_hash_normalization_prevents_case_sensitive_missing_detection(self):
         plugin = self._new_qb_plugin()
@@ -552,7 +547,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(128, custom_config.seed_ratio_limit_restore_upspeed_kbs)
         self.assertEqual(2, custom_config.seed_ratio_limit_restore_count)
 
-    def test_completed_torrent_ignores_low_ratio_limit_when_completed(self):
+    def test_completed_torrent_uses_legacy_434_min_ratio_rule_and_ignores_low_ratio_limit(self):
         plugin = self._new_qb_plugin({
             "seed_ratio_check_minutes": 30,
             "seed_ratio_min_30m": 0.5,
@@ -589,8 +584,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             plugin._BrushFlowLowFreq__get_task_elapsed_minutes = original_get_task_elapsed_minutes
 
-        self.assertFalse(should_delete, reason)
-        self.assertIn("已做种", reason)
+        self.assertTrue(should_delete, reason)
+        self.assertIn("做种30分钟后分享率", reason)
         self.assertIsNone(torrent_task.get("seed_ratio_once_checked"))
         self.assertIsNone(torrent_task.get("seed_ratio_limit_pending_action"))
 
@@ -630,7 +625,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual([(["abcdef"], 256 * 1024)], downloader.qbc.download_limits)
         self.assertIsNone(torrent_task.get("seed_ratio_limit_pending_action"))
 
-    def test_completed_torrent_ignores_stale_yield_guard_runtime_stage(self):
+    def test_completed_torrent_uses_legacy_434_rule_and_ignores_stale_yield_guard_runtime_stage(self):
         plugin = self._new_qb_plugin({
             "yield_guard_enabled": True,
             "seed_ratio_check_minutes": 30,
@@ -668,10 +663,10 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             plugin._BrushFlowLowFreq__get_task_elapsed_minutes = original_get_task_elapsed_minutes
 
-        self.assertFalse(should_delete, reason)
+        self.assertTrue(should_delete, reason)
         self.assertIsNone(torrent_task.get("seed_ratio_limit_pending_action"))
         self.assertFalse(torrent_task.get("seed_ratio_limit_active"))
-        self.assertIn("已做种", reason)
+        self.assertIn("做种30分钟后分享率", reason)
 
     def test_low_ratio_pending_limit_does_not_evaluate_restore_before_action_applies(self):
         plugin = self._new_qb_plugin({
@@ -1151,8 +1146,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             plugin._BrushFlowLowFreq__get_task_elapsed_minutes = original_get_task_elapsed_minutes
 
-        self.assertFalse(should_delete, reason)
-        self.assertIn("已做种", reason)
+        self.assertTrue(should_delete, reason)
+        self.assertIn("做种30分钟后分享率", reason)
         self.assertFalse(torrent_task.get("yield_guard_good_protected"))
 
     def test_yield_guard_good_protected_resets_limited_stage_and_marks_limit_restore(self):
@@ -3911,6 +3906,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "upload_protection_no_upload_checks",
             "upload_protection_min_elapsed_minutes",
             "upload_protection_min_downloaded_gb",
+            "upload_protection_skip_when_downloading_le",
         }
         self.assertTrue(expected_models.issubset(models), expected_models - models)
 
@@ -4066,6 +4062,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(10, default_config.upload_protection_min_elapsed_minutes)
         self.assertEqual(0, default_config.upload_protection_min_downloaded_gb)
         self.assertFalse(default_config.upload_protection_detail_log)
+        self.assertEqual(0, default_config.upload_protection_skip_when_downloading_le)
         self.assertTrue(custom_config.upload_protection_enabled)
         self.assertEqual(120, custom_config.upload_protection_low_upspeed_kbs)
         self.assertEqual(180, custom_config.upload_protection_good_upspeed_kbs)
@@ -4079,13 +4076,15 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "upload_protection_good_upspeed_kbs": 180,
             "upload_protection_download_limit_kbs": 512,
             "upload_protection_min_elapsed_minutes": 10,
+            "upload_protection_skip_when_downloading_le": 0,
             "site_config": (
                 '[{"sitename": "站点1", '
                 '"upload_protection_enabled": true, '
                 '"upload_protection_low_upspeed_kbs": 90, '
                 '"upload_protection_good_upspeed_kbs": 220, '
                 '"upload_protection_download_limit_kbs": 384, '
-                '"upload_protection_min_elapsed_minutes": 0}]'
+                '"upload_protection_min_elapsed_minutes": 0, '
+                '"upload_protection_skip_when_downloading_le": 2}]'
             ),
         })
 
@@ -4098,20 +4097,27 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(220, site_config.upload_protection_good_upspeed_kbs)
         self.assertEqual(384, site_config.upload_protection_download_limit_kbs)
         self.assertEqual(0, site_config.upload_protection_min_elapsed_minutes)
+        self.assertEqual(2, site_config.upload_protection_skip_when_downloading_le)
 
-    def test_site_config_ignores_removed_upload_strategy_fields(self):
+    def test_site_config_allows_legacy_434_delete_fields_but_ignores_removed_delete_and_upload_strategy_fields(self):
         brush_config = self.module.BrushConfig({
             "enable_site_config": True,
+            "seed_ratio_check_minutes": 30,
             "seed_size": 10,
             "seed_avgspeed": 20,
+            "seed_inactivetime": 30,
             "filter_seeding_torrents": True,
+            "delete_when_no_free": False,
             "yield_guard_enabled": False,
             "upload_protection_enabled": False,
             "site_config": (
                 '[{"sitename": "站点1", '
+                '"seed_ratio_check_minutes": 5, '
                 '"seed_size": 99, '
                 '"seed_avgspeed": 88, '
+                '"seed_inactivetime": 77, '
                 '"filter_seeding_torrents": false, '
+                '"delete_when_no_free": true, '
                 '"yield_guard_enabled": true, '
                 '"upload_protection_enabled": true}]'
             ),
@@ -4119,9 +4125,12 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         site_config = brush_config.get_site_config("站点1")
 
-        self.assertEqual(10, site_config.seed_size)
-        self.assertEqual(20, site_config.seed_avgspeed)
+        self.assertEqual(99, site_config.seed_size)
+        self.assertEqual(88, site_config.seed_avgspeed)
+        self.assertEqual(77, site_config.seed_inactivetime)
+        self.assertEqual(30, site_config.seed_ratio_check_minutes)
         self.assertTrue(site_config.filter_seeding_torrents)
+        self.assertFalse(site_config.delete_when_no_free)
         self.assertFalse(site_config.yield_guard_enabled)
         self.assertTrue(site_config.upload_protection_enabled)
 
@@ -4131,10 +4140,16 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "upload_protection_rehearsal": True,
             "upload_protection_low_upspeed_kbs": 120,
             "upload_protection_download_limit_kbs": 400,
+            "upload_protection_skip_when_downloading_le": 2,
+            "seed_ratio_check_minutes": 30,
+            "filter_seeding_torrents": False,
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
             "yield_guard_enabled": True,
             "interval_upspeed": 150,
             "seed_ratio_limit_download_kbs": 256,
             "skip_rules_downloading_threshold": 1,
+            "seed_size": 10,
         })
         captured = []
         plugin.update_config = lambda config: captured.append(config)
@@ -4146,6 +4161,12 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(config.get("upload_protection_rehearsal"))
         self.assertEqual(120, config.get("upload_protection_low_upspeed_kbs"))
         self.assertEqual(400, config.get("upload_protection_download_limit_kbs"))
+        self.assertEqual(2, config.get("upload_protection_skip_when_downloading_le"))
+        self.assertEqual(10, config.get("seed_size"))
+        self.assertNotIn("seed_ratio_check_minutes", config)
+        self.assertNotIn("filter_seeding_torrents", config)
+        self.assertNotIn("delete_when_no_free", config)
+        self.assertNotIn("delete_free_remaining_minutes", config)
         self.assertNotIn("yield_guard_enabled", config)
         self.assertNotIn("interval_upspeed", config)
         self.assertNotIn("seed_ratio_limit_download_kbs", config)
@@ -4189,6 +4210,10 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         models = collect_models(form)
         removed_models = {
+            "seed_ratio_check_minutes",
+            "filter_seeding_torrents",
+            "delete_when_no_free",
+            "delete_free_remaining_minutes",
             "interval_upspeed",
             "interval_upspeed_check_count",
             "interval_upspeed_low_count",
@@ -4196,19 +4221,32 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "interval_upspeed_continuous",
             "interval_upspeed_rehearsal",
             "skip_rules_downloading_threshold",
-            "seed_ratio_min_30m",
             "seed_ratio_speed_protect",
             "seed_ratio_limit_download_kbs",
             "seed_ratio_limit_restore_upspeed_kbs",
             "seed_ratio_limit_restore_count",
             "yield_guard_enabled",
         }
+        legacy_434_delete_models = {
+            "seed_time",
+            "hr_seed_time",
+            "seed_ratio",
+            "seed_ratio_min_30m",
+            "seed_size",
+            "download_time",
+            "seed_avgspeed",
+            "seed_inactivetime",
+            "delete_except_tags",
+        }
 
         self.assertIn("上传保护", collect_texts(form))
         self.assertIn("upload_protection_enabled", models)
         self.assertIn("upload_protection_download_limit_kbs", models)
+        self.assertIn("upload_protection_skip_when_downloading_le", models)
         self.assertEqual(False, defaults.get("upload_protection_enabled"))
         self.assertEqual(512, defaults.get("upload_protection_download_limit_kbs"))
+        self.assertEqual(0, defaults.get("upload_protection_skip_when_downloading_le"))
+        self.assertTrue(legacy_434_delete_models.issubset(models), legacy_434_delete_models - models)
         self.assertTrue(removed_models.isdisjoint(models), removed_models & models)
 
     def test_get_form_delete_tab_hides_legacy_upload_delete_models(self):
@@ -4238,24 +4276,26 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "seed_time",
             "hr_seed_time",
             "download_time",
-            "delete_when_no_free",
-            "delete_free_remaining_minutes",
             "delete_size_range",
             "delete_except_tags",
             "proxy_delete",
         }
-        legacy_upload_delete_models = {
+        legacy_434_delete_models = {
             "seed_ratio",
-            "seed_ratio_check_minutes",
             "seed_ratio_min_30m",
+            "seed_size",
+            "seed_avgspeed",
+            "seed_inactivetime",
+        }
+        removed_upload_strategy_models = {
+            "seed_ratio_check_minutes",
+            "filter_seeding_torrents",
+            "delete_when_no_free",
+            "delete_free_remaining_minutes",
             "seed_ratio_speed_protect",
             "seed_ratio_limit_download_kbs",
             "seed_ratio_limit_restore_upspeed_kbs",
             "seed_ratio_limit_restore_count",
-            "filter_seeding_torrents",
-            "seed_size",
-            "seed_avgspeed",
-            "seed_inactivetime",
             "interval_upspeed",
             "interval_upspeed_check_count",
             "interval_upspeed_low_count",
@@ -4266,7 +4306,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         }
 
         self.assertTrue(retained_delete_models.issubset(models))
-        self.assertTrue(legacy_upload_delete_models.isdisjoint(models), legacy_upload_delete_models & models)
+        self.assertTrue(legacy_434_delete_models.issubset(models), legacy_434_delete_models - models)
+        self.assertTrue(removed_upload_strategy_models.isdisjoint(models),
+                        removed_upload_strategy_models & models)
 
     def test_get_page_download_dashboard_splits_downloading_and_today_completed(self):
         now = datetime.now()
@@ -4328,6 +4370,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     "avg_upspeed": 2048,
                     "upload_protection_stage": "released",
                     "upload_protection_last_reason": "上传保护：完全放开下载限速",
+                    "deleted": True,
                 },
                 "old_completed": {
                     "site_name": "站点1",
@@ -4356,6 +4399,12 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     value = node.get(key)
                     if value is not None:
                         texts.append(str(value))
+                props = node.get("props")
+                if isinstance(props, dict):
+                    for key in ("label", "title"):
+                        value = props.get(key)
+                        if value is not None:
+                            texts.append(str(value))
                 content = node.get("content")
                 if isinstance(content, list):
                     for child in content:
@@ -4365,7 +4414,38 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     texts.append(collect_text(child))
             return "\n".join(texts)
 
+        def collect_components(node):
+            components = []
+            if isinstance(node, dict):
+                component = node.get("component")
+                if component:
+                    components.append(component)
+                content = node.get("content")
+                if isinstance(content, list):
+                    for child in content:
+                        components.extend(collect_components(child))
+            elif isinstance(node, list):
+                for child in node:
+                    components.extend(collect_components(child))
+            return components
+
+        def collect_props(node, component_name):
+            props_list = []
+            if isinstance(node, dict):
+                if node.get("component") == component_name:
+                    props_list.append(node.get("props") or {})
+                content = node.get("content")
+                if isinstance(content, list):
+                    for child in content:
+                        props_list.extend(collect_props(child, component_name))
+            elif isinstance(node, list):
+                for child in node:
+                    props_list.extend(collect_props(child, component_name))
+            return props_list
+
         text = collect_text(page)
+        components = collect_components(page)
+        dialog_props = collect_props(page, "VDialog")
         self.assertIn("下载任务看板", text)
         self.assertIn("正在下载中", text)
         self.assertIn("今日已完成", text)
@@ -4373,9 +4453,18 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIn("今日完成任务", text)
         self.assertIn("有数据上传时间", text)
         self.assertIn("平均下载速度", text)
+        self.assertIn("查看最近原因", text)
+        self.assertIn("查看详细记录", text)
         self.assertIn("检查间低速，准备限速", text)
         self.assertIn("检查间低速，执行限速", text)
         self.assertIn("动作 降低下载速度", text)
+        self.assertIn("VDialog", components)
+        self.assertIn("VDialogCloseBtn", components)
+        self.assertNotIn("VExpansionPanels", components)
+        self.assertNotIn("template", components)
+        self.assertGreaterEqual(len(dialog_props), 4)
+        self.assertTrue(all(props.get("model") for props in dialog_props))
+        self.assertEqual(len(dialog_props), len({props.get("model") for props in dialog_props}))
         self.assertNotIn("昨日完成任务", text)
         self.assertNotIn("已删除任务", text)
 
@@ -4468,6 +4557,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 "total_size": 100,
                 "seeding_time": 60,
                 "download_dashboard_completed_time": today_completed,
+                "deleted": True,
                 "upload_protection_interval_records": [{"id": "keep-today"}],
                 "upload_protection_action_records": [{"id": "keep-today"}],
             },
@@ -4489,6 +4579,37 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                          torrent_tasks["today_completed"].get("upload_protection_interval_records"))
         self.assertEqual([], torrent_tasks["old_completed"].get("upload_protection_interval_records"))
         self.assertEqual([], torrent_tasks["old_completed"].get("upload_protection_action_records"))
+
+    def test_download_dashboard_completed_time_prefers_downloader_completion_time(self):
+        plugin = self._new_qb_plugin()
+        completion_on = 1700000000
+        torrent = {
+            "hash": "abcdef",
+            "name": "completed torrent",
+            "tags": "刷流",
+            "downloaded": 100,
+            "total_size": 100,
+            "uploaded": 10,
+            "ratio": 0.1,
+            "added_on": completion_on - 3600,
+            "completion_on": completion_on,
+            "last_activity": completion_on,
+            "tracker": "tracker",
+        }
+
+        original_time = self.module.time.time
+        self.module.time.time = lambda: completion_on + 600
+        try:
+            torrent_info = plugin._BrushFlowLowFreq__get_torrent_info(torrent)
+            completed_time = plugin._BrushFlowLowFreq__get_download_dashboard_completed_time(
+                torrent_task={},
+                torrent_info=torrent_info,
+                now=completion_on + 600,
+            )
+        finally:
+            self.module.time.time = original_time
+
+        self.assertEqual(completion_on, completed_time)
 
     def test_upload_protection_low_speed_limits_then_strict_limits(self):
         plugin = self._new_qb_plugin({
@@ -4734,6 +4855,100 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual("limited", torrent_tasks["abcdef"].get("upload_protection_stage"))
         self.assertTrue(torrent_tasks["abcdef"].get("upload_protection_evaluated_in_check"))
 
+    def test_check_upload_protection_small_pool_exception_releases_existing_limits(self):
+        class FakeQbc:
+            def __init__(self):
+                self.download_limits = []
+
+            def torrents_set_download_limit(self, torrent_hashes, limit):
+                self.download_limits.append((torrent_hashes, limit))
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+            def get_torrents(self):
+                return [{
+                    "hash": "abcdef",
+                    "name": "upload protection torrent",
+                    "tags": "刷流",
+                    "state": "downloading",
+                    "progress": 0.5,
+                    "downloaded": 200000,
+                    "uploaded": 10,
+                    "total_size": 1000000,
+                    "ratio": 0.1,
+                    "added_on": 1,
+                    "completion_on": 0,
+                    "last_activity": 1,
+                    "tracker": "tracker",
+                }], None
+
+            def delete_torrents(self, ids, delete_file=True):
+                return True
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "upload_protection_enabled": True,
+            "upload_protection_rehearsal": False,
+            "upload_protection_skip_when_downloading_le": 1,
+            "upload_protection_low_upspeed_kbs": 150,
+            "upload_protection_low_limit_checks": 1,
+            "upload_protection_no_upload_kbs": 150,
+            "upload_protection_no_upload_checks": 1,
+            "upload_protection_min_elapsed_minutes": 0,
+            "upload_protection_min_downloaded_gb": 0,
+            "freeleech": "",
+            "hr": "no",
+        }, downloader=downloader)
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
+        torrent_tasks = {
+            "abcdef": {
+                "site": 1,
+                "site_name": "站点1",
+                "title": "upload protection torrent",
+                "description": "desc",
+                "hit_and_run": False,
+                "time": 0,
+                "downloaded": 1000,
+                "uploaded": 0,
+                "total_size": 1000000,
+                "ratio": 0.1,
+                "seeding_time": 0,
+                "first_downloaded_time": 1,
+                "last_check_time": 1,
+                "last_check_uploaded": 0,
+                "last_check_downloaded": 0,
+                "upload_protection_low_streak": 3,
+                "upload_protection_no_upload_streak": 3,
+                "upload_protection_stage": "limited",
+                "deleted": False,
+            }
+        }
+        plugin.get_data = lambda key: {
+            "torrents": torrent_tasks,
+            "unmanaged": {},
+        }.get(key, {})
+        plugin.save_data = lambda *args, **kwargs: None
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 2
+        try:
+            plugin.check()
+        finally:
+            self.module.time.time = original_time
+
+        self.assertEqual([(["abcdef"], 0)], downloader.qbc.download_limits)
+        self.assertEqual("released", torrent_tasks["abcdef"].get("upload_protection_stage"))
+        self.assertFalse(torrent_tasks["abcdef"].get("upload_protection_evaluated_in_check"))
+        self.assertFalse(torrent_tasks["abcdef"].get("deleted"))
+        self.assertIn("下载中任务数 1 小于等于例外阈值 1",
+                      torrent_tasks["abcdef"].get("upload_protection_last_reason", ""))
+
     def test_check_skips_upload_protection_for_completed_managed_torrents(self):
         class FakeQbc:
             def __init__(self):
@@ -4961,7 +5176,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertEqual(1, count)
 
-    def test_completed_torrent_skips_download_protection_reason(self):
+    def test_completed_torrent_ignores_removed_download_protection_fields(self):
         plugin = self._new_qb_plugin({
             "skip_rules_downloading_threshold": 1,
             "interval_upspeed": 150,
@@ -4999,7 +5214,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             plugin._BrushFlowLowFreq__get_task_elapsed_minutes = original_get_task_elapsed_minutes
 
         self.assertFalse(should_delete, reason)
-        self.assertIn("已做种种子仅按做种时间筛选", reason)
+        self.assertEqual("未能满足设置的删除条件", reason)
         self.assertNotIn("命中删除条件", reason)
 
     def test_brush_added_task_includes_live_count_and_timer_fields(self):
