@@ -467,7 +467,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.49"
+    plugin_version = "4.3.50"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -3457,14 +3457,20 @@ class BrushFlowLowFreq(_PluginBase):
         torrents = torrents or {}
         now = time.time()
         downloading_rows = []
+        downloading_dialogs = []
         completed_rows = []
+        completed_dialogs = []
         for torrent_hash, torrent_task in sorted(
                 torrents.items(), key=lambda item: item[1].get("last_check_time") or item[1].get("time") or 0,
                 reverse=True):
             if self.__is_download_dashboard_downloading_task(torrent_task):
-                downloading_rows.append(self.__build_download_dashboard_row(torrent_hash, torrent_task, "下载中"))
+                row, dialogs = self.__build_download_dashboard_row(torrent_hash, torrent_task, "下载中")
+                downloading_rows.append(row)
+                downloading_dialogs.extend(dialogs)
             elif self.__is_download_dashboard_today_completed_task(torrent_task, now=now):
-                completed_rows.append(self.__build_download_dashboard_row(torrent_hash, torrent_task, "今日完成"))
+                row, dialogs = self.__build_download_dashboard_row(torrent_hash, torrent_task, "今日完成")
+                completed_rows.append(row)
+                completed_dialogs.extend(dialogs)
 
         return [
             {
@@ -3506,12 +3512,16 @@ class BrushFlowLowFreq(_PluginBase):
                                             {
                                                 "component": "VWindowItem",
                                                 "props": {"value": "downloading"},
-                                                "content": self.__build_download_dashboard_table(downloading_rows)
+                                                "content": self.__build_download_dashboard_table(
+                                                    downloading_rows, downloading_dialogs
+                                                )
                                             },
                                             {
                                                 "component": "VWindowItem",
                                                 "props": {"value": "completed_today"},
-                                                "content": self.__build_download_dashboard_table(completed_rows)
+                                                "content": self.__build_download_dashboard_table(
+                                                    completed_rows, completed_dialogs
+                                                )
                                             }
                                         ]
                                     }
@@ -3523,43 +3533,49 @@ class BrushFlowLowFreq(_PluginBase):
             }
         ]
 
-    def __build_download_dashboard_table(self, rows: List[dict]) -> List[dict]:
+    def __build_download_dashboard_table(self, rows: List[dict], dialogs: List[dict] = None) -> List[dict]:
         if not rows:
             return [{
                 "component": "div",
                 "props": {"class": "text-caption text-medium-emphasis pa-4"},
                 "text": "暂无任务"
             }]
+        dialogs = dialogs or []
         headers = [
             "状态", "站点", "标题", "进度", "有数据上传时间", "有数据下载时间",
             "平均上传速度", "平均下载速度", "检查间上传", "检查间下载", "上传保护", "最近原因", "详细记录"
         ]
-        return [{
-            "component": "VTable",
-            "props": {"hover": True, "density": "compact"},
-            "content": [
-                {
-                    "component": "thead",
-                    "props": {"class": "text-no-wrap"},
-                    "content": [{
-                        "component": "tr",
-                        "content": [
-                            {
-                                "component": "th",
-                                "props": {"class": "text-start ps-4"},
-                                "text": header
-                            } for header in headers
-                        ]
-                    }]
-                },
-                {
-                    "component": "tbody",
-                    "content": rows
-                }
-            ]
-        }]
+        return [
+            self.__download_dashboard_modal_style(),
+            {
+                "component": "VTable",
+                "props": {"hover": True, "density": "compact"},
+                "content": [
+                    {
+                        "component": "thead",
+                        "props": {"class": "text-no-wrap"},
+                        "content": [{
+                            "component": "tr",
+                            "content": [
+                                {
+                                    "component": "th",
+                                    "props": {"class": "text-start ps-4"},
+                                    "text": header
+                                } for header in headers
+                            ]
+                        }]
+                    },
+                    {
+                        "component": "tbody",
+                        "content": rows
+                    }
+                ]
+            },
+            *dialogs
+        ]
 
-    def __build_download_dashboard_row(self, torrent_hash: str, torrent_task: dict, status_text: str) -> dict:
+    def __build_download_dashboard_row(self, torrent_hash: str, torrent_task: dict,
+                                       status_text: str) -> Tuple[dict, List[dict]]:
         downloaded = self.__number_or_none(torrent_task.get("downloaded")) or 0
         total_size = self.__number_or_none(torrent_task.get("total_size")) or self.__number_or_none(
             torrent_task.get("size")
@@ -3571,8 +3587,10 @@ class BrushFlowLowFreq(_PluginBase):
         if desc:
             title_html += f'<br><span style="font-size: 0.75rem;">{html.escape(str(desc))}</span>'
         title_html += f'<br><span style="font-size: 0.72rem;">{html.escape(str(torrent_hash))}</span>'
+        reason_cell, reason_dialog = self.__build_download_dashboard_reason_detail(torrent_hash, torrent_task)
+        records_cell, records_dialog = self.__build_download_dashboard_records_detail(torrent_hash, torrent_task)
 
-        return {
+        row = {
             "component": "tr",
             "props": {"class": "text-sm"},
             "content": [
@@ -3587,10 +3605,11 @@ class BrushFlowLowFreq(_PluginBase):
                 {"component": "td", "text": self.__format_speed_kbs(torrent_task.get("last_check_interval_upspeed"))},
                 {"component": "td", "text": self.__format_speed_kbs(torrent_task.get("last_check_interval_downspeed"))},
                 {"component": "td", "text": self.__upload_protection_stage_text(torrent_task.get("upload_protection_stage"))},
-                {"component": "td", "content": self.__build_download_dashboard_reason_detail(torrent_hash, torrent_task)},
-                {"component": "td", "content": self.__build_download_dashboard_records_detail(torrent_hash, torrent_task)},
+                {"component": "td", "content": [reason_cell]},
+                {"component": "td", "content": [records_cell]},
             ]
         }
+        return row, [reason_dialog, records_dialog]
 
     @staticmethod
     def __upload_protection_stage_text(stage: Any) -> str:
@@ -3633,13 +3652,13 @@ class BrushFlowLowFreq(_PluginBase):
 
     def __build_download_dashboard_reason_detail(self, torrent_hash: str, torrent_task: dict) -> List[dict]:
         reason = torrent_task.get("upload_protection_last_reason") or "暂无原因"
-        return [self.__build_download_dashboard_dialog(
-            model=self.__download_dashboard_dialog_model(torrent_hash, "reason"),
+        return self.__build_download_dashboard_dialog(
+            modal_id=self.__download_dashboard_modal_id(torrent_hash, "reason"),
             button_text="查看最近原因",
             title="最近原因",
             summary=self.__short_text(reason, max_length=18),
             html_lines=[reason]
-        )]
+        )
 
     def __build_download_dashboard_records_detail(self, torrent_hash: str, torrent_task: dict) -> List[dict]:
         detail_html = self.__format_download_dashboard_detail_summary(torrent_task)
@@ -3647,19 +3666,19 @@ class BrushFlowLowFreq(_PluginBase):
         action_records = torrent_task.get("upload_protection_action_records")
         interval_count = len(interval_records) if isinstance(interval_records, list) else 0
         action_count = len(action_records) if isinstance(action_records, list) else 0
-        return [self.__build_download_dashboard_dialog(
-            model=self.__download_dashboard_dialog_model(torrent_hash, "records"),
+        return self.__build_download_dashboard_dialog(
+            modal_id=self.__download_dashboard_modal_id(torrent_hash, "records"),
             button_text="查看详细记录",
             title="详细记录",
             summary=f"检查间 {interval_count} / 操作 {action_count}",
             html_lines=[detail_html],
             already_escaped=True
-        )]
+        )
 
     @staticmethod
-    def __download_dashboard_dialog_model(torrent_hash: str, kind: str) -> str:
+    def __download_dashboard_modal_id(torrent_hash: str, kind: str) -> str:
         digest = hashlib.sha1(f"{kind}:{torrent_hash}".encode("utf-8")).hexdigest()[:12]
-        return f"download_dashboard_{kind}_dialog_{digest}"
+        return f"download_dashboard_{kind}_{digest}"
 
     @staticmethod
     def __short_text(value: Any, max_length: int = 18) -> str:
@@ -3669,67 +3688,122 @@ class BrushFlowLowFreq(_PluginBase):
         return f"{text[:max_length]}..."
 
     @staticmethod
-    def __build_download_dashboard_dialog(model: str, button_text: str, title: str, summary: str, html_lines: List[str],
-                                          already_escaped: bool = False) -> dict:
+    def __build_download_dashboard_dialog(modal_id: str, button_text: str, title: str, summary: str,
+                                          html_lines: List[str], already_escaped: bool = False) -> Tuple[dict, dict]:
         html_text = "<br>".join(html_lines or [""])
         if not already_escaped:
             html_text = "<br>".join(html.escape(str(line)) for line in (html_lines or [""]))
-        return {
+        link = {
+            "component": "a",
+            "props": {
+                "href": f"#{modal_id}",
+                "class": "text-primary text-decoration-none text-no-wrap"
+            },
+            "text": f"{button_text}：{summary}"
+        }
+        modal = {
             "component": "div",
-            "props": {"class": "text-no-wrap"},
+            "props": {
+                "id": modal_id,
+                "class": "brush-dashboard-modal"
+            },
             "content": [
                 {
-                    "component": "VSwitch",
+                    "component": "a",
                     "props": {
-                        "model": model,
-                        "label": f"{button_text}：{summary}",
-                        "density": "compact",
-                        "hide-details": True,
-                        "color": "primary"
-                    }
+                        "href": "#",
+                        "class": "brush-dashboard-modal-backdrop",
+                        "aria-label": "关闭"
+                    },
                 },
                 {
-                    "component": "VDialog",
+                    "component": "div",
                     "props": {
-                        "model": model,
-                        "max-width": "45rem",
-                        "overlay-class": "v-dialog--scrollable v-overlay--scroll-blocked",
-                        "content-class": "v-card v-card--density-default v-card--variant-elevated rounded-t"
+                        "class": "brush-dashboard-modal-card"
                     },
                     "content": [
                         {
-                            "component": "VCard",
+                            "component": "div",
                             "props": {
-                                "title": title
+                                "class": "brush-dashboard-modal-title"
                             },
-                            "content": [
-                                {
-                                    "component": "VDialogCloseBtn",
-                                    "props": {
-                                        "model": model
-                                    }
-                                },
-                                {
-                                    "component": "VCardText",
-                                    "content": [{
-                                        "component": "div",
-                                        "props": {
-                                            "class": "text-caption",
-                                            "style": {
-                                                "max-height": "60vh",
-                                                "overflow-y": "auto",
-                                                "word-break": "break-word",
-                                                "line-height": "1.6"
-                                            }
-                                        },
-                                        "html": html_text
-                                    }]
-                                }
-                            ]
+                            "text": title
+                        },
+                        {
+                            "component": "div",
+                            "props": {
+                                "class": "brush-dashboard-modal-body"
+                            },
+                            "html": html_text
+                        },
+                        {
+                            "component": "a",
+                            "props": {
+                                "href": "#",
+                                "class": "brush-dashboard-modal-close"
+                            },
+                            "text": "关闭"
                         }
                     ]
                 }
             ]
+        }
+        return link, modal
+
+    @staticmethod
+    def __download_dashboard_modal_style() -> dict:
+        return {
+            "component": "style",
+            "text": """
+.brush-dashboard-modal {
+  display: none;
+}
+.brush-dashboard-modal:target {
+  align-items: center;
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  position: fixed;
+  z-index: 2400;
+}
+.brush-dashboard-modal-backdrop {
+  background: rgba(0, 0, 0, 0.5);
+  inset: 0;
+  position: absolute;
+}
+.brush-dashboard-modal-card {
+  background: rgb(var(--v-theme-surface));
+  border-radius: 8px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
+  color: rgb(var(--v-theme-on-surface));
+  max-height: 78vh;
+  max-width: min(45rem, calc(100vw - 32px));
+  overflow: hidden;
+  position: relative;
+  width: 45rem;
+}
+.brush-dashboard-modal-title {
+  border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 16px 20px;
+}
+.brush-dashboard-modal-body {
+  font-size: 0.82rem;
+  line-height: 1.6;
+  max-height: 58vh;
+  overflow-y: auto;
+  padding: 16px 20px;
+  word-break: break-word;
+}
+.brush-dashboard-modal-close {
+  color: rgb(var(--v-theme-primary));
+  display: block;
+  padding: 0 20px 16px;
+  text-align: right;
+  text-decoration: none;
+}
+"""
         }
 
     @staticmethod
@@ -4748,6 +4822,7 @@ class BrushFlowLowFreq(_PluginBase):
                 "seeding_time": torrent_info.get("seeding_time"),
                 "avg_upspeed": torrent_info.get("avg_upspeed"),
                 "avg_downspeed": torrent_info.get("avg_downspeed"),
+                "completion_on": torrent_info.get("completion_on"),
                 "last_check_time": check_time,
                 "last_check_uploaded": uploaded,
                 "last_check_downloaded": downloaded,
@@ -5546,6 +5621,9 @@ class BrushFlowLowFreq(_PluginBase):
         torrent_info = torrent_info or torrent_task or {}
         seeding_time = self.__number_or_none(torrent_info.get("seeding_time")) or 0
         if seeding_time > 0:
+            completion_on = self.__number_or_none(torrent_info.get("completion_on"))
+            if completion_on and completion_on > 0:
+                return int(completion_on)
             return max(0, int(now - seeding_time))
 
         downloaded = self.__number_or_none(torrent_info.get("downloaded"))
@@ -7287,6 +7365,7 @@ class BrushFlowLowFreq(_PluginBase):
             "downloaded": torrent_info.get("downloaded", 0),
             "total_size": torrent_info.get("total_size", 0),
             "uploaded": torrent_info.get("uploaded", 0),
+            "completion_on": torrent_info.get("completion_on"),
             "last_check_time": None,
             "last_check_uploaded": None,
             "last_check_interval_upspeed": None,
@@ -8527,6 +8606,7 @@ class BrushFlowLowFreq(_PluginBase):
             tags = torrent.get("tags")
             # tracker
             tracker = torrent.get("tracker")
+            completion_on = torrent.get("completion_on") or 0
         # TR
         else:
             # ID
@@ -8576,11 +8656,13 @@ class BrushFlowLowFreq(_PluginBase):
             tags = torrent.get("tags")
             # tracker
             tracker = torrent.get("tracker")
+            completion_on = int(torrent.date_done.timestamp()) if torrent.date_done else 0
 
         return {
             "hash": torrent_id,
             "title": torrent_title,
             "seeding_time": seeding_time,
+            "completion_on": completion_on,
             "ratio": ratio,
             "uploaded": uploaded,
             "downloaded": downloaded,

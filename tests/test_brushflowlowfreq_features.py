@@ -4443,9 +4443,29 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     props_list.extend(collect_props(child, component_name))
             return props_list
 
+        def collect_table_rows(node):
+            rows = []
+            if isinstance(node, dict):
+                if node.get("component") == "tr":
+                    rows.append(node)
+                content = node.get("content")
+                if isinstance(content, list):
+                    for child in content:
+                        rows.extend(collect_table_rows(child))
+            elif isinstance(node, list):
+                for child in node:
+                    rows.extend(collect_table_rows(child))
+            return rows
+
         text = collect_text(page)
         components = collect_components(page)
-        dialog_props = collect_props(page, "VDialog")
+        link_props = collect_props(page, "a")
+        modal_props = [
+            props for props in collect_props(page, "div")
+            if "brush-dashboard-modal" in str(props.get("class", ""))
+        ]
+        rows = collect_table_rows(page)
+        downloading_row = next(row for row in rows if "正在下载任务" in collect_text(row))
         self.assertIn("下载任务看板", text)
         self.assertIn("正在下载中", text)
         self.assertIn("今日已完成", text)
@@ -4458,13 +4478,19 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIn("检查间低速，准备限速", text)
         self.assertIn("检查间低速，执行限速", text)
         self.assertIn("动作 降低下载速度", text)
-        self.assertIn("VDialog", components)
-        self.assertIn("VDialogCloseBtn", components)
+        self.assertNotIn("VSwitch", collect_components(downloading_row))
+        self.assertNotIn("VDialog", collect_components(downloading_row))
         self.assertNotIn("VExpansionPanels", components)
         self.assertNotIn("template", components)
-        self.assertGreaterEqual(len(dialog_props), 4)
-        self.assertTrue(all(props.get("model") for props in dialog_props))
-        self.assertEqual(len(dialog_props), len({props.get("model") for props in dialog_props}))
+        self.assertGreaterEqual(len(modal_props), 4)
+        self.assertTrue(any(str(props.get("href", "")).startswith("#download_dashboard_reason_")
+                            for props in link_props))
+        self.assertTrue(any(str(props.get("href", "")).startswith("#download_dashboard_records_")
+                            for props in link_props))
+        self.assertIn("查看最近原因", collect_text(downloading_row))
+        self.assertIn("查看详细记录", collect_text(downloading_row))
+        self.assertNotIn("检查间低速，准备限速", collect_text(downloading_row))
+        self.assertNotIn("动作 降低下载速度", collect_text(downloading_row))
         self.assertNotIn("昨日完成任务", text)
         self.assertNotIn("已删除任务", text)
 
@@ -4609,6 +4635,31 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             self.module.time.time = original_time
 
+        self.assertEqual(completion_on, completed_time)
+
+    def test_qb_torrent_info_keeps_downloader_completion_time_for_dashboard(self):
+        plugin = self._new_qb_plugin()
+        completion_on = 1700000000
+        torrent_info = plugin._BrushFlowLowFreq__get_torrent_info({
+            "hash": "abcdef",
+            "name": "completed torrent",
+            "added_on": completion_on - 3600,
+            "completion_on": completion_on,
+            "downloaded": 100,
+            "total_size": 100,
+            "uploaded": 10,
+            "ratio": 0.1,
+            "last_activity": completion_on,
+            "tracker": "tracker",
+        })
+
+        completed_time = plugin._BrushFlowLowFreq__get_download_dashboard_completed_time(
+            torrent_task={},
+            torrent_info=torrent_info,
+            now=completion_on + 600,
+        )
+
+        self.assertEqual(completion_on, torrent_info.get("completion_on"))
         self.assertEqual(completion_on, completed_time)
 
     def test_upload_protection_low_speed_limits_then_strict_limits(self):
