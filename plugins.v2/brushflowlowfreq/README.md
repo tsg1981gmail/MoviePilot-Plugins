@@ -6,6 +6,12 @@
 
 ## 版本更新日志
 
+- v4.3.47
+  - 重做“上传保护”：新增独立顶层标签页，不再沿用旧低分享率限速、检查间低速删种、上传收益保护和高上传保护入口
+  - 上传保护只检测下载中的托管种子，按检查间上传速度动态降低、严格降低、恢复或完全放开单种下载速度
+  - 已完成/已做种种子不参与上传保护，删种只按做种时间判断
+  - 新增 `brush_interval_minutes`，可自定义新增刷流种子的分钟间隔；`cron` 只用于限定运行时段/日期范围
+
 - v4.3.46
   - 低分享率规则支持一次性判断后限速观察：达到检测时间后只判断一次分享率
   - 分享率不达标时可降低单种下载速度，不再每轮重复用低分享率删种
@@ -215,8 +221,10 @@
 
 ## 定时服务
 
-- **刷流服务**：每 10 分钟运行一次，用于请求站点下载刷流种子。
+- **刷流服务**：按 `brush_interval_minutes` 设置的分钟间隔运行，用于请求站点下载刷流种子，默认 10 分钟。
 - **刷流检查服务**：每 150 秒运行一次，用于同步检查下载器的刷流种子信息、删除种子和更新统计。
+
+当填写 `cron` 时，`cron` 只用于限定刷流服务的运行时段、日期或星期，分钟步进仍由 `brush_interval_minutes` 控制。示例：`0 0-8 * * *` 表示只在 0 点到 8 点这个范围内运行，具体新增频率仍按“新增种子间隔（分钟）”执行。
 
 ## 配置说明
 
@@ -246,74 +254,61 @@
 | 做种时间（小时）       | `seed_time`          | 达到指定做种时间后删除任务           |                                                                                                                   |
 | H&R 做种时间（小时）   | `hr_seed_time`       | 对 H&R 任务，达到指定做种时间后删除  | 如果未配置 H&R 做种时间/分享率，则普通种子的删除规则也适用于 H&R 种子                                             |
 | 动态删种阈值（GB）     | `delete_size_range`  | 设置动态删种的体积阈值               | 详情见[动态删除规则](#动态删除规则)                                                                               |
-| 是否筛选已做种？       | `filter_seeding_torrents` | 控制已完成/已做种任务是否参与全部删种规则 | 默认开启，保持原行为；关闭后已完成/已做种任务仅允许 `seed_time` 删除，其它删种规则跳过；未完成任务仍正常判断       |
-| 分享率                 | `seed_ratio`         | 达到设定分享率后删除任务             |                                                                                                                   |
-| 有下载数据后分钟数     | `seed_ratio_check_minutes` | 设置低分享率删除规则的计时阈值       | 示例：30，首次有下载数据后开始判断低分享率                                                                     |
-| 有下载数据后最低分享率 | `seed_ratio_min_30m` | 达到“任务添加后分钟数”后判断低分享率 | 默认低于设定值时删除任务；若配置“低分享率下载限速”，则只判断一次并改为限速观察                                    |
-| 低分享率下载限速（KB/s） | `seed_ratio_limit_download_kbs` | 低分享率一次性检测不达标后限制下载速度 | 默认 0（关闭）；开启后低分享率不再直接删种，恢复前也不重复判断分享率                                                |
-| 低分享率恢复上传阈值（KB/s） | `seed_ratio_limit_restore_upspeed_kbs` | 限速后检查间上传速度达到该值时计入恢复达标 | 默认 0，使用 `interval_upspeed` 作为恢复阈值；建议单独配置更清晰                                                   |
-| 低分享率恢复连续次数   | `seed_ratio_limit_restore_count` | 连续多少次检查间上传速度达标后恢复下载速度 | 默认 3；恢复时将下载限速恢复为 `dl_speed`，未配置 `dl_speed` 时恢复为 0                                             |
+| 是否筛选已做种？       | `filter_seeding_torrents` | 历史兼容开关                         | v4.3.47 起已完成/已做种任务固定只按 `seed_time` 删除，不再参与上传保护、低速或旧上传策略                           |
 | 失去免费即删种         | `delete_when_no_free` | 检测到种子已不免费或免费临期后立即删除 | 开启后会访问种子详情页校验免费状态；仅对原本免费加入的种子生效，校验失败时跳过不删                                  |
 | 免费临期删种阈值（分钟） | `delete_free_remaining_minutes` | 设置免费剩余不足多少分钟时删种       | 默认 5；仅在 `delete_when_no_free` 开启时生效；已失去免费按 0 分钟处理                                             |
-| 上传量（GB）           | `seed_size`          | 达到设定上传量后删除任务             |                                                                                                                   |
+| 上传量（GB）           | `seed_size`          | 历史兼容字段                         | v4.3.47 起不再作为下载中任务的删种条件                                                                            |
 | 下载超时时间（小时）   | `download_time`      | 达到指定下载超时时间后删除任务       |                                                                                                                   |
-| 平均上传速度（KB/s）   | `seed_avgspeed`      | 低于设定平均上传速度时删除任务       | 刷流任务做种 30 分钟后生效                                                                                        |
-| 检查间上传速度阈值（KB/s） | `interval_upspeed` | 低于阈值时计入低速命中               | 按“两次检查间上传增量 ÷ 检查间隔秒数”计算速度                                                                    |
-| 检查间低速观察次数     | `interval_upspeed_check_count` | 统计最近多少次检查记录               | 示例：3，表示统计最近 3 次检查                                                                                    |
-| 检查间低速命中次数     | `interval_upspeed_low_count` | 观察窗口内命中多少次后删除任务       | 示例：2，配合观察次数 3 可实现“3 次中命中 2 次删除”                                                                |
-| 有上传数据后开始低速统计分钟数 | `interval_upspeed_start_minutes` | 达到设定分钟数后才开始记录低速命中   | 示例：30，首次有上传数据后开始记录低速命中                                                                      |
-| 检查间低速按连续命中判定 | `interval_upspeed_continuous` | 是否按连续命中次数判定删除           | 开启后以最近连续低速命中次数判定；关闭则按观察窗口累计命中次数判定                                                 |
-| 检查间低速演练模式（只提醒不删） | `interval_upspeed_rehearsal` | 是否只提醒命中删除条件但不执行删除   | 建议先开启演练观察 24 小时，再关闭演练执行真实删除                                                                  |
-| 未活动时间（分钟）     | `seed_inactivetime`  | 超过设定未活动时间后删除任务         |                                                                                                                   |
+| 平均上传速度（KB/s）   | `seed_avgspeed`      | 历史兼容字段                         | v4.3.47 起不再作为下载中任务的删种条件                                                                            |
+| 未活动时间（分钟）     | `seed_inactivetime`  | 历史兼容字段                         | v4.3.47 起不再作为下载中任务的删种条件                                                                            |
 | 删除排除标签           | `delete_except_tags` | 删除任务时排除的种子任务标签         | 默认值为 MOVIEPILOT,H&R，用于联动 H&R 助手或 MoviePilot 任务                                                      |
 | 单任务上传限速（KB/s） | `up_speed`           | 设置每个种子的上传限速               |                                                                                                                   |
 | 单任务下载限速（KB/s） | `dl_speed`           | 设置每个种子的下载限速               |                                                                                                                   |
 | 保存目录               | `save_path`          | 设置种子保存目录                     |                                                                                                                   |
 | 自动归档记录天数       | `auto_archive_days`  | 定时归档已删除种子任务               |                                                                                                                   |
 | 开启时间段             | `active_time_range`  | 设置插件刷流的活动时间段             | 示例：00:00-08:00                                                                                                 |
-| 执行周期               | `cron`               | 设置插件刷流的活动周期               | 执行周期固定为 10 分钟，配置项仅用于设置活动周期。例如：`0 0-1 * * FRI,SUN`，建议使用标准缩写（如 `FRI`）表示星期 |
+| 运行时段/周期范围      | `cron`               | 限定刷流服务可运行的时段、日期或星期 | 不直接决定新增频率；新增频率由 `brush_interval_minutes` 控制。例如：`0 0-1 * * FRI,SUN`                            |
+| 新增种子间隔（分钟）   | `brush_interval_minutes` | 控制刷流服务新增种子的调度间隔       | 默认 10，最小 1，最大 59；只影响新增种子，不影响 150 秒一次的检查服务                                               |
 | 站点顺序刷流           | `brush_sequential`   | 是否按站点顺序刷流                   | 关闭选项时，按站点随机顺序刷流                                                                                    |
 | 排除订阅               | `except_subscribe`   | 刷流时排除订阅内容相关的种子         | **实验性功能**，开启后可能导致刷流时无法正常下载种子                                                              |
 | 选种包含第二页         | `include_second_page` | 是否获取站点第二页种子扩大选种范围   | 默认关闭（仅获取前100个种子）；开启后获取前两页（最多200个种子），提供更大的选种池                                |
-| 下载保护阈值           | `skip_rules_downloading_threshold` | 下载中种子数≤此值时跳过最低分享率和上传速度检查 | 默认 0（关闭）；示例：3，保护种子数量少时不被过早删除                                                              |
-| 分享率保护速度阈值（KB/s） | `seed_ratio_speed_protect` | 平均上传速度≥此值时即使分享率低也不删 | 默认 0（关闭）；示例：100，种子上传达100KB/s即豁免分享率检查                                                        |
-| 上传收益保护           | `yield_guard_enabled` | 是否启用上传收益保护                 | 默认关闭；仅处理插件托管且未完成的下载中任务，已完成做种任务交给常规删种规则处理；第一版面向 qBittorrent                                                               |
-| 上传收益保护演练模式   | `yield_guard_rehearsal` | 命中低收益动作时只记录日志，不实际限速/暂停/删除 | 默认开启；日志会记录站点、hash、拟动作和触发原因，建议观察 24 小时后再关闭                                         |
-| 上传收益保护详细日志   | `yield_guard_detail_log` | 输出每个任务的关键判定摘要、操作意图和未命中原因 | 默认关闭；开启后记录判定、模式、阶段、动作、速率、本轮/累计收益、样本、连续次数和命中类型，适合观察期排查                     |
-| 上传收益保护压力策略   | `yield_guard_pressure_strategy` | 控制低收益任务观察和处理节奏       | 默认自动判断；可选自动判断、偏保守、偏激进、宽松探测、均衡处理、竞争淘汰。任务多且低收益占带宽时可选偏激进或竞争淘汰；担心误伤晚爆上传时可选偏保守 |
-| 任务少时新增策略       | `yield_guard_small_pool_brush_strategy` | 高收益池已满时是否继续新增探测任务 | 默认自动放开；可选自动放开、保持限制、积极补种。任务少想补更多免费种时选积极补种；想严格控下载量时选保持限制                       |
-| 收益保护高下载阈值（KB/s） | `yield_guard_high_download_kbs` | 检查间下载速度达到该值时参与低收益判断 | 默认 2048                                                                                                          |
-| 收益保护低上传阈值（KB/s） | `yield_guard_low_upload_kbs` | 检查间上传速度低于该值时参与低收益判断 | 默认 200                                                                                                           |
-| 收益保护低收益比阈值（%） | `yield_guard_low_ratio_percent` | 检查间上传/下载收益比低于该值时参与低收益判断 | 默认 8；收益比 = 检查间上传速度 ÷ 检查间下载速度 × 100                                                              |
-| 收益比判断最小下载速度（KB/s） | `yield_guard_ratio_min_download_kbs` | 检查间下载速度达到该值后才判断收益比   | 默认 500；避免低下载波动导致收益比误判                                                                              |
-| 收益比保护上传阈值（KB/s） | `yield_guard_ratio_protect_upload_kbs` | 收益比偏低但检查间上传达到该值时先继续观察 | 默认 0（关闭）；示例：200，保留上传速度仍有价值但收益比暂时偏低的任务                                               |
-| 低收益连续命中次数     | `yield_guard_bad_checks` | 连续命中多少次后执行低收益动作       | 默认 2                                                                                                             |
-| 收益保护最小下载量（GB） | `yield_guard_min_downloaded_gb` | 下载量达到该值后才处理低收益任务     | 默认 2；与最小进度满足任一即可                                                                                    |
-| 收益保护最小进度（%）  | `yield_guard_min_progress_percent` | 下载进度达到该值后才处理低收益任务   | 默认 10；与最小下载量满足任一即可                                                                                 |
-| 低收益首次动作         | `yield_guard_first_action` | 首次确认低收益后的动作               | 可选 `none`、`limit`、`pause`、`delete`；默认 `limit`                                                               |
-| 低收益二次动作         | `yield_guard_second_action` | 限速后仍低收益时的动作               | 可选 `none`、`pause`、`delete`；默认 `pause`                                                                        |
-| 短窗后最终动作         | `yield_guard_final_action` | 暂停后超过短窗仍低收益时的动作       | 可选 `none`、`delete`；默认 `delete`                                                                                |
-| 低收益下载限速（KB/s） | `yield_guard_download_limit_kbs` | 低收益限速动作使用的下载限速         | 默认 512                                                                                                           |
-| 快速淘汰窗口（分钟）   | `yield_guard_fast_fail_minutes` | 首次实际传输后多少分钟内不直接删除   | 默认 10；窗口内若动作是删除，会降级为暂停                                                                          |
-| 高上传保护阈值（KB/s） | `yield_guard_good_upload_kbs` | 检查间上传达到该值时保护任务         | 默认 500；会跳过低分享率、平均低速、检查间低速等易误伤规则                                                         |
-| 高平均上传保护阈值（KB/s） | `yield_guard_good_avg_upload_kbs` | 平均上传达到该值时保护任务           | 默认 500                                                                                                           |
-| 保护高上传任务         | `yield_guard_protect_delete_rules` | 高上传保护命中时跳过易误伤删种规则   | 默认开启；不阻止失去免费即删种、做种时间、上传量上限等明确规则                                                     |
-| 高收益池满时停止新增   | `yield_guard_stop_brush_when_good_pool` | 高收益任务数达到阈值后减少新增       | 默认开启；仍受探测名额控制                                                                                         |
-| 高收益池最小数量       | `yield_guard_good_pool_min_count` | 高上传保护任务达到多少个后进入软停止 | 默认 2                                                                                                             |
-| 收益保护探测名额       | `yield_guard_probe_slots` | 高收益池满时保留多少个普通探测任务   | 默认 1；设置 0 表示高收益池满后不再保留探测                                                                         |
-| 收益保护探测间隔（分钟） | `yield_guard_probe_interval_minutes` | 两次探测新增之间的最小间隔           | 默认 10                                                                                                            |
-| 下载带宽仲裁           | `yield_guard_bandwidth_arbitration_enabled` | 是否按总下载带宽压力回退或释放限速任务 | 默认开启；需要配置总下载带宽 `maxdlspeed` 才能判断压力                                                              |
-| 下载高压阈值（%）       | `yield_guard_high_pressure_percent` | 总下载带宽占用达到该比例时回退已释放任务 | 默认 85                                                                                                            |
-| 下载空闲阈值（%）       | `yield_guard_idle_pressure_percent` | 总下载带宽占用低于该比例时允许逐步放开限速任务 | 默认 45                                                                                                            |
-| 空闲释放连续检查次数   | `yield_guard_idle_release_checks` | 连续多少轮下载空闲后升一档限速       | 默认 2                                                                                                             |
-| 空闲释放限速（KB/s）   | `yield_guard_relax_download_limit_kbs` | 低收益限速任务空闲释放后的第一档下载限速 | 默认 1024                                                                                                          |
-| 半开放限速（KB/s）     | `yield_guard_half_open_download_limit_kbs` | 空闲释放任务继续观察良好后的第二档下载限速 | 默认 2048                                                                                                          |
-| 新发布短窗保护（分钟） | `yield_guard_promising_pubtime_minutes` | 发布时间在该窗口内时不直接删除       | 默认 15                                                                                                            |
+| 上传保护               | `upload_protection_enabled` | 是否启用新上传保护                   | 默认关闭；只检测下载中的托管种子，已完成/已做种种子不检测                                                          |
+| 上传保护演练模式       | `upload_protection_rehearsal` | 只记录判断和状态，不实际限速/删种     | 建议先开启观察日志，确认阈值合适后再关闭演练                                                                       |
+| 上传保护详细日志       | `upload_protection_detail_log` | 输出每个任务的上传保护状态细节       | 默认关闭                                                                                                           |
+| 低速上传阈值（KB/s）   | `upload_protection_low_upspeed_kbs` | 检查间上传低于或等于该值计入低速     | 默认 150                                                                                                           |
+| 达标上传阈值（KB/s）   | `upload_protection_good_upspeed_kbs` | 检查间上传高于或等于该值计入达标     | 默认 150；可设置得高于低速阈值形成缓冲区                                                                           |
+| 低速限速连续次数       | `upload_protection_low_limit_checks` | 连续低速多少次后降低下载速度         | 默认 2                                                                                                             |
+| 严格限速连续次数       | `upload_protection_low_strict_checks` | 连续低速多少次后降为基础限速一半     | 默认 3                                                                                                             |
+| 恢复限速连续次数       | `upload_protection_good_restore_checks` | 连续达标多少次后恢复原下载限速       | 默认 2                                                                                                             |
+| 完全放开连续次数       | `upload_protection_good_release_checks` | 连续达标多少次后完全放开下载限速     | 默认 3；恢复后的同一轮连续达标会继续累计                                                                           |
+| 基础下载限速（KB/s）   | `upload_protection_download_limit_kbs` | 低速任务的基础单种下载限速           | 默认 512；严格限速为该值的一半                                                                                     |
+| 无上传价值阈值（KB/s） | `upload_protection_no_upload_kbs` | 检查间上传低于或等于该值才进入删种观察 | 默认 5；设置 0 表示关闭上传保护删种路径                                                                            |
+| 无上传价值连续次数     | `upload_protection_no_upload_checks` | 连续无上传价值多少次后删种           | 默认 6；这是上传保护唯一的删种路径                                                                                 |
+| 最小观察时间（分钟）   | `upload_protection_min_elapsed_minutes` | 首次实际传输后多久才允许上传保护动作 | 默认 10，设置 0 表示立即判断                                                                                        |
+| 删种最小下载量（GB）   | `upload_protection_min_downloaded_gb` | 上传保护删种前至少已下载多少 GB      | 默认 0，不限制；只影响“无上传价值”删种，不影响限速/恢复                                                            |
 | 动态删除种子           | `proxy_delete`       | 是否启用动态删除种子                 | **实验性功能**，可能导致刷流数据异常，甚至清空数据，请慎重开启。详情见[动态删除规则](#动态删除规则)               |
 | 清除统计数据           | `clear_task`         | 是否清除统计数据                     | 一次性任务，自动重置插件数据页中的所有数据                                                                        |
 | 站点独立配置           | `enable_site_config` | 是否启用站点独立配置                 | 详情见[站点独立配置](#站点独立配置)                                                                               |
 | 打开站点配置窗口       | `dialog_closed`      | 控制站点独立配置页面的显示状态       | 点击后可打开站点独立配置页面                                                                                      |
 | 双向同步官方插件数据   | `sync_official`      | 是否双向同步官方插件数据             | 如存在重复任务，默认以本插件的任务为准                                                                            |
+
+## 上传保护
+
+上传保护是 v4.3.47 重做后的独立功能，位于配置页顶层“上传保护”标签。它只处理插件托管且仍在下载中的种子；已完成或已做种的种子不会更新上传保护计数，不会被上传保护限速，也不会被上传保护删种。
+
+判断依据是两次检查之间的上传增量除以检查间隔，也就是检查间上传速度。状态流转如下：
+
+1. 正常或已放开状态下，连续低于“低速上传阈值”达到“低速限速连续次数”后，将单种下载速度限制为“基础下载限速”。
+2. 已限速状态下继续连续低速，达到“严格限速连续次数”后，将单种下载速度降为基础限速的一半。
+3. 已限速或严格限速状态下，连续达到“达标上传阈值”达到“恢复限速连续次数”后，恢复原单种下载限速。
+4. 恢复限速后，如果同一连续达标周期继续达到“完全放开连续次数”，将该种子的单种下载限速设置为 0。
+5. 任意状态下，只有连续低于“无上传价值阈值”达到“无上传价值连续次数”，并满足最小观察时间和删种最小下载量后，才会交给删种流程删除。
+
+qBittorrent 支持单种下载限速、恢复限速和放开限速。其它下载器如果没有对应的单种限速接口，上传保护会记录判断结果，但限速动作可能无法执行；无上传价值删种仍复用现有删种流程。
+
+下载中的常规删种只保留失去免费/免费临期和下载超时这类明确风险场景；上传量、平均上传速度、未活动时间、分享率、检查间低速等上传表现相关条件不再直接删除下载中种子。
+
+旧的低分享率限速、检查间低速删种、上传收益保护、高上传保护和高收益池停止新增已经不再作为活动功能入口。升级后如配置文件里仍残留这些字段，不会再由配置页保存，也不会参与默认检查流程。
 
 ## 动态删除规则
 
@@ -350,58 +345,26 @@
 - `seed_time`：做种时间
 - `filter_seeding_torrents`：是否筛选已做种
 - `include_second_page`：选种包含第二页
-- `skip_rules_downloading_threshold`：下载保护阈值
-- `seed_ratio_speed_protect`：分享率保护速度阈值（KB/s）
-- `seed_ratio_limit_download_kbs`：低分享率下载限速（KB/s）
-- `seed_ratio_limit_restore_upspeed_kbs`：低分享率恢复上传阈值（KB/s）
-- `seed_ratio_limit_restore_count`：低分享率恢复连续次数
-- `seed_ratio`：分享率
-- `seed_ratio_check_minutes`：有下载数据后分钟数
-- `seed_ratio_min_30m`：有下载数据后最低分享率
 - `delete_when_no_free`：失去免费即删种
 - `delete_free_remaining_minutes`：免费临期删种阈值
 - `seed_size`：上传量
 - `download_time`：下载超时时间
 - `seed_avgspeed`：平均上传速度
-- `interval_upspeed`：检查间上传速度阈值
-- `interval_upspeed_check_count`：检查间低速观察次数
-- `interval_upspeed_low_count`：检查间低速命中次数
-- `interval_upspeed_start_minutes`：有上传数据后开始低速统计分钟数
-- `interval_upspeed_continuous`：检查间低速按连续命中判定
-- `interval_upspeed_rehearsal`：检查间低速演练模式（只提醒不删）
 - `seed_inactivetime`：未活动时间
-- `yield_guard_enabled`：上传收益保护
-- `yield_guard_rehearsal`：上传收益保护演练模式
-- `yield_guard_detail_log`：上传收益保护详细日志
-- `yield_guard_high_download_kbs`：收益保护高下载阈值（KB/s）
-- `yield_guard_low_upload_kbs`：收益保护低上传阈值（KB/s）
-- `yield_guard_low_ratio_percent`：收益保护低收益比阈值（%）
-- `yield_guard_ratio_min_download_kbs`：收益比判断最小下载速度（KB/s）
-- `yield_guard_ratio_protect_upload_kbs`：收益比保护上传阈值（KB/s）
-- `yield_guard_pressure_strategy`：上传收益保护压力策略
-- `yield_guard_small_pool_brush_strategy`：任务少时新增策略
-- `yield_guard_bad_checks`：低收益连续命中次数
-- `yield_guard_min_downloaded_gb`：收益保护最小下载量（GB）
-- `yield_guard_min_progress_percent`：收益保护最小进度（%）
-- `yield_guard_first_action`：低收益首次动作
-- `yield_guard_second_action`：低收益二次动作
-- `yield_guard_final_action`：短窗后最终动作
-- `yield_guard_download_limit_kbs`：低收益下载限速（KB/s）
-- `yield_guard_fast_fail_minutes`：快速淘汰窗口（分钟）
-- `yield_guard_good_upload_kbs`：高上传保护阈值（KB/s）
-- `yield_guard_good_avg_upload_kbs`：高平均上传保护阈值（KB/s）
-- `yield_guard_protect_delete_rules`：保护高上传任务
-- `yield_guard_stop_brush_when_good_pool`：高收益池满时停止新增
-- `yield_guard_good_pool_min_count`：高收益池最小数量
-- `yield_guard_probe_slots`：收益保护探测名额
-- `yield_guard_probe_interval_minutes`：收益保护探测间隔（分钟）
-- `yield_guard_bandwidth_arbitration_enabled`：下载带宽仲裁
-- `yield_guard_high_pressure_percent`：下载高压阈值（%）
-- `yield_guard_idle_pressure_percent`：下载空闲阈值（%）
-- `yield_guard_idle_release_checks`：空闲释放连续检查次数
-- `yield_guard_relax_download_limit_kbs`：空闲释放限速（KB/s）
-- `yield_guard_half_open_download_limit_kbs`：半开放限速（KB/s）
-- `yield_guard_promising_pubtime_minutes`：新发布短窗保护（分钟）
+- `upload_protection_enabled`：上传保护
+- `upload_protection_rehearsal`：上传保护演练模式
+- `upload_protection_detail_log`：上传保护详细日志
+- `upload_protection_low_upspeed_kbs`：上传保护低速上传阈值
+- `upload_protection_good_upspeed_kbs`：上传保护达标上传阈值
+- `upload_protection_low_limit_checks`：上传保护低速限速连续次数
+- `upload_protection_low_strict_checks`：上传保护严格限速连续次数
+- `upload_protection_good_restore_checks`：上传保护恢复限速连续次数
+- `upload_protection_good_release_checks`：上传保护完全放开连续次数
+- `upload_protection_download_limit_kbs`：上传保护基础下载限速
+- `upload_protection_no_upload_kbs`：上传保护无上传价值阈值
+- `upload_protection_no_upload_checks`：上传保护无上传价值连续次数
+- `upload_protection_min_elapsed_minutes`：上传保护最小观察时间
+- `upload_protection_min_downloaded_gb`：上传保护删种最小下载量
 - `save_path`：保存目录
 - `proxy_delete`：动态删除种子（实验性功能）
 - `hr_seed_time`：H&R 做种时间
@@ -441,54 +404,25 @@
     "free_remaining_time_skip_range": "00:00-08:00",
     "seed_time": 120,
     "hr_seed_time": 144,
-    "seed_ratio": "",
-    "seed_ratio_check_minutes": 30,
-    "seed_ratio_min_30m": "",
-    "seed_ratio_limit_download_kbs": 0,
-    "seed_ratio_limit_restore_upspeed_kbs": 0,
-    "seed_ratio_limit_restore_count": 3,
     "delete_when_no_free": false,
     "delete_free_remaining_minutes": 5,
     "seed_size": "",
     "download_time": "",
     "seed_avgspeed": "",
-    "interval_upspeed": "",
-    "interval_upspeed_check_count": 3,
-    "interval_upspeed_low_count": 2,
-    "interval_upspeed_start_minutes": 30,
-    "interval_upspeed_continuous": false,
-    "interval_upspeed_rehearsal": false,
-    "yield_guard_enabled": true,
-    "yield_guard_rehearsal": true,
-    "yield_guard_high_download_kbs": 2048,
-    "yield_guard_low_upload_kbs": 200,
-    "yield_guard_low_ratio_percent": 8,
-    "yield_guard_ratio_min_download_kbs": 500,
-    "yield_guard_ratio_protect_upload_kbs": 0,
-    "yield_guard_pressure_strategy": "auto",
-    "yield_guard_small_pool_brush_strategy": "auto",
-    "yield_guard_bad_checks": 2,
-    "yield_guard_min_downloaded_gb": 2,
-    "yield_guard_min_progress_percent": 10,
-    "yield_guard_first_action": "limit",
-    "yield_guard_second_action": "pause",
-    "yield_guard_final_action": "delete",
-    "yield_guard_download_limit_kbs": 512,
-    "yield_guard_fast_fail_minutes": 10,
-    "yield_guard_good_upload_kbs": 500,
-    "yield_guard_good_avg_upload_kbs": 500,
-    "yield_guard_protect_delete_rules": true,
-    "yield_guard_stop_brush_when_good_pool": true,
-    "yield_guard_good_pool_min_count": 2,
-    "yield_guard_probe_slots": 1,
-    "yield_guard_probe_interval_minutes": 10,
-    "yield_guard_bandwidth_arbitration_enabled": true,
-    "yield_guard_high_pressure_percent": 85,
-    "yield_guard_idle_pressure_percent": 45,
-    "yield_guard_idle_release_checks": 2,
-    "yield_guard_relax_download_limit_kbs": 1024,
-    "yield_guard_half_open_download_limit_kbs": 2048,
-    "yield_guard_promising_pubtime_minutes": 15,
+    "upload_protection_enabled": true,
+    "upload_protection_rehearsal": true,
+    "upload_protection_detail_log": false,
+    "upload_protection_low_upspeed_kbs": 150,
+    "upload_protection_good_upspeed_kbs": 150,
+    "upload_protection_low_limit_checks": 2,
+    "upload_protection_low_strict_checks": 3,
+    "upload_protection_good_restore_checks": 2,
+    "upload_protection_good_release_checks": 3,
+    "upload_protection_download_limit_kbs": 512,
+    "upload_protection_no_upload_kbs": 5,
+    "upload_protection_no_upload_checks": 6,
+    "upload_protection_min_elapsed_minutes": 10,
+    "upload_protection_min_downloaded_gb": 0,
     "seed_inactivetime": "",
     "save_path": "/downloads/site1",
     "proxy_delete": false,
@@ -504,6 +438,8 @@
 
   - **启用官方刷流插件时，本插件无法正常使用，可尝试停用官方插件后通过双向同步官方插件数据再开启使用，请不要同时启用两个插件，否则可能导致种子异常甚至数据丢失！**
   - **排除H&R并不保证能完全适配所有站点（部分站点在列表页不显示H&R标志，但实际上是有H&R的），请注意核对使用！**
+  - **上传保护只检测下载中的托管种子，已完成/已做种种子只按做种时间删除。**
+  - **v4.3.47 起旧低分享率限速、检查间低速删种、上传收益保护和高上传保护不再作为活动功能入口。**
 
 ## FAQ
   
