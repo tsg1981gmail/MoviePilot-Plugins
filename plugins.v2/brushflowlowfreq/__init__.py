@@ -234,22 +234,9 @@ class BrushConfig:
             "free_remaining_time_skip_range",
             "seed_time",
             "hr_seed_time",
-            "seed_ratio",
-            "seed_ratio_check_minutes",
-            "seed_ratio_min_30m",
-            "seed_size",
             "download_time",
-            "seed_avgspeed",
-            "interval_upspeed",
-            "interval_upspeed_check_count",
-            "interval_upspeed_low_count",
-            "interval_upspeed_start_minutes",
-            "interval_upspeed_continuous",
-            "interval_upspeed_rehearsal",
-            "seed_inactivetime",
             "save_path",
             "proxy_delete",
-            "filter_seeding_torrents",
             "delete_when_no_free",
             "delete_free_remaining_minutes",
             "qb_category",
@@ -270,43 +257,6 @@ class BrushConfig:
             "upload_protection_min_elapsed_minutes",
             "upload_protection_min_downloaded_gb",
             "upload_protection_detail_log",
-            "skip_rules_downloading_threshold",
-            "seed_ratio_speed_protect",
-            "seed_ratio_limit_download_kbs",
-            "seed_ratio_limit_restore_upspeed_kbs",
-            "seed_ratio_limit_restore_count",
-            "yield_guard_enabled",
-            "yield_guard_high_download_kbs",
-            "yield_guard_low_upload_kbs",
-            "yield_guard_low_ratio_percent",
-            "yield_guard_ratio_min_download_kbs",
-            "yield_guard_ratio_protect_upload_kbs",
-            "yield_guard_pressure_strategy",
-            "yield_guard_small_pool_brush_strategy",
-            "yield_guard_bad_checks",
-            "yield_guard_min_downloaded_gb",
-            "yield_guard_min_progress_percent",
-            "yield_guard_first_action",
-            "yield_guard_second_action",
-            "yield_guard_final_action",
-            "yield_guard_download_limit_kbs",
-            "yield_guard_fast_fail_minutes",
-            "yield_guard_good_upload_kbs",
-            "yield_guard_good_avg_upload_kbs",
-            "yield_guard_protect_delete_rules",
-            "yield_guard_stop_brush_when_good_pool",
-            "yield_guard_good_pool_min_count",
-            "yield_guard_probe_slots",
-            "yield_guard_probe_interval_minutes",
-            "yield_guard_bandwidth_arbitration_enabled",
-            "yield_guard_high_pressure_percent",
-            "yield_guard_idle_pressure_percent",
-            "yield_guard_idle_release_checks",
-            "yield_guard_relax_download_limit_kbs",
-            "yield_guard_half_open_download_limit_kbs",
-            "yield_guard_promising_pubtime_minutes",
-            "yield_guard_rehearsal",
-            "yield_guard_detail_log",
             # 当新增支持字段时，仅在此处添加字段名
         }
         try:
@@ -520,7 +470,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.47"
+    plugin_version = "4.3.48"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -3117,6 +3067,10 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_ratio_limit_download_kbs",
             "seed_ratio_limit_restore_upspeed_kbs",
             "seed_ratio_limit_restore_count",
+            "filter_seeding_torrents",
+            "seed_size",
+            "seed_avgspeed",
+            "seed_inactivetime",
             "yield_guard_enabled",
             "yield_guard_rehearsal",
             "yield_guard_detail_log",
@@ -3317,7 +3271,8 @@ class BrushFlowLowFreq(_PluginBase):
             return [
                 {
                     'component': 'VRow',
-                    'content': self.__get_total_elements() + self.__get_daily_transfer_elements() + [
+                    'content': self.__get_total_elements() + self.__get_daily_transfer_elements()
+                               + self.__get_download_dashboard_elements(torrents) + [
                         {
                             'component': 'VCol',
                             'props': {
@@ -3337,7 +3292,11 @@ class BrushFlowLowFreq(_PluginBase):
                 }
             ]
         else:
-            data_list = torrents.values()
+            data_list = [
+                torrent_task for torrent_task in torrents.values()
+                if (self.__is_download_dashboard_downloading_task(torrent_task)
+                    or self.__is_download_dashboard_today_completed_task(torrent_task))
+            ]
             # 按time倒序排序
             data_list = sorted(data_list, key=lambda x: x.get("time") or 0, reverse=True)
 
@@ -3402,7 +3361,8 @@ class BrushFlowLowFreq(_PluginBase):
         return [
             {
                 'component': 'VRow',
-                'content': self.__get_total_elements() + self.__get_daily_transfer_elements() + [
+                'content': self.__get_total_elements() + self.__get_daily_transfer_elements()
+                           + self.__get_download_dashboard_elements(torrents) + [
                     # 种子明细
                     {
                         'component': 'VCol',
@@ -3498,6 +3458,207 @@ class BrushFlowLowFreq(_PluginBase):
                 ]
             }
         ]
+
+    def __get_download_dashboard_elements(self, torrents: Dict[str, dict]) -> List[dict]:
+        torrents = torrents or {}
+        now = time.time()
+        downloading_rows = []
+        completed_rows = []
+        for torrent_hash, torrent_task in sorted(
+                torrents.items(), key=lambda item: item[1].get("last_check_time") or item[1].get("time") or 0,
+                reverse=True):
+            if self.__is_download_dashboard_downloading_task(torrent_task):
+                downloading_rows.append(self.__build_download_dashboard_row(torrent_hash, torrent_task, "下载中"))
+            elif self.__is_download_dashboard_today_completed_task(torrent_task, now=now):
+                completed_rows.append(self.__build_download_dashboard_row(torrent_hash, torrent_task, "今日完成"))
+
+        return [
+            {
+                "component": "VCol",
+                "props": {"cols": 12},
+                "content": [
+                    {
+                        "component": "VCard",
+                        "props": {"variant": "outlined"},
+                        "content": [
+                            {
+                                "component": "VCardText",
+                                "content": [
+                                    {
+                                        "component": "div",
+                                        "props": {"class": "text-h6 mb-2"},
+                                        "text": "下载任务看板"
+                                    },
+                                    {
+                                        "component": "VTabs",
+                                        "props": {"model": "download_dashboard_tabs", "density": "compact"},
+                                        "content": [
+                                            {
+                                                "component": "VTab",
+                                                "props": {"value": "downloading"},
+                                                "text": f"正在下载中（{len(downloading_rows)}）"
+                                            },
+                                            {
+                                                "component": "VTab",
+                                                "props": {"value": "completed_today"},
+                                                "text": f"今日已完成（{len(completed_rows)}）"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "component": "VWindow",
+                                        "props": {"model": "download_dashboard_tabs"},
+                                        "content": [
+                                            {
+                                                "component": "VWindowItem",
+                                                "props": {"value": "downloading"},
+                                                "content": self.__build_download_dashboard_table(downloading_rows)
+                                            },
+                                            {
+                                                "component": "VWindowItem",
+                                                "props": {"value": "completed_today"},
+                                                "content": self.__build_download_dashboard_table(completed_rows)
+                                            }
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+
+    def __build_download_dashboard_table(self, rows: List[dict]) -> List[dict]:
+        if not rows:
+            return [{
+                "component": "div",
+                "props": {"class": "text-caption text-medium-emphasis pa-4"},
+                "text": "暂无任务"
+            }]
+        headers = [
+            "状态", "站点", "标题", "进度", "有数据上传时间", "有数据下载时间",
+            "平均上传速度", "平均下载速度", "检查间上传", "检查间下载", "上传保护", "最近原因", "详细记录"
+        ]
+        return [{
+            "component": "VTable",
+            "props": {"hover": True, "density": "compact"},
+            "content": [
+                {
+                    "component": "thead",
+                    "props": {"class": "text-no-wrap"},
+                    "content": [{
+                        "component": "tr",
+                        "content": [
+                            {
+                                "component": "th",
+                                "props": {"class": "text-start ps-4"},
+                                "text": header
+                            } for header in headers
+                        ]
+                    }]
+                },
+                {
+                    "component": "tbody",
+                    "content": rows
+                }
+            ]
+        }]
+
+    def __build_download_dashboard_row(self, torrent_hash: str, torrent_task: dict, status_text: str) -> dict:
+        downloaded = self.__number_or_none(torrent_task.get("downloaded")) or 0
+        total_size = self.__number_or_none(torrent_task.get("total_size")) or self.__number_or_none(
+            torrent_task.get("size")
+        ) or 0
+        progress = f"{downloaded / total_size * 100:.1f}%" if total_size > 0 else "N/A"
+        title = torrent_task.get("title") or torrent_hash
+        desc = torrent_task.get("description")
+        title_html = f'<span style="font-size: .85rem;">{html.escape(str(title))}</span>'
+        if desc:
+            title_html += f'<br><span style="font-size: 0.75rem;">{html.escape(str(desc))}</span>'
+        title_html += f'<br><span style="font-size: 0.72rem;">{html.escape(str(torrent_hash))}</span>'
+
+        detail_html = self.__format_download_dashboard_detail_summary(torrent_task)
+        return {
+            "component": "tr",
+            "props": {"class": "text-sm"},
+            "content": [
+                {"component": "td", "text": status_text},
+                {"component": "td", "text": torrent_task.get("site_name") or ""},
+                {"component": "td", "html": title_html},
+                {"component": "td", "text": progress},
+                {"component": "td", "text": self.__timestamp_to_text(torrent_task.get("first_uploaded_time"))},
+                {"component": "td", "text": self.__timestamp_to_text(torrent_task.get("first_downloaded_time"))},
+                {"component": "td", "text": self.__format_speed_kbs(torrent_task.get("avg_upspeed"))},
+                {"component": "td", "text": self.__format_speed_kbs(torrent_task.get("avg_downspeed"))},
+                {"component": "td", "text": self.__format_speed_kbs(torrent_task.get("last_check_interval_upspeed"))},
+                {"component": "td", "text": self.__format_speed_kbs(torrent_task.get("last_check_interval_downspeed"))},
+                {"component": "td", "text": self.__upload_protection_stage_text(torrent_task.get("upload_protection_stage"))},
+                {"component": "td", "text": torrent_task.get("upload_protection_last_reason") or ""},
+                {"component": "td", "html": detail_html},
+            ]
+        }
+
+    @staticmethod
+    def __upload_protection_stage_text(stage: Any) -> str:
+        return {
+            "normal": "正常",
+            "limited": "限速",
+            "strict_limited": "严格限速",
+            "released": "已放开",
+        }.get(str(stage or "normal"), str(stage or "正常"))
+
+    def __format_download_dashboard_detail_summary(self, torrent_task: dict) -> str:
+        interval_records = torrent_task.get("upload_protection_interval_records")
+        action_records = torrent_task.get("upload_protection_action_records")
+        interval_count = len(interval_records) if isinstance(interval_records, list) else 0
+        action_count = len(action_records) if isinstance(action_records, list) else 0
+        lines = [f"检查间记录 {interval_count} 条，操作记录 {action_count} 条"]
+        if isinstance(action_records, list) and action_records:
+            for action in action_records[-3:]:
+                lines.append(
+                    f"动作 {self.__upload_protection_action_text(action.get('action'))} | "
+                    f"{self.__timestamp_to_text(action.get('time'))} | "
+                    f"{'已执行' if action.get('executed') else '未执行'} | "
+                    f"{'演练' if action.get('rehearsal') else '真实'} | "
+                    f"依据：{action.get('reason') or '无'}"
+                )
+        if isinstance(interval_records, list) and interval_records:
+            for record in interval_records[-5:]:
+                lines.append(
+                    f"检查间 {self.__timestamp_to_text(record.get('time'))} | "
+                    f"间隔 {self.__format_seconds(record.get('interval_seconds'))} | "
+                    f"上传 {self.__format_speed_kbs(record.get('interval_upspeed'))} | "
+                    f"下载 {self.__format_speed_kbs(record.get('interval_downspeed'))} | "
+                    f"连续低速 {record.get('low_streak') or 0} | "
+                    f"连续达标 {record.get('good_streak') or 0} | "
+                    f"无上传 {record.get('no_upload_streak') or 0} | "
+                    f"计划 {self.__upload_protection_action_text(record.get('planned_action'))} | "
+                    f"依据：{record.get('reason') or '无'}"
+                )
+        return "<br>".join(html.escape(line) for line in lines)
+
+    @staticmethod
+    def __upload_protection_action_text(action: Any) -> str:
+        return {
+            "limit": "降低下载速度",
+            "strict_limit": "严格降低下载速度",
+            "restore_limit": "恢复下载速度",
+            "release_limit": "完全放开下载限速",
+            "delete": "删除无上传价值种子",
+        }.get(str(action or ""), str(action or "无"))
+
+    @staticmethod
+    def __format_seconds(seconds: Any) -> str:
+        try:
+            if seconds in (None, ""):
+                return "未知"
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return "未知"
+        if seconds < 60:
+            return f"{seconds:.0f} 秒"
+        return f"{seconds / 60:.1f} 分钟"
 
     def stop_service(self):
         """
@@ -4413,6 +4574,8 @@ class BrushFlowLowFreq(_PluginBase):
             # 归档数据
             self.__auto_archive_tasks(torrent_tasks=torrent_tasks)
 
+            self.__prune_download_dashboard_history(torrent_tasks=torrent_tasks)
+
             self.__update_and_save_statistic_info(torrent_tasks)
 
             self.save_data("torrents", torrent_tasks)
@@ -4493,6 +4656,8 @@ class BrushFlowLowFreq(_PluginBase):
                 "uploaded": uploaded,
                 "ratio": torrent_info.get("ratio"),
                 "seeding_time": torrent_info.get("seeding_time"),
+                "avg_upspeed": torrent_info.get("avg_upspeed"),
+                "avg_downspeed": torrent_info.get("avg_downspeed"),
                 "last_check_time": check_time,
                 "last_check_uploaded": uploaded,
                 "last_check_downloaded": downloaded,
@@ -4506,6 +4671,14 @@ class BrushFlowLowFreq(_PluginBase):
                 "last_check_interval_downspeed_valid": interval_downspeed_valid,
                 "last_check_interval_downspeed_reason": interval_downspeed_reason
             })
+            if self.__is_torrent_seeding_or_completed(torrent_info=torrent_info):
+                completed_time = self.__get_download_dashboard_completed_time(
+                    torrent_task=torrent_task,
+                    torrent_info=torrent_info,
+                    now=check_time
+                )
+                if completed_time:
+                    torrent_task["download_dashboard_completed_time"] = completed_time
 
     def __apply_yield_guard_actions(self, torrents: List[Any], torrent_tasks: Dict[str, dict]):
         """
@@ -4662,13 +4835,23 @@ class BrushFlowLowFreq(_PluginBase):
 
             action = str(torrent_task.get("upload_protection_pending_action") or "").strip().lower()
             if action in {"limit", "strict_limit", "restore_limit", "release_limit"}:
-                if self.__apply_qb_upload_protection_action(
-                        torrent_hash=torrent_hash,
-                        action=action,
-                        brush_config=brush_config,
-                        torrent_task=torrent_task,
-                        site_name=site_name,
-                        reason=reason):
+                handled = self.__apply_qb_upload_protection_action(
+                    torrent_hash=torrent_hash,
+                    action=action,
+                    brush_config=brush_config,
+                    torrent_task=torrent_task,
+                    site_name=site_name,
+                    reason=reason
+                )
+                self.__record_upload_protection_action_detail(
+                    brush_config=brush_config,
+                    torrent_task=torrent_task,
+                    action=action,
+                    reason=reason,
+                    executed=handled,
+                    site_name=site_name
+                )
+                if handled:
                     torrent_task["upload_protection_last_action_time"] = time.time()
                     torrent_task["upload_protection_pending_action"] = None
                     action_count += 1
@@ -5216,6 +5399,146 @@ class BrushFlowLowFreq(_PluginBase):
         return not self.__is_torrent_seeding_or_completed(torrent_info=torrent_info)
 
     @staticmethod
+    def __download_dashboard_detail_keys() -> Tuple[str, str]:
+        return "upload_protection_interval_records", "upload_protection_action_records"
+
+    @staticmethod
+    def __limit_recent_records(records: List[dict], limit: int = 20) -> List[dict]:
+        if not isinstance(records, list):
+            return []
+        return records[-max(1, limit):]
+
+    @staticmethod
+    def __timestamp_to_text(timestamp_value: Any) -> str:
+        try:
+            if timestamp_value in (None, ""):
+                return "N/A"
+            timestamp_value = float(timestamp_value)
+            if timestamp_value <= 0:
+                return "N/A"
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp_value))
+        except (TypeError, ValueError, OSError):
+            return "N/A"
+
+    @staticmethod
+    def __is_today_timestamp(timestamp_value: Any, now: Optional[float] = None) -> bool:
+        try:
+            if timestamp_value in (None, ""):
+                return False
+            timestamp_value = float(timestamp_value)
+            now = time.time() if now is None else float(now)
+            return datetime.fromtimestamp(timestamp_value).date() == datetime.fromtimestamp(now).date()
+        except (TypeError, ValueError, OSError):
+            return False
+
+    def __get_download_dashboard_completed_time(self, torrent_task: dict, torrent_info: dict = None,
+                                                now: Optional[float] = None) -> Optional[int]:
+        now = int(time.time() if now is None else now)
+        completed_time = self.__number_or_none((torrent_task or {}).get("download_dashboard_completed_time"))
+        if completed_time and completed_time > 0:
+            return int(completed_time)
+
+        torrent_info = torrent_info or torrent_task or {}
+        seeding_time = self.__number_or_none(torrent_info.get("seeding_time")) or 0
+        if seeding_time > 0:
+            return max(0, int(now - seeding_time))
+
+        downloaded = self.__number_or_none(torrent_info.get("downloaded"))
+        total_size = self.__number_or_none(torrent_info.get("total_size"))
+        if downloaded is not None and total_size is not None and total_size > 0 and downloaded >= total_size:
+            return now
+        return None
+
+    def __is_download_dashboard_downloading_task(self, torrent_task: dict) -> bool:
+        if not torrent_task or torrent_task.get("deleted"):
+            return False
+        return not self.__is_torrent_seeding_or_completed(torrent_info=torrent_task)
+
+    def __is_download_dashboard_today_completed_task(self, torrent_task: dict, now: Optional[float] = None) -> bool:
+        if not torrent_task or torrent_task.get("deleted"):
+            return False
+        if not self.__is_torrent_seeding_or_completed(torrent_info=torrent_task):
+            return False
+        completed_time = self.__get_download_dashboard_completed_time(torrent_task=torrent_task, now=now)
+        return self.__is_today_timestamp(completed_time, now=now)
+
+    def __clear_download_dashboard_detail(self, torrent_task: dict) -> None:
+        if not isinstance(torrent_task, dict):
+            return
+        for key in self.__download_dashboard_detail_keys():
+            torrent_task[key] = []
+
+    def __prune_download_dashboard_history(self, torrent_tasks: Dict[str, dict], now: Optional[float] = None) -> None:
+        """
+        看板只保留正在下载中和当天已完成任务的详细历史。
+        """
+        if not isinstance(torrent_tasks, dict):
+            return
+        now = time.time() if now is None else float(now)
+        for torrent_task in torrent_tasks.values():
+            if not isinstance(torrent_task, dict):
+                continue
+            if self.__is_download_dashboard_downloading_task(torrent_task):
+                continue
+            if self.__is_download_dashboard_today_completed_task(torrent_task, now=now):
+                continue
+            self.__clear_download_dashboard_detail(torrent_task)
+
+    def __record_upload_protection_interval_detail(self, brush_config: BrushConfig, torrent_task: dict,
+                                                   torrent_info: dict, reason: str,
+                                                   planned_action: str = None,
+                                                   should_delete: bool = False) -> None:
+        if not torrent_task or not brush_config.upload_protection_detail_log:
+            return
+        records = torrent_task.get("upload_protection_interval_records")
+        if not isinstance(records, list):
+            records = []
+        record = {
+            "time": int(time.time()),
+            "interval_seconds": torrent_task.get("last_check_interval_seconds"),
+            "interval_uploaded": torrent_task.get("last_check_interval_uploaded"),
+            "interval_downloaded": torrent_task.get("last_check_interval_downloaded"),
+            "interval_upspeed": torrent_task.get("last_check_interval_upspeed"),
+            "interval_downspeed": torrent_task.get("last_check_interval_downspeed"),
+            "upspeed_valid": bool(torrent_task.get("last_check_interval_upspeed_valid")),
+            "downspeed_valid": bool(torrent_task.get("last_check_interval_downspeed_valid")),
+            "avg_upspeed": (torrent_info or {}).get("avg_upspeed") or torrent_task.get("avg_upspeed"),
+            "avg_downspeed": (torrent_info or {}).get("avg_downspeed") or torrent_task.get("avg_downspeed"),
+            "stage": torrent_task.get("upload_protection_stage"),
+            "low_streak": torrent_task.get("upload_protection_low_streak"),
+            "good_streak": torrent_task.get("upload_protection_good_streak"),
+            "no_upload_streak": torrent_task.get("upload_protection_no_upload_streak"),
+            "planned_action": planned_action or "",
+            "should_delete": bool(should_delete),
+            "reason": reason or "",
+        }
+        records.append(record)
+        torrent_task["upload_protection_interval_records"] = self.__limit_recent_records(records)
+
+    def __record_upload_protection_action_detail(self, brush_config: BrushConfig, torrent_task: dict,
+                                                 action: str, reason: str, executed: bool,
+                                                 site_name: str = "") -> None:
+        if not torrent_task or not brush_config.upload_protection_detail_log:
+            return
+        records = torrent_task.get("upload_protection_action_records")
+        if not isinstance(records, list):
+            records = []
+        records.append({
+            "time": int(time.time()),
+            "site_name": site_name,
+            "action": action,
+            "executed": bool(executed),
+            "rehearsal": bool(brush_config.upload_protection_rehearsal),
+            "stage": torrent_task.get("upload_protection_stage"),
+            "low_streak": torrent_task.get("upload_protection_low_streak"),
+            "good_streak": torrent_task.get("upload_protection_good_streak"),
+            "no_upload_streak": torrent_task.get("upload_protection_no_upload_streak"),
+            "original_download_limit": torrent_task.get("upload_protection_original_download_limit"),
+            "reason": reason or "",
+        })
+        torrent_task["upload_protection_action_records"] = self.__limit_recent_records(records)
+
+    @staticmethod
     def __positive_int(value: Any, default_value: int = 0) -> int:
         try:
             if value in (None, ""):
@@ -5228,6 +5551,9 @@ class BrushFlowLowFreq(_PluginBase):
         if not isinstance(torrent_task, dict):
             return
         for key, value in self.__get_default_upload_protection_task_state().items():
+            if key not in torrent_task and isinstance(value, list):
+                torrent_task[key] = list(value)
+                continue
             torrent_task.setdefault(key, value)
 
     def __reset_upload_protection_runtime_state_for_skip(self, torrent_task: dict,
@@ -5251,13 +5577,33 @@ class BrushFlowLowFreq(_PluginBase):
             self.__reset_upload_protection_runtime_state_for_skip(torrent_task)
             return False, torrent_task.get("upload_protection_last_reason", "")
 
+        def finish(should_delete: bool, reason: str, planned_action: str = "") -> Tuple[bool, str]:
+            torrent_task["upload_protection_last_reason"] = reason
+            self.__record_upload_protection_interval_detail(
+                brush_config=brush_config,
+                torrent_task=torrent_task,
+                torrent_info=torrent_info,
+                reason=reason,
+                planned_action=planned_action,
+                should_delete=should_delete
+            )
+            if planned_action == "delete":
+                self.__record_upload_protection_action_detail(
+                    brush_config=brush_config,
+                    torrent_task=torrent_task,
+                    action="delete",
+                    reason=reason,
+                    executed=False,
+                    site_name=site_name
+                )
+            return should_delete, reason
+
         torrent_task["upload_protection_evaluated_in_check"] = True
         interval_valid = bool(torrent_task.get("last_check_interval_upspeed_valid"))
         interval_upspeed = self.__number_or_none(torrent_task.get("last_check_interval_upspeed"))
         if not interval_valid or interval_upspeed is None:
             reason = torrent_task.get("last_check_interval_reason") or "上传保护：采样尚未就绪"
-            torrent_task["upload_protection_last_reason"] = reason
-            return False, reason
+            return finish(False, reason)
 
         elapsed_source = torrent_task.get("first_downloaded_time") or torrent_task.get("first_uploaded_time")
         min_elapsed = self.__non_negative_float(brush_config.upload_protection_min_elapsed_minutes, 10)
@@ -5265,8 +5611,7 @@ class BrushFlowLowFreq(_PluginBase):
             elapsed_minutes = self.__get_task_elapsed_minutes(elapsed_source) if elapsed_source else 0
             if elapsed_minutes < min_elapsed:
                 reason = f"上传保护：实际传输 {elapsed_minutes:.0f} 分钟，未到观察门槛 {min_elapsed:.0f} 分钟"
-                torrent_task["upload_protection_last_reason"] = reason
-                return False, reason
+                return finish(False, reason)
 
         no_upload_kbs = self.__non_negative_float(brush_config.upload_protection_no_upload_kbs, 5)
         no_upload_checks = max(1, self.__positive_int(brush_config.upload_protection_no_upload_checks, 6))
@@ -5314,8 +5659,7 @@ class BrushFlowLowFreq(_PluginBase):
             reason = (f"上传保护：连续检查间上传低于无上传价值阈值 {no_upload_kbs:.1f} KB/s，"
                       f"连续 {no_upload_streak}/{no_upload_checks} 次，删除无上传价值种子")
             torrent_task["upload_protection_pending_action"] = "delete"
-            torrent_task["upload_protection_last_reason"] = reason
-            return True, reason
+            return finish(True, reason, "delete")
 
         stage = str(torrent_task.get("upload_protection_stage") or "normal")
         low_streak = self.__positive_int(torrent_task.get("upload_protection_low_streak"), 0)
@@ -5325,35 +5669,30 @@ class BrushFlowLowFreq(_PluginBase):
             torrent_task["upload_protection_pending_action"] = "limit"
             reason = (f"上传保护：检查间上传 {interval_upspeed / 1024:.1f} KB/s，"
                       f"连续低速 {low_streak}/{low_limit_checks} 次，降低下载速度")
-            torrent_task["upload_protection_last_reason"] = reason
-            return False, reason
+            return finish(False, reason, "limit")
         if stage == "limited" and low_streak >= low_strict_checks:
             torrent_task["upload_protection_stage"] = "strict_limited"
             torrent_task["upload_protection_pending_action"] = "strict_limit"
             reason = (f"上传保护：检查间上传 {interval_upspeed / 1024:.1f} KB/s，"
                       f"连续低速 {low_streak}/{low_strict_checks} 次，下载速度降为基础限速一半")
-            torrent_task["upload_protection_last_reason"] = reason
-            return False, reason
+            return finish(False, reason, "strict_limit")
         if stage in {"limited", "strict_limited"} and good_streak >= good_restore_checks:
             torrent_task["upload_protection_stage"] = "normal"
             torrent_task["upload_protection_pending_action"] = "restore_limit"
             torrent_task["upload_protection_release_eligible"] = True
             reason = (f"上传保护：检查间上传 {interval_upspeed / 1024:.1f} KB/s，"
                       f"连续达标 {good_streak}/{good_restore_checks} 次，恢复下载速度")
-            torrent_task["upload_protection_last_reason"] = reason
-            return False, reason
+            return finish(False, reason, "restore_limit")
         if torrent_task.get("upload_protection_release_eligible") and good_streak >= good_release_checks:
             torrent_task["upload_protection_stage"] = "released"
             torrent_task["upload_protection_pending_action"] = "release_limit"
             torrent_task["upload_protection_release_eligible"] = False
             reason = (f"上传保护：检查间上传 {interval_upspeed / 1024:.1f} KB/s，"
                       f"连续达标 {good_streak}/{good_release_checks} 次，完全放开下载限速")
-            torrent_task["upload_protection_last_reason"] = reason
-            return False, reason
+            return finish(False, reason, "release_limit")
 
         reason = f"上传保护：检查间上传 {interval_upspeed / 1024:.1f} KB/s，继续观察"
-        torrent_task["upload_protection_last_reason"] = reason
-        return False, reason
+        return finish(False, reason)
 
     def __reset_yield_guard_runtime_state_for_skip(self, torrent_task: dict) -> None:
         if not isinstance(torrent_task, dict):
@@ -6827,7 +7166,9 @@ class BrushFlowLowFreq(_PluginBase):
             "upload_protection_original_download_limit": None,
             "upload_protection_release_eligible": False,
             "upload_protection_last_reason": "",
-            "upload_protection_evaluated_in_check": False
+            "upload_protection_evaluated_in_check": False,
+            "upload_protection_interval_records": [],
+            "upload_protection_action_records": []
         }
 
     @staticmethod
@@ -8015,6 +8356,11 @@ class BrushFlowLowFreq(_PluginBase):
                 iatime = date_now - torrent.get("last_activity")
             # 下载量
             downloaded = torrent.get("downloaded")
+            # 平均下载速度 Byte/s
+            if dltime:
+                avg_downspeed = int((downloaded or 0) / dltime)
+            else:
+                avg_downspeed = downloaded or 0
             # 种子大小
             total_size = torrent.get("total_size")
             # 添加时间
@@ -8044,6 +8390,11 @@ class BrushFlowLowFreq(_PluginBase):
                 dltime = date_now - int(torrent.date_added.timestamp())
             # 下载量
             downloaded = int(torrent.total_size * torrent.progress / 100)
+            # 平均下载速度 Byte/s
+            if dltime:
+                avg_downspeed = int(downloaded / dltime)
+            else:
+                avg_downspeed = downloaded
             # 分享率
             ratio = torrent.ratio or 0
             # 上传量
@@ -8077,6 +8428,7 @@ class BrushFlowLowFreq(_PluginBase):
             "uploaded": uploaded,
             "downloaded": downloaded,
             "avg_upspeed": avg_upspeed,
+            "avg_downspeed": avg_downspeed,
             "iatime": iatime,
             "dltime": dltime,
             "total_size": total_size,
