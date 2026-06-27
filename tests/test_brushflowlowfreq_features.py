@@ -4310,7 +4310,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(removed_upload_strategy_models.isdisjoint(models),
                         removed_upload_strategy_models & models)
 
-    def test_get_page_download_dashboard_splits_downloading_and_today_completed(self):
+    def test_get_page_download_dashboard_uses_popover_dialogs_without_anchor_targets(self):
         now = datetime.now()
         today_completed = int((now - timedelta(hours=1)).timestamp())
         yesterday_completed = int((now - timedelta(days=1, hours=1)).timestamp())
@@ -4459,10 +4459,10 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         text = collect_text(page)
         components = collect_components(page)
-        link_props = collect_props(page, "a")
-        modal_props = [
+        button_props = collect_props(page, "button")
+        popover_props = [
             props for props in collect_props(page, "div")
-            if "brush-dashboard-modal" in str(props.get("class", ""))
+            if "brush-dashboard-popover" in str(props.get("class", ""))
         ]
         rows = collect_table_rows(page)
         downloading_row = next(row for row in rows if "正在下载任务" in collect_text(row))
@@ -4482,11 +4482,15 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertNotIn("VDialog", collect_components(downloading_row))
         self.assertNotIn("VExpansionPanels", components)
         self.assertNotIn("template", components)
-        self.assertGreaterEqual(len(modal_props), 4)
-        self.assertTrue(any(str(props.get("href", "")).startswith("#download_dashboard_reason_")
-                            for props in link_props))
-        self.assertTrue(any(str(props.get("href", "")).startswith("#download_dashboard_records_")
-                            for props in link_props))
+        self.assertGreaterEqual(len(popover_props), 4)
+        self.assertTrue(any(props.get("for", "").startswith("download_dashboard_reason_")
+                            for props in collect_props(page, "label")))
+        self.assertTrue(any(props.get("for", "").startswith("download_dashboard_records_")
+                            for props in collect_props(page, "label")))
+        self.assertFalse(any(str(props.get("href", "")).startswith("#download_dashboard_")
+                             for props in collect_props(page, "a")))
+        self.assertTrue(any("brush-dashboard-popover-toggle" in str(props.get("class", ""))
+                            for props in collect_props(page, "input")))
         self.assertIn("查看最近原因", collect_text(downloading_row))
         self.assertIn("查看详细记录", collect_text(downloading_row))
         self.assertNotIn("检查间低速，准备限速", collect_text(downloading_row))
@@ -4745,6 +4749,77 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual("release_limit", torrent_task.get("upload_protection_pending_action"))
         self.assertEqual(3, torrent_task.get("upload_protection_good_streak"))
 
+    def test_upload_protection_53kbps_does_not_restore_or_delete_with_150kbps_thresholds(self):
+        plugin = self._new_qb_plugin({
+            "upload_protection_enabled": True,
+            "upload_protection_low_upspeed_kbs": 150,
+            "upload_protection_good_upspeed_kbs": 150,
+            "upload_protection_low_limit_checks": 3,
+            "upload_protection_good_restore_checks": 1,
+            "upload_protection_no_upload_kbs": 50,
+            "upload_protection_no_upload_checks": 1,
+            "upload_protection_min_elapsed_minutes": 0,
+        })
+        torrent_info = {"downloaded": 50, "total_size": 100, "seeding_time": 0}
+        torrent_task = {
+            "first_downloaded_time": 1,
+            "last_check_interval_upspeed": int(53.3 * 1024),
+            "last_check_interval_upspeed_valid": True,
+            "upload_protection_low_streak": 0,
+            "upload_protection_good_streak": 0,
+            "upload_protection_no_upload_streak": 0,
+            "upload_protection_stage": "limited",
+        }
+        plugin._BrushFlowLowFreq__get_task_elapsed_minutes = lambda value: 60
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_upload_protection(
+            site_name="站点1",
+            brush_config=plugin._brush_config,
+            torrent_info=torrent_info,
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertEqual("limited", torrent_task.get("upload_protection_stage"))
+        self.assertEqual(1, torrent_task.get("upload_protection_low_streak"))
+        self.assertEqual(0, torrent_task.get("upload_protection_good_streak"))
+        self.assertNotEqual("restore_limit", torrent_task.get("upload_protection_pending_action"))
+        self.assertIn("继续观察", reason)
+
+    def test_upload_protection_zero_speed_does_not_restore_with_150kbps_thresholds(self):
+        plugin = self._new_qb_plugin({
+            "upload_protection_enabled": True,
+            "upload_protection_low_upspeed_kbs": 150,
+            "upload_protection_good_upspeed_kbs": 150,
+            "upload_protection_low_limit_checks": 3,
+            "upload_protection_good_restore_checks": 1,
+            "upload_protection_no_upload_kbs": 0,
+            "upload_protection_min_elapsed_minutes": 0,
+        })
+        torrent_info = {"downloaded": 50, "total_size": 100, "seeding_time": 0}
+        torrent_task = {
+            "first_downloaded_time": 1,
+            "last_check_interval_upspeed": 0,
+            "last_check_interval_upspeed_valid": True,
+            "upload_protection_low_streak": 0,
+            "upload_protection_good_streak": 0,
+            "upload_protection_stage": "limited",
+        }
+        plugin._BrushFlowLowFreq__get_task_elapsed_minutes = lambda value: 60
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_upload_protection(
+            site_name="站点1",
+            brush_config=plugin._brush_config,
+            torrent_info=torrent_info,
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertEqual("limited", torrent_task.get("upload_protection_stage"))
+        self.assertEqual(1, torrent_task.get("upload_protection_low_streak"))
+        self.assertEqual(0, torrent_task.get("upload_protection_good_streak"))
+        self.assertNotEqual("restore_limit", torrent_task.get("upload_protection_pending_action"))
+
     def test_upload_protection_skips_completed_torrents_without_updating_streaks(self):
         plugin = self._new_qb_plugin({"upload_protection_enabled": True})
         torrent_task = {
@@ -4818,6 +4893,48 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(256 * 1024, downloader.qbc.calls[1]["limit"])
         self.assertEqual(128 * 1024, downloader.qbc.calls[2]["limit"])
         self.assertEqual(0, downloader.qbc.calls[3]["limit"])
+
+    def test_upload_protection_restore_limit_prefers_original_download_limit_snapshot(self):
+        class FakeQbc:
+            def __init__(self):
+                self.calls = []
+
+            def torrents_set_download_limit(self, **kwargs):
+                self.calls.append(kwargs)
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "upload_protection_enabled": True,
+            "upload_protection_rehearsal": False,
+            "upload_protection_download_limit_kbs": 512,
+            "dl_speed": 60,
+        }, downloader=downloader)
+        torrent_task = {
+            "download_limit": 200 * 1024,
+        }
+
+        self.assertTrue(plugin._BrushFlowLowFreq__apply_qb_upload_protection_action(
+            torrent_hash="abc",
+            action="limit",
+            brush_config=plugin._brush_config,
+            torrent_task=torrent_task,
+        ))
+        self.assertEqual(200 * 1024, torrent_task.get("upload_protection_original_download_limit"))
+
+        self.assertTrue(plugin._BrushFlowLowFreq__apply_qb_upload_protection_action(
+            torrent_hash="abc",
+            action="restore_limit",
+            brush_config=plugin._brush_config,
+            torrent_task=torrent_task,
+        ))
+        self.assertEqual(200 * 1024, downloader.qbc.calls[-1]["limit"])
 
     def test_check_applies_upload_protection_to_downloading_managed_torrents(self):
         class FakeQbc:

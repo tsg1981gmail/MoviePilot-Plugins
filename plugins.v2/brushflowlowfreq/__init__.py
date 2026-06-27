@@ -467,7 +467,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.50"
+    plugin_version = "4.3.51"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -3693,54 +3693,69 @@ class BrushFlowLowFreq(_PluginBase):
         html_text = "<br>".join(html_lines or [""])
         if not already_escaped:
             html_text = "<br>".join(html.escape(str(line)) for line in (html_lines or [""]))
-        link = {
-            "component": "a",
+        trigger = {
+            "component": "div",
             "props": {
-                "href": f"#{modal_id}",
-                "class": "text-primary text-decoration-none text-no-wrap"
+                "class": "brush-dashboard-popover-host"
             },
-            "text": f"{button_text}：{summary}"
+            "content": [
+                {
+                    "component": "input",
+                    "props": {
+                        "id": modal_id,
+                        "type": "checkbox",
+                        "class": "brush-dashboard-popover-toggle",
+                    }
+                },
+                {
+                    "component": "label",
+                    "props": {
+                        "for": modal_id,
+                        "class": "brush-dashboard-popover-trigger text-primary text-decoration-none text-no-wrap"
+                    },
+                    "text": f"{button_text}：{summary}"
+                }
+            ]
         }
         modal = {
             "component": "div",
             "props": {
-                "id": modal_id,
-                "class": "brush-dashboard-modal"
+                "class": "brush-dashboard-popover"
             },
             "content": [
                 {
-                    "component": "a",
+                    "component": "label",
                     "props": {
-                        "href": "#",
-                        "class": "brush-dashboard-modal-backdrop",
+                        "for": modal_id,
+                        "class": "brush-dashboard-popover-backdrop",
                         "aria-label": "关闭"
                     },
                 },
                 {
                     "component": "div",
                     "props": {
-                        "class": "brush-dashboard-modal-card"
+                        "class": "brush-dashboard-popover-card"
                     },
                     "content": [
                         {
                             "component": "div",
                             "props": {
-                                "class": "brush-dashboard-modal-title"
+                                "class": "brush-dashboard-popover-title"
                             },
                             "text": title
                         },
                         {
                             "component": "div",
                             "props": {
-                                "class": "brush-dashboard-modal-body"
+                                "class": "brush-dashboard-popover-body"
                             },
                             "html": html_text
                         },
                         {
-                            "component": "a",
+                            "component": "label",
                             "props": {
-                                "href": "#",
-                                "class": "brush-dashboard-modal-close"
+                                "for": modal_id,
+                                "class": "brush-dashboard-popover-close"
                             },
                             "text": "关闭"
                         }
@@ -3748,17 +3763,39 @@ class BrushFlowLowFreq(_PluginBase):
                 }
             ]
         }
-        return link, modal
+        return trigger, modal
 
     @staticmethod
     def __download_dashboard_modal_style() -> dict:
         return {
             "component": "style",
             "text": """
-.brush-dashboard-modal {
+.brush-dashboard-popover-host {
+  display: inline-flex;
+  align-items: flex-start;
+  position: relative;
+}
+.brush-dashboard-popover-toggle {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.brush-dashboard-popover-trigger {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+.brush-dashboard-popover {
   display: none;
 }
-.brush-dashboard-modal:target {
+.brush-dashboard-popover-toggle:checked ~ .brush-dashboard-popover {
   align-items: center;
   display: flex;
   inset: 0;
@@ -3766,12 +3803,12 @@ class BrushFlowLowFreq(_PluginBase):
   position: fixed;
   z-index: 2400;
 }
-.brush-dashboard-modal-backdrop {
+.brush-dashboard-popover-backdrop {
   background: rgba(0, 0, 0, 0.5);
   inset: 0;
   position: absolute;
 }
-.brush-dashboard-modal-card {
+.brush-dashboard-popover-card {
   background: rgb(var(--v-theme-surface));
   border-radius: 8px;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
@@ -3782,13 +3819,13 @@ class BrushFlowLowFreq(_PluginBase):
   position: relative;
   width: 45rem;
 }
-.brush-dashboard-modal-title {
+.brush-dashboard-popover-title {
   border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
   font-size: 1rem;
   font-weight: 600;
   padding: 16px 20px;
 }
-.brush-dashboard-modal-body {
+.brush-dashboard-popover-body {
   font-size: 0.82rem;
   line-height: 1.6;
   max-height: 58vh;
@@ -3796,7 +3833,7 @@ class BrushFlowLowFreq(_PluginBase):
   padding: 16px 20px;
   word-break: break-word;
 }
-.brush-dashboard-modal-close {
+.brush-dashboard-popover-close {
   color: rgb(var(--v-theme-primary));
   display: block;
   padding: 0 20px 16px;
@@ -6463,15 +6500,6 @@ class BrushFlowLowFreq(_PluginBase):
         except (TypeError, ValueError):
             return default_value
 
-    @staticmethod
-    def __positive_int(value: Any, default_value: int = 1) -> int:
-        try:
-            if value in (None, ""):
-                return default_value
-            return max(1, int(float(value)))
-        except (TypeError, ValueError):
-            return default_value
-
     def __is_seed_ratio_limit_enabled(self, brush_config: BrushConfig) -> bool:
         return self.__positive_float(getattr(brush_config, "seed_ratio_limit_download_kbs", 0), 0.0) > 0
 
@@ -8376,6 +8404,15 @@ class BrushFlowLowFreq(_PluginBase):
         else:
             download_limit = 0
 
+        if action in {"limit", "strict_limit"} and torrent_task is not None:
+            original_limit = self.__number_or_none(torrent_task.get("upload_protection_original_download_limit"))
+            if original_limit is None:
+                source_limit = self.__number_or_none(torrent_task.get("download_limit"))
+                if source_limit is not None and source_limit >= 0:
+                    torrent_task["upload_protection_original_download_limit"] = int(source_limit)
+                else:
+                    torrent_task["upload_protection_original_download_limit"] = 0
+
         downloader = self.downloader
         if not downloader:
             return False
@@ -8607,6 +8644,7 @@ class BrushFlowLowFreq(_PluginBase):
             # tracker
             tracker = torrent.get("tracker")
             completion_on = torrent.get("completion_on") or 0
+            download_limit = torrent.get("dl_limit")
         # TR
         else:
             # ID
@@ -8657,6 +8695,7 @@ class BrushFlowLowFreq(_PluginBase):
             # tracker
             tracker = torrent.get("tracker")
             completion_on = int(torrent.date_done.timestamp()) if torrent.date_done else 0
+            download_limit = None
 
         return {
             "hash": torrent_id,
@@ -8668,6 +8707,7 @@ class BrushFlowLowFreq(_PluginBase):
             "downloaded": downloaded,
             "avg_upspeed": avg_upspeed,
             "avg_downspeed": avg_downspeed,
+            "download_limit": download_limit,
             "iatime": iatime,
             "dltime": dltime,
             "total_size": total_size,
