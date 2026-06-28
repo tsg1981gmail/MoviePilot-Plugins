@@ -260,6 +260,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "delete_when_no_free": True,
             "delete_free_remaining_minutes": 5,
         })
+        start_info_count = len(self.module.logger.info_messages)
         cases = [
             ("request_failed", None, "请求详情页失败"),
             ("login_page", "<form action='login.php'><input name='username'></form>", ""),
@@ -281,6 +282,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
                 self.assertFalse(should_delete, reason)
                 self.assertTrue(reason.startswith("失去免费删种检测跳过"), reason)
+
+        new_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(any("失去免费删种检测跳过" in msg for msg in new_logs), new_logs)
 
     def test_no_free_delete_removes_detail_page_without_free_marker(self):
         plugin = self._new_plugin({
@@ -932,6 +936,27 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         for key in removed_keys:
             with self.subTest(key=key):
                 self.assertNotIn(key, saved_config)
+
+    def test_update_config_logs_detailed_config_snapshot(self):
+        plugin = self._new_plugin({
+            "enabled": True,
+            "notify": False,
+            "downloader": "qb",
+            "upload_protection_enabled": True,
+            "upload_protection_rehearsal": True,
+            "yield_guard_enabled": True,
+        })
+        plugin.update_config = lambda config: None
+        start_info_count = len(self.module.logger.info_messages)
+
+        plugin._BrushFlowLowFreq__update_config()
+
+        new_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(any("插件配置快照[配置写回]" in msg for msg in new_logs), new_logs)
+        joined_logs = "\n".join(new_logs)
+        self.assertIn('"upload_protection_enabled": true', joined_logs)
+        self.assertIn('"yield_guard_enabled": true', joined_logs)
+        self.assertIn('"site_config_count": 0', joined_logs)
 
     def test_validate_and_fix_config_reports_invalid_yield_guard_values(self):
         plugin = self._new_plugin({"enabled": True})
@@ -5113,6 +5138,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "unmanaged": {},
         }.get(key, {})
         plugin.save_data = lambda *args, **kwargs: None
+        start_info_count = len(self.module.logger.info_messages)
         original_time = self.module.time.time
         self.module.time.time = lambda: 2
         try:
@@ -5204,6 +5230,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "unmanaged": {},
         }.get(key, {})
         plugin.save_data = lambda *args, **kwargs: None
+        start_info_count = len(self.module.logger.info_messages)
         original_time = self.module.time.time
         self.module.time.time = lambda: 2
         try:
@@ -5217,6 +5244,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertFalse(torrent_tasks["abcdef"].get("deleted"))
         self.assertIn("下载中任务数 1 小于等于例外阈值 1",
                       torrent_tasks["abcdef"].get("upload_protection_last_reason", ""))
+        new_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(any("下载中任务数 1 小于等于例外阈值 1" in msg and "放开下载限速" in msg
+                            for msg in new_logs), new_logs)
 
     def test_check_skips_upload_protection_for_completed_managed_torrents(self):
         class FakeQbc:

@@ -467,7 +467,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.52"
+    plugin_version = "4.3.53"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -521,17 +521,19 @@ class BrushFlowLowFreq(_PluginBase):
         if not self.__validate_and_fix_config(config=config):
             self._brush_config = BrushConfig(config=config)
             self._brush_config.enabled = False
-            self.__update_config()
+            self.__log_config_snapshot(brush_config=self._brush_config, reason="配置校验失败后停用")
+            self.__update_config(reason="配置校验失败后停用")
             return
 
         self._brush_config = BrushConfig(config=config)
 
         brush_config = self._brush_config
+        self.__log_config_snapshot(brush_config=brush_config, reason="启动加载初始配置")
 
         # 判断是否存在插件冲突，如果存在则停用
         if not self.__check_and_resolve_plugin_conflict():
             self._brush_config.enabled = False
-            self.__update_config()
+            self.__update_config(reason="检测到官方插件冲突后停用")
             return
 
         # 这里先过滤掉已删除的站点并保存，特别注意的是，这里保留了界面选择站点时的顺序，以便后续站点随机刷流或顺序刷流
@@ -542,12 +544,12 @@ class BrushFlowLowFreq(_PluginBase):
                 if site_id in site_id_to_public_status and not site_id_to_public_status[site_id]
             ]
 
-        self.__update_config()
+        self.__update_config(reason="初始化时过滤站点配置")
 
         if brush_config.clear_task:
             self.__clear_tasks()
             brush_config.clear_task = False
-            self.__update_config()
+            self.__update_config(reason="初始化时清理任务后写回")
 
         # 同步官方插件
         self.__sync_official(config=config)
@@ -570,7 +572,7 @@ class BrushFlowLowFreq(_PluginBase):
         # 如果下载器都没有配置，那么这里也不需要继续
         if not brush_config.downloader:
             brush_config.enabled = False
-            self.__update_config()
+            self.__update_config(reason="初始化时缺少下载器，已停用")
             logger.info(f"站点刷流服务停止，没有配置下载器")
             return
 
@@ -597,7 +599,7 @@ class BrushFlowLowFreq(_PluginBase):
 
             # 关闭一次性开关
             brush_config.onlyonce = False
-            self.__update_config()
+            self.__update_config(reason="一次性任务执行后关闭开关")
 
             # 存在任务则启动任务
             if self._scheduler.get_jobs():
@@ -5216,6 +5218,12 @@ class BrushFlowLowFreq(_PluginBase):
         return f"{speed_bytes / 1024:.1f} KB/s"
 
     @staticmethod
+    def __format_minutes(minutes: Optional[float]) -> str:
+        if minutes is None:
+            return "未知"
+        return f"{float(minutes):.0f} 分钟"
+
+    @staticmethod
     def __format_percent(percent: Optional[float]) -> str:
         if percent is None:
             return "未知"
@@ -5782,6 +5790,7 @@ class BrushFlowLowFreq(_PluginBase):
         handled = False
         stage = str(torrent_task.get("upload_protection_stage") or "normal")
         pending_action = str(torrent_task.get("upload_protection_pending_action") or "").strip().lower()
+        target_limit = int(self.__positive_float(getattr(brush_config, "dl_speed", 0), 0.0) * 1024)
         if stage in {"limited", "strict_limited", "released"} or pending_action:
             handled = self.__apply_qb_upload_protection_action(
                 torrent_hash=torrent_hash,
@@ -5799,6 +5808,11 @@ class BrushFlowLowFreq(_PluginBase):
                 executed=handled,
                 site_name=site_name
             )
+        logger.info(
+            f"上传保护放开限速评估：站点：{site_name}，hash={torrent_hash}，阶段={stage}，"
+            f"待处理动作={pending_action or 'none'}，下载中任务数={downloading_count}，例外阈值={skip_threshold}，"
+            f"目标限速={self.__format_speed_kbs(target_limit)}，执行结果={'已执行' if handled else '未执行'}，原因={reason}"
+        )
 
         torrent_task["upload_protection_stage"] = "released"
         torrent_task["upload_protection_low_streak"] = 0
@@ -6708,12 +6722,22 @@ class BrushFlowLowFreq(_PluginBase):
         is_still_free, free_reason, free_remaining_minutes = self.__check_torrent_current_free_status(
             torrent_task=torrent_task
         )
+        threshold_minutes = self.__get_delete_free_remaining_threshold(brush_config=brush_config)
+        logger.info(
+            f"失去免费删种评估：站点={site_name}，标题={torrent_task.get('title', '')}，"
+            f"原始免费=True，当前免费={is_still_free}，详情页结果={free_reason or '无'}，"
+            f"剩余={self.__format_minutes(free_remaining_minutes)}，阈值={self.__format_minutes(threshold_minutes)}"
+        )
         if is_still_free is False:
             return True, "检测到种子已不免费，按配置执行彻底删除"
         if is_still_free is None:
+            logger.info(
+                f"失去免费删种检测跳过：站点={site_name}，标题={torrent_task.get('title', '')}，"
+                f"原因={free_reason or '未知'}，剩余={self.__format_minutes(free_remaining_minutes)}，"
+                f"阈值={self.__format_minutes(threshold_minutes)}"
+            )
             return False, f"失去免费删种检测跳过，原因：{free_reason}"
 
-        threshold_minutes = self.__get_delete_free_remaining_threshold(brush_config=brush_config)
         if free_remaining_minutes is None:
             return False, "仍为免费种子"
         if free_remaining_minutes < threshold_minutes:
@@ -6748,7 +6772,7 @@ class BrushFlowLowFreq(_PluginBase):
                                              torrent_desc=torrent_desc, reason=reason)
                 logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
             elif reason and reason.startswith("失去免费删种检测跳过"):
-                logger.debug(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
+                logger.info(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
 
         return delete_hashes
 
@@ -7956,7 +7980,74 @@ class BrushFlowLowFreq(_PluginBase):
         # 如果发现任何错误，返回False；否则返回True
         return not found_error
 
-    def __update_config(self, brush_config: BrushConfig = None):
+    @staticmethod
+    def __is_sensitive_config_key(key: str) -> bool:
+        lowered_key = str(key or "").lower()
+        sensitive_tokens = (
+            "cookie",
+            "token",
+            "secret",
+            "password",
+            "passkey",
+            "authorization",
+            "api_key",
+            "apikey",
+        )
+        return any(token in lowered_key for token in sensitive_tokens)
+
+    @classmethod
+    def __sanitize_snapshot_value(cls, key: str, value: Any):
+        if cls.__is_sensitive_config_key(key):
+            return "***"
+        if isinstance(value, dict):
+            return {str(item_key): cls.__sanitize_snapshot_value(str(item_key), item_value)
+                    for item_key, item_value in value.items()}
+        if isinstance(value, list):
+            return [cls.__sanitize_snapshot_value(key, item_value) for item_value in value]
+        if isinstance(value, tuple):
+            return [cls.__sanitize_snapshot_value(key, item_value) for item_value in value]
+        if isinstance(value, set):
+            return [cls.__sanitize_snapshot_value(key, item_value) for item_value in sorted(value, key=str)]
+        return value
+
+    def __build_config_snapshot(self, brush_config: BrushConfig = None, include_site_configs: bool = True) -> dict:
+        if brush_config is None:
+            brush_config = self._brush_config
+        if brush_config is None:
+            return {}
+
+        snapshot = {}
+        for key, value in vars(brush_config).items():
+            if key in {"group_site_configs"}:
+                continue
+            if key == "site_config":
+                snapshot["site_config_raw_length"] = len(value or "")
+                continue
+            snapshot[key] = self.__sanitize_snapshot_value(key, value)
+
+        site_configs = getattr(brush_config, "group_site_configs", {}) or {}
+        snapshot["site_config_count"] = len(site_configs)
+        snapshot["site_config_sites"] = sorted(site_configs.keys())
+
+        if include_site_configs and brush_config.enable_site_config and site_configs:
+            snapshot["site_configs"] = {}
+            for sitename, site_config in sorted(site_configs.items(), key=lambda item: item[0]):
+                site_snapshot = self.__build_config_snapshot(brush_config=site_config, include_site_configs=False)
+                site_snapshot["sitename"] = sitename
+                snapshot["site_configs"][sitename] = site_snapshot
+
+        return snapshot
+
+    def __log_config_snapshot(self, brush_config: BrushConfig = None, reason: str = ""):
+        brush_config = brush_config or self._brush_config
+        if brush_config is None:
+            return
+
+        snapshot = self.__build_config_snapshot(brush_config=brush_config)
+        reason = reason or "配置写回"
+        logger.info(f"插件配置快照[{reason}]：{json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)}")
+
+    def __update_config(self, brush_config: BrushConfig = None, reason: str = ""):
         """
         根据传入的BrushConfig实例更新配置
         """
@@ -8027,6 +8118,8 @@ class BrushFlowLowFreq(_PluginBase):
             "site_config": brush_config.site_config,
             "_tabs": self._tabs
         }
+
+        self.__log_config_snapshot(brush_config=brush_config, reason=reason or "配置写回")
 
         # 使用update_config方法或其等效方法更新配置
         self.update_config(config_mapping)
@@ -8435,9 +8528,17 @@ class BrushFlowLowFreq(_PluginBase):
                     limit=download_limit,
                     torrent_hashes=[torrent_hash]
                 )
+                logger.info(
+                    f"上传保护执行 qB 动作成功，站点：{site_name}，hash={torrent_hash}，"
+                    f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}，原因={reason}"
+                )
                 return True
             if hasattr(downloader, "change_torrent"):
                 downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)
+                logger.info(
+                    f"上传保护执行下载器动作成功，站点：{site_name}，hash={torrent_hash}，"
+                    f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}，原因={reason}"
+                )
                 return True
         except Exception as err:
             logger.error(
