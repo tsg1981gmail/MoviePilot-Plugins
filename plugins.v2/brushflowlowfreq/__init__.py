@@ -245,6 +245,8 @@ class BrushConfig:
             "seed_inactivetime",
             "save_path",
             "proxy_delete",
+            "delete_when_no_free",
+            "delete_free_remaining_minutes",
             "qb_category",
             "site_hr_active",
             "site_skip_tips",
@@ -467,7 +469,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.54"
+    plugin_version = "4.3.55"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1202,23 +1204,6 @@ class BrushFlowLowFreq(_PluginBase):
                                     }
                                 ]
                             },
-                            {
-                                'component': 'VCol',
-                                'props': {
-                                    "cols": 12,
-                                    "md": 3
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VTextField',
-                                        'props': {
-                                            'model': 'delete_size_range',
-                                            'label': '动态删种阈值（GB）',
-                                            'placeholder': '如：500 或 500-1000，达到后删除任务'
-                                        }
-                                    }
-                                ]
-                            }
                         ]
                     },
                     {
@@ -3052,8 +3037,6 @@ class BrushFlowLowFreq(_PluginBase):
         return {
             "seed_ratio_check_minutes",
             "filter_seeding_torrents",
-            "delete_when_no_free",
-            "delete_free_remaining_minutes",
             "interval_upspeed",
             "interval_upspeed_check_count",
             "interval_upspeed_low_count",
@@ -3128,6 +3111,120 @@ class BrushFlowLowFreq(_PluginBase):
         if not any(item.get("props", {}).get("value") == "upload_protection_tab" for item in window_content):
             insert_index = self.__find_tab_insert_index(window_content, before_value="delete_tab")
             window_content.insert(insert_index, self.__build_upload_protection_tab())
+        self.__organize_form_tabs(window_content)
+
+    def __organize_form_tabs(self, window_content: List[dict]) -> None:
+        items_by_tab = {
+            item.get("props", {}).get("value"): item
+            for item in window_content
+            if isinstance(item, dict)
+        }
+        self.__move_form_model_to_tab(
+            source_items=window_content,
+            target_item=items_by_tab.get("download_tab"),
+            model="free_remaining_time_skip_range"
+        )
+        self.__move_form_model_to_tab(
+            source_items=window_content,
+            target_item=items_by_tab.get("download_tab"),
+            model="include_second_page"
+        )
+        self.__move_form_model_to_tab(
+            source_items=window_content,
+            target_item=items_by_tab.get("delete_tab"),
+            model="delete_size_range"
+        )
+        if not self.__find_form_model(items_by_tab.get("delete_tab"), "delete_size_range"):
+            self.__append_form_component_to_tab(
+                items_by_tab.get("delete_tab"),
+                self.__form_text_field(
+                    model="delete_size_range",
+                    label="动态删种阈值（GB）",
+                    placeholder="如：500 或 500-1000，达到后删除任务"
+                )
+            )
+        self.__move_form_model_to_tab(
+            source_items=window_content,
+            target_item=items_by_tab.get("delete_tab"),
+            model="proxy_delete"
+        )
+
+    @staticmethod
+    def __form_text_field(model: str, label: str, placeholder: str = "") -> dict:
+        return {
+            "component": "VCol",
+            "props": {"cols": 12, "md": 4},
+            "content": [{
+                "component": "VTextField",
+                "props": {
+                    "model": model,
+                    "label": label,
+                    "placeholder": placeholder
+                }
+            }]
+        }
+
+    def __move_form_model_to_tab(self, source_items: List[dict], target_item: Optional[dict], model: str) -> None:
+        if not target_item:
+            return
+        target_content = target_item.setdefault("content", [])
+        if self.__find_form_model(target_content, model):
+            return
+
+        for item in source_items:
+            component = self.__pop_form_model(item, model)
+            if component:
+                self.__append_form_component_to_tab(target_item, component)
+                return
+
+    @classmethod
+    def __append_form_component_to_tab(cls, tab_item: dict, component: dict) -> None:
+        if not tab_item:
+            return
+        content = tab_item.setdefault("content", [])
+        if content and isinstance(content[-1], dict) and content[-1].get("component") == "VRow":
+            row = content[-1]
+        else:
+            row = {"component": "VRow", "content": []}
+            content.append(row)
+        row.setdefault("content", []).append(component)
+
+    @classmethod
+    def __find_form_model(cls, node: Any, model: str) -> bool:
+        if isinstance(node, dict):
+            props = node.get("props") or {}
+            if (props.get("model") or props.get("modelvalue")) == model:
+                return True
+            return any(cls.__find_form_model(child, model) for child in node.get("content") or [])
+        if isinstance(node, list):
+            return any(cls.__find_form_model(child, model) for child in node)
+        return False
+
+    @classmethod
+    def __pop_form_model(cls, node: Any, model: str) -> Optional[dict]:
+        if not isinstance(node, dict):
+            return None
+        content = node.get("content")
+        if not isinstance(content, list):
+            return None
+
+        for index, child in enumerate(list(content)):
+            if cls.__is_form_control_container(child, model):
+                return content.pop(index)
+            found = cls.__pop_form_model(child, model)
+            if found:
+                if isinstance(child, dict) and child.get("component") == "VRow" and not child.get("content"):
+                    content.remove(child)
+                return found
+        return None
+
+    @classmethod
+    def __is_form_control_container(cls, node: Any, model: str) -> bool:
+        if not isinstance(node, dict):
+            return False
+        if node.get("component") != "VCol":
+            return False
+        return cls.__find_form_model(node, model)
 
     def __build_upload_protection_tab(self) -> dict:
         def text_field(model: str, label: str, placeholder: str = "") -> dict:
@@ -8100,6 +8197,8 @@ class BrushFlowLowFreq(_PluginBase):
             "seed_avgspeed": brush_config.seed_avgspeed,
             "seed_inactivetime": brush_config.seed_inactivetime,
             "delete_size_range": brush_config.delete_size_range,
+            "delete_when_no_free": brush_config.delete_when_no_free,
+            "delete_free_remaining_minutes": brush_config.delete_free_remaining_minutes,
             "up_speed": brush_config.up_speed,
             "dl_speed": brush_config.dl_speed,
             "auto_archive_days": brush_config.auto_archive_days,

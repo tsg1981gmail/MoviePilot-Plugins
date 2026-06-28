@@ -4234,6 +4234,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "seed_inactivetime": 30,
             "filter_seeding_torrents": True,
             "delete_when_no_free": False,
+            "delete_free_remaining_minutes": 5,
             "yield_guard_enabled": False,
             "upload_protection_enabled": False,
             "site_config": (
@@ -4244,6 +4245,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 '"seed_inactivetime": 77, '
                 '"filter_seeding_torrents": false, '
                 '"delete_when_no_free": true, '
+                '"delete_free_remaining_minutes": 3, '
                 '"yield_guard_enabled": true, '
                 '"upload_protection_enabled": true}]'
             ),
@@ -4256,7 +4258,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(77, site_config.seed_inactivetime)
         self.assertEqual(30, site_config.seed_ratio_check_minutes)
         self.assertTrue(site_config.filter_seeding_torrents)
-        self.assertFalse(site_config.delete_when_no_free)
+        self.assertTrue(site_config.delete_when_no_free)
+        self.assertEqual(3, site_config.delete_free_remaining_minutes)
         self.assertFalse(site_config.yield_guard_enabled)
         self.assertTrue(site_config.upload_protection_enabled)
 
@@ -4289,10 +4292,10 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(400, config.get("upload_protection_download_limit_kbs"))
         self.assertEqual(2, config.get("upload_protection_skip_when_downloading_le"))
         self.assertEqual(10, config.get("seed_size"))
+        self.assertTrue(config.get("delete_when_no_free"))
+        self.assertEqual(5, config.get("delete_free_remaining_minutes"))
         self.assertNotIn("seed_ratio_check_minutes", config)
         self.assertNotIn("filter_seeding_torrents", config)
-        self.assertNotIn("delete_when_no_free", config)
-        self.assertNotIn("delete_free_remaining_minutes", config)
         self.assertNotIn("yield_guard_enabled", config)
         self.assertNotIn("interval_upspeed", config)
         self.assertNotIn("seed_ratio_limit_download_kbs", config)
@@ -4338,8 +4341,6 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         removed_models = {
             "seed_ratio_check_minutes",
             "filter_seeding_torrents",
-            "delete_when_no_free",
-            "delete_free_remaining_minutes",
             "interval_upspeed",
             "interval_upspeed_check_count",
             "interval_upspeed_low_count",
@@ -4363,6 +4364,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "seed_avgspeed",
             "seed_inactivetime",
             "delete_except_tags",
+            "delete_when_no_free",
+            "delete_free_remaining_minutes",
         }
 
         self.assertIn("上传保护", collect_texts(form))
@@ -4416,8 +4419,6 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         removed_upload_strategy_models = {
             "seed_ratio_check_minutes",
             "filter_seeding_torrents",
-            "delete_when_no_free",
-            "delete_free_remaining_minutes",
             "seed_ratio_speed_protect",
             "seed_ratio_limit_download_kbs",
             "seed_ratio_limit_restore_upspeed_kbs",
@@ -4435,6 +4436,86 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(legacy_434_delete_models.issubset(models), legacy_434_delete_models - models)
         self.assertTrue(removed_upload_strategy_models.isdisjoint(models),
                         removed_upload_strategy_models & models)
+
+    def test_get_form_groups_selection_delete_and_other_controls_by_tab(self):
+        plugin = self._new_qb_plugin()
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.downloader_helper.get_configs = lambda: {}
+
+        form, _ = plugin.get_form()
+
+        def collect_models(node):
+            models = []
+            if isinstance(node, dict):
+                props = node.get("props") or {}
+                model = props.get("model") or props.get("modelvalue")
+                if model:
+                    models.append(model)
+                for child in node.get("content") or []:
+                    models.extend(collect_models(child))
+            elif isinstance(node, list):
+                for child in node:
+                    models.extend(collect_models(child))
+            return models
+
+        def find_component(node, component):
+            if isinstance(node, dict):
+                if node.get("component") == component:
+                    return node
+                for child in node.get("content") or []:
+                    found = find_component(child, component)
+                    if found:
+                        return found
+            elif isinstance(node, list):
+                for child in node:
+                    found = find_component(child, component)
+                    if found:
+                        return found
+            return None
+
+        window = find_component(form, "VWindow")
+        models_by_tab = {
+            item.get("props", {}).get("value"): collect_models(item)
+            for item in window.get("content", [])
+        }
+        row_children_by_tab = {
+            tab: [
+                child.get("component")
+                for row in item.get("content", [])
+                if isinstance(row, dict) and row.get("component") == "VRow"
+                for child in row.get("content", [])
+                if isinstance(child, dict)
+            ]
+            for tab, item in (
+                (item.get("props", {}).get("value"), item)
+                for item in window.get("content", [])
+            )
+        }
+
+        self.assertTrue({
+            "free_remaining_time_skip_range",
+            "include_second_page",
+        }.issubset(models_by_tab["download_tab"]))
+        self.assertTrue({
+            "delete_size_range",
+            "proxy_delete",
+            "delete_when_no_free",
+            "delete_free_remaining_minutes",
+        }.issubset(models_by_tab["delete_tab"]))
+        self.assertTrue({
+            "brush_sequential",
+            "except_subscribe",
+            "clear_task",
+            "enable_site_config",
+            "dialog_closed",
+            "sync_official",
+        }.issubset(models_by_tab["other_tab"]))
+        self.assertNotIn("free_remaining_time_skip_range", models_by_tab["base_tab"])
+        self.assertNotIn("delete_size_range", models_by_tab["base_tab"])
+        self.assertNotIn("include_second_page", models_by_tab["other_tab"])
+        self.assertNotIn("proxy_delete", models_by_tab["other_tab"])
+        self.assertTrue(all(component == "VCol" for component in row_children_by_tab["download_tab"]))
+        self.assertTrue(all(component == "VCol" for component in row_children_by_tab["delete_tab"]))
 
     def test_get_page_download_dashboard_uses_popover_dialogs_without_anchor_targets(self):
         now = datetime.now()
