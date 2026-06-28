@@ -467,7 +467,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.53"
+    plugin_version = "4.3.54"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1503,23 +1503,6 @@ class BrushFlowLowFreq(_PluginBase):
                                             {
                                                 'component': 'VCol',
                                                 'props': {
-                                                    'cols': 12,
-                                                    'md': 4
-                                                },
-                                                'content': [
-                                                    {
-                                                        'component': 'VTextField',
-                                                        'props': {
-                                                            'model': 'delete_free_remaining_minutes',
-                                                            'label': '免费临期删种阈值（分钟）',
-                                                            'placeholder': '默认5，开启失去免费即删种后生效'
-                                                        }
-                                                    }
-                                                ]
-                                            },
-                                            {
-                                                'component': 'VCol',
-                                                'props': {
                                                     "cols": 12,
                                                     "md": 4
                                                 },
@@ -2087,6 +2070,39 @@ class BrushFlowLowFreq(_PluginBase):
                                                             'model': 'delete_except_tags',
                                                             'label': '删除排除标签',
                                                             'placeholder': '如：MOVIEPILOT,H&R'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'delete_when_no_free',
+                                                            'label': '失去免费即删种',
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'delete_free_remaining_minutes',
+                                                            'label': '免费临期删种阈值（分钟）',
+                                                            'placeholder': '默认5，开启失去免费即删种后生效'
                                                         }
                                                     }
                                                 ]
@@ -2692,22 +2708,6 @@ class BrushFlowLowFreq(_PluginBase):
                                     {
                                         'component': 'VRow',
                                         'content': [
-                                            {
-                                                'component': 'VCol',
-                                                'props': {
-                                                    'cols': 12,
-                                                    'md': 4
-                                                },
-                                                'content': [
-                                                    {
-                                                        'component': 'VSwitch',
-                                                        'props': {
-                                                            'model': 'delete_when_no_free',
-                                                            'label': '失去免费即删种',
-                                                        }
-                                                    }
-                                                ]
-                                            },
                                             {
                                                 'component': 'VCol',
                                                 'props': {
