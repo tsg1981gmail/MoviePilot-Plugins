@@ -467,7 +467,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.51"
+    plugin_version = "4.3.52"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -4710,23 +4710,36 @@ class BrushFlowLowFreq(_PluginBase):
                 # 如果配置了动态删除以及删种阈值，则根据动态删种进行分组处理
                 if brush_config.proxy_delete and brush_config.delete_size_range:
                     logger.info("已开启动态删种，按系统默认动态删种条件开始检查任务")
+                    no_free_delete_hashes = self.__delete_torrent_for_no_free(
+                        torrents=check_torrents,
+                        torrent_tasks=torrent_tasks,
+                        delete_message_map=delete_message_map
+                    ) or []
                     upload_protection_delete_hash_set = set(upload_protection_delete_hashes)
                     proxy_check_torrents = [torrent for torrent in check_torrents
-                                            if self.__get_hash(torrent) not in upload_protection_delete_hash_set]
+                                            if self.__get_hash(torrent) not in (upload_protection_delete_hash_set
+                                                                                | set(no_free_delete_hashes))]
 
                     proxy_delete_hashes = self.__delete_torrent_for_proxy(torrents=proxy_check_torrents,
                                                                           torrent_tasks=torrent_tasks,
                                                                           delete_message_map=delete_message_map,
                                                                           delete_summary_messages=delete_summary_messages,
                                                                           downloading_count=downloading_count) or []
+                    need_delete_hashes.extend(no_free_delete_hashes)
                     need_delete_hashes.extend(proxy_delete_hashes)
                 # 否则均认为是没有开启动态删种
                 else:
                     logger.info("没有开启动态删种，按用户设置删种条件开始检查任务")
+                    no_free_delete_hashes = self.__delete_torrent_for_no_free(
+                        torrents=check_torrents,
+                        torrent_tasks=torrent_tasks,
+                        delete_message_map=delete_message_map
+                    ) or []
                     not_proxy_delete_hashes = self.__delete_torrent_for_evaluate_conditions(torrents=check_torrents,
                                                                                             torrent_tasks=torrent_tasks,
                                                                                             delete_message_map=delete_message_map,
                                                                                             downloading_count=downloading_count) or []
+                    need_delete_hashes.extend(no_free_delete_hashes)
                     need_delete_hashes.extend(not_proxy_delete_hashes)
 
                 if need_delete_hashes:

@@ -379,6 +379,107 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertFalse(should_delete, reason)
         self.assertEqual("未能满足设置的删除条件", reason)
 
+    def test_check_deletes_torrent_after_free_ends(self):
+        class FakeQbc:
+            def __init__(self):
+                self.reannounced = []
+
+            def torrents_reannounce(self, torrent_hashes):
+                self.reannounced.append(torrent_hashes)
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+                self.deleted = []
+                self.torrents = [{
+                    "hash": "abcdef",
+                    "name": "free ending torrent",
+                    "tags": "刷流",
+                    "state": "seeding",
+                    "progress": 1.0,
+                    "downloaded": 100,
+                    "uploaded": 0,
+                    "total_size": 100,
+                    "ratio": 0,
+                    "added_on": 1,
+                    "completion_on": 0,
+                    "last_activity": 1,
+                    "tracker": "tracker",
+                    "downloadvolumefactor": 0,
+                    "freedate": "",
+                    "freedate_diff": "10分钟",
+                }]
+
+            def is_inactive(self):
+                return False
+
+            def get_torrents(self):
+                return list(self.torrents), None
+
+            def delete_torrents(self, ids, delete_file=True):
+                self.deleted = ids
+                self.delete_file = delete_file
+                self.torrents = [torrent for torrent in self.torrents if torrent.get("hash") not in ids]
+                return True
+
+        plugin = self._new_qb_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+            "freeleech": "",
+            "hr": "no",
+        }, downloader=FakeDownloader())
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
+        plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+            lambda *, site_id, page_url: (
+                "<a href='download.php?id=1'>下载</a><h1 id='top'>normal torrent</h1>",
+                ""
+            )
+        )
+        torrent_tasks = {
+            "abcdef": {
+                "site": 1,
+                "site_name": "站点1",
+                "title": "free ending torrent",
+                "description": "desc",
+                "page_url": "details.php?id=1",
+                "time": 0,
+                "downloaded": 100,
+                "uploaded": 0,
+                "total_size": 100,
+                "ratio": 0,
+                "seeding_time": 3600,
+                "hit_and_run": False,
+                "freedate": "",
+                "freedate_diff": "10分钟",
+                "downloadvolumefactor": 0,
+                "deleted": False,
+                "first_downloaded_time": 1,
+                "first_uploaded_time": 1,
+                "last_check_time": 1,
+                "last_check_uploaded": 0,
+                "last_check_downloaded": 0,
+            }
+        }
+        plugin.get_data = lambda key: {
+            "torrents": torrent_tasks,
+            "unmanaged": {},
+        }.get(key, {})
+        plugin.save_data = lambda *args, **kwargs: None
+
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 2
+        try:
+            plugin.check()
+        finally:
+            self.module.time.time = original_time
+
+        self.assertEqual(["abcdef"], plugin.downloader.deleted)
+        self.assertTrue(plugin.downloader.delete_file)
+        self.assertTrue(torrent_tasks["abcdef"].get("deleted"))
+        self.assertIn("已不免费", "".join(self.module.logger.info_messages))
+
     def test_legacy_434_allows_seed_time_for_seeding_torrents(self):
         plugin = self._new_plugin({
             "seed_time": 1,
