@@ -374,7 +374,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.57"
+    plugin_version = "4.3.58"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1691,45 +1691,692 @@ class BrushFlowLowFreq(_PluginBase):
                                 ]
                             },
                             {
-                                                            'component': 'VWindowItem',
-                            'props': {
-                                'value': 'delete_tab'
+                                'component': 'VWindowItem',
+                                'props': {
+                                    'value': 'delete_tab'
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VRow',
+                                        'props': {
+                                            'style': {
+                                                'margin-top': '0px'
+                                            }
+                                        },
+                                        'content': [
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_time',
+                                                            'label': '做种时间（小时）',
+                                                            'placeholder': '达到后删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'hr_seed_time',
+                                                            'label': 'H&R做种时间（小时）',
+                                                            'placeholder': '达到后删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio',
+                                                            'label': '分享率',
+                                                            'placeholder': '达到后删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_check_minutes',
+                                                            'label': '有下载数据后分钟数',
+                                                            'placeholder': '如：30，首次有下载数据后开始判断低分享率'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_min_30m',
+                                                            'label': '任务添加后最低分享率',
+                                                            'placeholder': '达到上述分钟数后，低于时删除任务；开启低分享率限速后改为限速观察'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_limit_download_kbs',
+                                                            'label': '低分享率下载限速（KB/s）',
+                                                            'placeholder': '如：256，分享率一次性检测不达标后限制下载，0=关闭'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_limit_restore_upspeed_kbs',
+                                                            'label': '低分享率恢复上传阈值（KB/s）',
+                                                            'placeholder': '如：100，检查间上传达到后计入恢复达标；0=使用检查间上传阈值'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_limit_restore_count',
+                                                            'label': '低分享率恢复连续次数',
+                                                            'placeholder': '如：3，连续达标后恢复下载速度'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_ratio_speed_protect',
+                                                            'label': '分享率保护速度阈值（KB/s）',
+                                                            'placeholder': '如：100，平均上传速度≥100KB/s时即使分享率低也不删，0=关闭'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'filter_seeding_torrents',
+                                                            'label': '是否筛选已做种？',
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        'component': 'VRow',
+                                        'content': [
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_size',
+                                                            'label': '上传量（GB）',
+                                                            'placeholder': '达到后删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_avgspeed',
+                                                            'label': '平均上传速度（KB/s）',
+                                                            'placeholder': '低于时删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'download_time',
+                                                            'label': '下载超时时间（小时）',
+                                                            'placeholder': '达到后删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'seed_inactivetime',
+                                                            'label': '未活动时间（分钟）',
+                                                            'placeholder': '超过时删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'interval_upspeed',
+                                                            'label': '检查间上传速度阈值（KB/s）',
+                                                            'placeholder': '低于时计入低速命中'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_check_count',
+                                                            'label': '检查间低速观察次数',
+                                                            'placeholder': '如：3，统计最近3次检查'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_low_count',
+                                                            'label': '检查间低速命中次数',
+                                                            'placeholder': '如：2，达到后删除任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_start_minutes',
+                                                            'label': '有上传数据后开始低速统计分钟数',
+                                                            'placeholder': '如：30，首次有上传数据后开始记录'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    "cols": 12,
+                                                    "md": 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'delete_except_tags',
+                                                            'label': '删除排除标签',
+                                                            'placeholder': '如：MOVIEPILOT,H&R'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'delete_when_no_free',
+                                                            'label': '失去免费即删种',
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'delete_free_remaining_minutes',
+                                                            'label': '免费临期删种阈值（分钟）',
+                                                            'placeholder': '默认5，开启失去免费即删种后生效'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_continuous',
+                                                            'label': '检查间低速按连续命中判定',
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'interval_upspeed_rehearsal',
+                                                            'label': '检查间低速演练模式（只提醒不删）',
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'skip_rules_downloading_threshold',
+                                                            'label': '下载保护阈值',
+                                                            'placeholder': '如：3，下载中种子数≤3时跳过分享率和上传速度检查，0=关闭'
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                    , {
+                                        'component': 'VRow',
+                                        'content': [
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'yield_guard_enabled',
+                                                            'label': '上传收益保护'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'yield_guard_rehearsal',
+                                                            'label': '上传收益保护演练模式'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'yield_guard_detail_log',
+                                                            'label': '上传收益保护详细日志'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'yield_guard_protect_delete_rules',
+                                                            'label': '保护高上传任务'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_high_download_kbs',
+                                                            'label': '收益保护高下载阈值（KB/s）',
+                                                            'placeholder': '如：2048，检查间下载达到后参与判断'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_low_upload_kbs',
+                                                            'label': '收益保护低上传阈值（KB/s）',
+                                                            'placeholder': '如：200，检查间上传低于时计入低收益'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_low_ratio_percent',
+                                                            'label': '收益保护低收益比阈值（%）',
+                                                            'placeholder': '如：8，检查间上传/下载低于该比例'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_ratio_min_download_kbs',
+                                                            'label': '收益比判断最小下载速度（KB/s）',
+                                                            'placeholder': '如：500，下载达到后才判断收益比'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_ratio_protect_upload_kbs',
+                                                            'label': '收益比保护上传阈值（KB/s）',
+                                                            'placeholder': '如：200，收益比低但上传达到该值时继续观察'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'yield_guard_pressure_strategy',
+                                                            'label': '上传收益保护压力策略',
+                                                            'items': [
+                                                                {'title': '自动判断', 'value': 'auto'},
+                                                                {'title': '偏保守', 'value': 'conservative'},
+                                                                {'title': '偏激进', 'value': 'aggressive'},
+                                                                {'title': '宽松探测', 'value': 'loose'},
+                                                                {'title': '均衡处理', 'value': 'balanced'},
+                                                                {'title': '竞争淘汰', 'value': 'competition'},
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'yield_guard_small_pool_brush_strategy',
+                                                            'label': '任务少时新增策略',
+                                                            'items': [
+                                                                {'title': '自动放开', 'value': 'auto'},
+                                                                {'title': '保持限制', 'value': 'strict'},
+                                                                {'title': '积极补种', 'value': 'aggressive'},
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_bad_checks',
+                                                            'label': '低收益连续命中次数',
+                                                            'placeholder': '如：2，连续命中后执行动作'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_min_downloaded_gb',
+                                                            'label': '收益保护最小下载量（GB）',
+                                                            'placeholder': '如：2，达到后才处理'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_min_progress_percent',
+                                                            'label': '收益保护最小进度（%）',
+                                                            'placeholder': '如：10，达到后才处理'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_fast_fail_minutes',
+                                                            'label': '快速淘汰窗口（分钟）',
+                                                            'placeholder': '如：10，窗口内不直接删除'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_promising_pubtime_minutes',
+                                                            'label': '新发布短窗保护（分钟）',
+                                                            'placeholder': '如：15，发布时间内不直接删除'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_download_limit_kbs',
+                                                            'label': '低收益下载限速（KB/s）',
+                                                            'placeholder': '如：512，低收益限速动作使用'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_good_upload_kbs',
+                                                            'label': '高上传保护阈值（KB/s）',
+                                                            'placeholder': '如：500，检查间上传达到后保护'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_good_avg_upload_kbs',
+                                                            'label': '高平均上传保护阈值（KB/s）',
+                                                            'placeholder': '如：500，平均上传达到后保护'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'yield_guard_first_action',
+                                                            'label': '低收益首次动作',
+                                                            'items': [
+                                                                {'title': '不处理', 'value': 'none'},
+                                                                {'title': '下载限速', 'value': 'limit'},
+                                                                {'title': '暂停', 'value': 'pause'},
+                                                                {'title': '删除', 'value': 'delete'},
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'yield_guard_second_action',
+                                                            'label': '低收益二次动作',
+                                                            'items': [
+                                                                {'title': '不处理', 'value': 'none'},
+                                                                {'title': '暂停', 'value': 'pause'},
+                                                                {'title': '删除', 'value': 'delete'},
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'yield_guard_final_action',
+                                                            'label': '短窗后最终动作',
+                                                            'items': [
+                                                                {'title': '不处理', 'value': 'none'},
+                                                                {'title': '删除', 'value': 'delete'},
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'yield_guard_stop_brush_when_good_pool',
+                                                            'label': '高收益池满时停止新增'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_good_pool_min_count',
+                                                            'label': '高收益池最小数量',
+                                                            'placeholder': '如：2，达到后减少新增'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_probe_slots',
+                                                            'label': '收益保护探测名额',
+                                                            'placeholder': '如：1，保留新增探测任务数'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'yield_guard_probe_interval_minutes',
+                                                            'label': '收益保护探测间隔（分钟）',
+                                                            'placeholder': '如：10，两次探测新增的最小间隔'
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        ]
+                                    }
+                                ]
                             },
-                            'content': [
-                                {
-                                    'component': 'VRow',
-                                    'props': {'style': {'margin-top': '0px'}},
-                                    'content': [
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'seed_time', 'label': '做种时间（小时）', 'placeholder': '达到指定做种时间后删除任务'}}]},
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'hr_seed_time', 'label': 'H&R 做种时间（小时）', 'placeholder': 'H&R种子达到该时间后删除'}}]},
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'seed_ratio', 'label': '分享率', 'placeholder': '分享率达到指定值后删除任务'}}]}
-                                    ]
-                                },
-                                {
-                                    'component': 'VRow',
-                                    'content': [
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'seed_ratio_min_30m', 'label': '30 分钟最低分享率', 'placeholder': '做种30分钟后低于该分享率删除'}}]},
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'seed_size', 'label': '上传量（GB）', 'placeholder': '上传量达到指定值后删除任务'}}]},
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'seed_avgspeed', 'label': '平均上传速度（KB/s）', 'placeholder': '做种30分钟后低于该速度删除'}}]}
-                                    ]
-                                },
-                                {
-                                    'component': 'VRow',
-                                    'content': [
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'download_time', 'label': '下载超时时间（小时）', 'placeholder': '达到指定下载超时后删除任务'}}]},
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'seed_inactivetime', 'label': '未活动时间（分钟）', 'placeholder': '未活动时间超过该值后删除'}}]},
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'delete_except_tags', 'label': '删除排除标签', 'placeholder': '默认 MOVIEPILOT,H&R'}}]}
-                                    ]
-                                },
-                                {
-                                    'component': 'VRow',
-                                    'content': [
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VSwitch', 'props': {'model': 'delete_when_no_free', 'label': '失去免费即删种'}}]},
-                                        {'component': 'VCol', 'props': {'cols': 12, 'md': 4}, 'content': [{'component': 'VTextField', 'props': {'model': 'delete_free_remaining_minutes', 'label': '免费临期删种阈值（分钟）', 'placeholder': '默认5，开启失去免费即删种后生效'}}]}
-                                    ]
-                                }
-                            ]},
-
                             {
                                 'component': 'VWindowItem',
                                 'props': {
