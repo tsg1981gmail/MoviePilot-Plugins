@@ -31,6 +31,8 @@ from app.schemas import NotificationType, TorrentInfo, MediaType, ServiceInfo
 from app.schemas.types import EventType
 from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
+import shutil
+from pathlib import Path
 
 lock = threading.RLock()
 
@@ -390,6 +392,19 @@ class BrushConfig:
 }]"""
         return desc + config
 
+
+    @staticmethod
+    def __get_available_plugin_versions():
+        versions = [("current", "当前版本（最新）")]
+        try:
+            vdir = Path(__file__).parent / "versions"
+            if vdir.exists() and vdir.is_dir():
+                for f in sorted(vdir.glob("v*.py"), reverse=True):
+                    versions.append((f.stem, "备份版本 " + f.stem))
+        except Exception:
+            pass
+        return versions
+
     def get_site_config(self, sitename):
         """
         根据站点名称获取特定的BrushConfig实例。如果没有找到站点特定的配置，则返回全局的BrushConfig实例。
@@ -469,7 +484,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.59"
+    plugin_version = "4.3.60"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -512,12 +527,38 @@ class BrushFlowLowFreq(_PluginBase):
         self.subscribe_oper = SubscribeOper()
         self.downloader_helper = DownloaderHelper()
         self._task_brush_enable = False
+        self._is_qb = False
 
         if not config:
             logger.info("站点刷流任务出错，无法获取插件配置")
             return False
 
         self._tabs = config.get("_tabs", None)
+
+        # 自动版本切换
+        target_ver = config.get("plugin_version") or config.get("brushflowlowfreq_plugin_version") or "current"
+        if target_ver != "current":
+            src = Path(__file__).parent / "versions" / (target_ver + ".py")
+            dst = Path(__file__)
+            if src.exists() and src.is_file():
+                try:
+                    shutil.copy2(src, dst)
+                    config["plugin_version"] = "current"
+                    if "brushflowlowfreq_plugin_version" in config:
+                        config["brushflowlowfreq_plugin_version"] = "current"
+                    self.update_config(config)
+                    logger.info("插件版本已切换至 " + target_ver + "，重启 MoviePilot 后生效")
+                    try:
+                        self.post_message(mtype=NotificationType.SiteMessage, title="【插件版本切换】", text="已切换至 " + target_ver + "，请重启 MoviePilot 使新版本生效")
+                    except Exception:
+                        pass
+                    return False
+                except Exception as e:
+                    logger.error("版本切换失败: " + str(e))
+            else:
+                logger.warning("版本文件不存在: " + str(src))
+                config["plugin_version"] = "current"
+                self.update_config(config)
 
         # 如果配置校验没有通过，那么这里修改配置文件后退出
         if not self.__validate_and_fix_config(config=config):
@@ -624,6 +665,7 @@ class BrushFlowLowFreq(_PluginBase):
             self.__log_and_notify_error("站点刷流任务出错，下载器未连接")
             return None
 
+        self._is_qb = self.downloader_helper.is_downloader("qbittorrent", service=service)
         return service
 
     @property
@@ -2761,6 +2803,27 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
+                                            },
+                                            {
+                                                'component': 'VRow',
+                                                'content': [
+                                                    {
+                                                        'component': 'VCol',
+                                                        'props': {'cols': 12, 'md': 6},
+                                                        'content': [{
+                                                            'component': 'VSelect',
+                                                            'props': {
+                                                                'model': 'plugin_version',
+                                                                'label': '切换插件版本',
+                                                                'items': [
+                                                                    {'title': '当前版本（最新）', 'value': 'current'},
+                                                                    {'title': 'v4.3.55（完整版-含收益保护）', 'value': 'v4.3.55'},
+                                                                ],
+                                                                'hint': '选择版本并保存后自动切换，重启 MP 生效'
+                                                            }
+                                                        }]
+                                                    }
+                                                ]
                                             }
                                         ]
                                     }
@@ -3030,6 +3093,7 @@ class BrushFlowLowFreq(_PluginBase):
             "upload_protection_min_downloaded_gb": 0,
             "upload_protection_detail_log": False,
             "upload_protection_skip_when_downloading_le": 0,
+            "plugin_version": "current",
         }
 
     @staticmethod
@@ -3112,6 +3176,7 @@ class BrushFlowLowFreq(_PluginBase):
             insert_index = self.__find_tab_insert_index(window_content, before_value="delete_tab")
             window_content.insert(insert_index, self.__build_upload_protection_tab())
         self.__organize_form_tabs(window_content)
+        self.__prune_empty_form_layout(window_content)
 
     def __organize_form_tabs(self, window_content: List[dict]) -> None:
         items_by_tab = {
@@ -3253,6 +3318,17 @@ class BrushFlowLowFreq(_PluginBase):
                 }]
             }
 
+        def section_label(text: str) -> dict:
+            return {
+                "component": "VCol",
+                "props": {"cols": 12},
+                "content": [{
+                    "component": "div",
+                    "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"},
+                    "text": text
+                }]
+            }
+
         return {
             "component": "VWindowItem",
             "props": {"value": "upload_protection_tab"},
@@ -3260,11 +3336,19 @@ class BrushFlowLowFreq(_PluginBase):
                 {
                     "component": "VRow",
                     "props": {"style": {"margin-top": "0px"}},
+                    "content": [section_label("启停与模式")]
+                },
+                {
+                    "component": "VRow",
                     "content": [
                         switch("upload_protection_enabled", "启用上传保护"),
                         switch("upload_protection_rehearsal", "演练模式"),
                         switch("upload_protection_detail_log", "详细日志"),
                     ]
+                },
+                {
+                    "component": "VRow",
+                    "content": [section_label("速度阈值")]
                 },
                 {
                     "component": "VRow",
@@ -3279,25 +3363,33 @@ class BrushFlowLowFreq(_PluginBase):
                 },
                 {
                     "component": "VRow",
+                    "content": [section_label("限速动作条件")]
+                },
+                {
+                    "component": "VRow",
                     "content": [
                         text_field("upload_protection_low_limit_checks", "低速限速连续次数",
                                    "如：2，连续低速后限速"),
                         text_field("upload_protection_low_strict_checks", "严格限速连续次数",
                                    "如：3，连续低速后降为一半"),
-                        text_field("upload_protection_min_elapsed_minutes", "最小观察时间（分钟）",
-                                   "首次实际传输后开始判断，0=立即"),
+                        text_field("upload_protection_good_restore_checks", "恢复限速连续次数",
+                                   "如：2，连续达标后恢复原限速"),
                     ]
                 },
                 {
                     "component": "VRow",
                     "content": [
-                        text_field("upload_protection_good_restore_checks", "恢复限速连续次数",
-                                   "如：2，连续达标后恢复原限速"),
                         text_field("upload_protection_good_release_checks", "完全放开连续次数",
                                    "如：3，连续达标后放开限速"),
+                        text_field("upload_protection_min_elapsed_minutes", "最小观察时间（分钟）",
+                                   "首次实际传输后开始判断，0=立即"),
                         text_field("upload_protection_min_downloaded_gb", "删种最小下载量（GB）",
                                    "无上传价值删种前至少下载量，0=不限制"),
                     ]
+                },
+                {
+                    "component": "VRow",
+                    "content": [section_label("删种保护条件")]
                 },
                 {
                     "component": "VRow",
@@ -3331,6 +3423,24 @@ class BrushFlowLowFreq(_PluginBase):
                 child for child in node["content"]
                 if not cls.__remove_form_models(child, removed_models)
             ]
+            if node.get("component") in {"VRow", "VCol"} and not node["content"]:
+                return True
+        return False
+
+    @classmethod
+    def __prune_empty_form_layout(cls, node: Any) -> bool:
+        if isinstance(node, list):
+            node[:] = [child for child in node if not cls.__prune_empty_form_layout(child)]
+            return False
+        if not isinstance(node, dict):
+            return False
+
+        content = node.get("content")
+        if isinstance(content, list):
+            node["content"] = [child for child in content if not cls.__prune_empty_form_layout(child)]
+
+        if node.get("component") in {"VRow", "VCol"} and not node.get("content"):
+            return True
         return False
 
     @classmethod
@@ -4722,6 +4832,13 @@ class BrushFlowLowFreq(_PluginBase):
         with lock:
             logger.info("开始检查刷流下载任务 ...")
             torrent_tasks: Dict[str, dict] = self.get_data("torrents") or {}
+            active_torrent_tasks = {
+                h: t for h, t in torrent_tasks.items()
+                if isinstance(t, dict) and not t.get("deleted")
+            }
+            deleted_skip = len(torrent_tasks) - len(active_torrent_tasks)
+            if deleted_skip > 0:
+                logger.debug(f"跳过 {deleted_skip} 个已删除任务，剩余活跃 {len(active_torrent_tasks)} 个")
             unmanaged_tasks: Dict[str, dict] = self.get_data("unmanaged") or {}
             self.__normalize_task_hash_keys(torrent_tasks)
             self.__normalize_task_hash_keys(unmanaged_tasks)
@@ -4742,14 +4859,14 @@ class BrushFlowLowFreq(_PluginBase):
             self.__normalize_task_hash_keys(torrent_tasks)
             self.__normalize_task_hash_keys(unmanaged_tasks)
 
-            torrent_check_hashes = list(torrent_tasks.keys())
-            if not torrent_tasks or not torrent_check_hashes:
+            torrent_check_hashes = list(active_torrent_tasks.keys())
+            if not active_torrent_tasks or not torrent_check_hashes:
                 logger.info("没有需要检查的刷流下载任务")
                 return
             for torrent_task in torrent_tasks.values():
                 self.__clear_yield_guard_check_cache(torrent_task)
 
-            logger.info(f"共有 {len(torrent_check_hashes)} 个任务正在刷流，开始检查任务状态")
+            logger.info(f"共有 {len(active_torrent_tasks)} 个活跃任务正在刷流，开始检查任务状态")
 
             # 获取到当前所有做种数据中需要被检查的种子数据
             check_torrents = [seeding_torrents_dict[th] for th in torrent_check_hashes if th in seeding_torrents_dict]
@@ -4844,7 +4961,7 @@ class BrushFlowLowFreq(_PluginBase):
                 if need_delete_hashes:
                     need_delete_hashes = list(dict.fromkeys([hash_value for hash_value in need_delete_hashes if hash_value]))
                     # 如果是QB，则重新汇报Tracker
-                    if self.downloader_helper.is_downloader("qbittorrent", service=self.service_info):
+                    if self._is_qb:
                         self.__qb_torrents_reannounce(torrent_hashes=need_delete_hashes)
                     # 删除种子
                     deleted_hashes = []
@@ -4994,109 +5111,6 @@ class BrushFlowLowFreq(_PluginBase):
                 if completed_time:
                     torrent_task["download_dashboard_completed_time"] = completed_time
 
-    def __apply_yield_guard_actions(self, torrents: List[Any], torrent_tasks: Dict[str, dict]):
-        """
-        根据最新采样对低收益任务执行限速/暂停动作。delete 动作由现有删除流程统一处理。
-        """
-        if not torrents:
-            return
-
-        evaluated_count = 0
-        action_count = 0
-        delete_count = 0
-        good_protected_count = 0
-        low_yield_count = 0
-        reason_samples = []
-        active_hashes = {
-            self.__normalize_hash(self.__get_hash(torrent))
-            for torrent in torrents
-            if self.__get_hash(torrent)
-        }
-        yield_guard_pool_states: Dict[str, Dict[str, Any]] = {}
-        yield_guard_bandwidth_states: Dict[str, Dict[str, Any]] = {}
-        for torrent in torrents:
-            torrent_hash = self.__get_hash(torrent)
-            torrent_task = torrent_tasks.get(torrent_hash)
-            if not torrent_hash or not torrent_task or torrent_task.get("deleted"):
-                continue
-            self.__clear_yield_guard_check_cache(torrent_task)
-
-            site_name = torrent_task.get("site_name", "")
-            brush_config = self.__get_brush_config(sitename=site_name)
-            if not brush_config.yield_guard_enabled:
-                continue
-            if site_name not in yield_guard_pool_states:
-                yield_guard_pool_states[site_name] = self.__build_yield_guard_pool_state(
-                    brush_config=brush_config,
-                    sitename=site_name,
-                    torrent_tasks=torrent_tasks,
-                    active_hashes=active_hashes
-                )
-                yield_guard_bandwidth_states[site_name] = self.__build_yield_guard_bandwidth_state(
-                    brush_config=brush_config
-                )
-            yield_guard_pool_state = yield_guard_pool_states[site_name]
-            yield_guard_bandwidth_state = yield_guard_bandwidth_states.get(site_name)
-
-            torrent_info = self.__get_torrent_info(torrent)
-            if not self.__is_yield_guard_applicable_torrent(torrent_info=torrent_info):
-                self.__reset_yield_guard_runtime_state_for_skip(torrent_task)
-                continue
-
-            should_delete, reason = self.__evaluate_yield_guard_for_delete(
-                site_name=site_name,
-                brush_config=brush_config,
-                torrent_info=torrent_info,
-                torrent_task=torrent_task,
-                yield_guard_pool_state=yield_guard_pool_state,
-                yield_guard_bandwidth_state=yield_guard_bandwidth_state
-            )
-            torrent_task["yield_guard_evaluated_in_check"] = True
-            torrent_task["yield_guard_should_delete"] = bool(should_delete)
-            evaluated_count += 1
-            if torrent_task.get("yield_guard_good_protected"):
-                good_protected_count += 1
-            if torrent_task.get("yield_guard_bad_streak"):
-                low_yield_count += 1
-            self.__log_yield_guard_detail_if_enabled(
-                site_name=site_name,
-                brush_config=brush_config,
-                torrent_hash=torrent_hash,
-                torrent_info=torrent_info,
-                torrent_task=torrent_task,
-                should_delete=should_delete,
-                reason=reason
-            )
-            if reason and len(reason_samples) < 5:
-                reason_samples.append(
-                    f"{torrent_task.get('title', '') or torrent_hash}：{reason}"
-                )
-            if should_delete:
-                delete_count += 1
-                continue
-
-            action = self.__get_yield_guard_planned_action(torrent_task=torrent_task)
-
-            if action:
-                if self.__apply_yield_guard_action_for_task(torrent_hash=torrent_hash,
-                                                            torrent_task=torrent_task,
-                                                            action=action,
-                                                            brush_config=brush_config,
-                                                            site_name=site_name,
-                                                            reason=reason):
-                    if not brush_config.yield_guard_rehearsal:
-                        logger.info(f"站点：{site_name}，{reason}，已执行上传收益保护动作：{action}")
-                    action_count += 1
-
-        if evaluated_count > 0:
-            sample_text = "；".join(reason_samples)
-            logger.info(
-                f"上传收益保护：本轮检查已评估 {evaluated_count} 个任务，"
-                f"高收益保护 {good_protected_count} 个，低收益命中 {low_yield_count} 个，"
-                f"待删除 {delete_count} 个，已记录/执行动作 {action_count} 个"
-                f"{'；样例：' + sample_text if sample_text else ''}"
-            )
-
     def __apply_upload_protection_actions(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                           delete_message_map: Optional[Dict[str, List[dict]]] = None,
                                           downloading_count: int = 0) -> List[str]:
@@ -5125,6 +5139,23 @@ class BrushFlowLowFreq(_PluginBase):
                 self.__reset_upload_protection_runtime_state_for_skip(torrent_task)
                 continue
 
+            _no_upload_kbs = self.__non_negative_float(brush_config.upload_protection_no_upload_kbs, 5)
+            _low_kbs = self.__positive_float(brush_config.upload_protection_low_upspeed_kbs, 150)
+            _good_kbs = self.__positive_float(brush_config.upload_protection_good_upspeed_kbs, 150)
+            _low_limit_checks = max(1, self.__positive_int(brush_config.upload_protection_low_limit_checks, 2))
+            _low_strict_checks = max(
+                _low_limit_checks,
+                self.__positive_int(brush_config.upload_protection_low_strict_checks, 3)
+            )
+            _good_restore_checks = max(1, self.__positive_int(brush_config.upload_protection_good_restore_checks, 2))
+            _good_release_checks = max(
+                _good_restore_checks,
+                self.__positive_int(brush_config.upload_protection_good_release_checks, 3)
+            )
+            _min_elapsed = self.__non_negative_float(brush_config.upload_protection_min_elapsed_minutes, 10)
+            _min_dl_bytes = self.__non_negative_float(brush_config.upload_protection_min_downloaded_gb, 0) * 1024 ** 3
+            _base_limit_kbs = self.__positive_float(brush_config.upload_protection_download_limit_kbs, 512)
+
             skip_threshold = self.__non_negative_int(
                 getattr(brush_config, "upload_protection_skip_when_downloading_le", 0), 0
             )
@@ -5143,7 +5174,17 @@ class BrushFlowLowFreq(_PluginBase):
                 site_name=site_name,
                 brush_config=brush_config,
                 torrent_info=torrent_info,
-                torrent_task=torrent_task
+                torrent_task=torrent_task,
+                no_upload_kbs=_no_upload_kbs,
+                low_kbs=_low_kbs,
+                good_kbs=_good_kbs,
+                low_limit_checks=_low_limit_checks,
+                low_strict_checks=_low_strict_checks,
+                good_restore_checks=_good_restore_checks,
+                good_release_checks=_good_release_checks,
+                min_elapsed=_min_elapsed,
+                min_downloaded_bytes=_min_dl_bytes,
+                base_limit_kbs=_base_limit_kbs,
             )
             evaluated_count += 1
             if should_delete:
@@ -5189,41 +5230,6 @@ class BrushFlowLowFreq(_PluginBase):
         if evaluated_count > 0:
             logger.info(f"上传保护：本轮检查已评估 {evaluated_count} 个下载中任务，已执行动作 {action_count} 个，待删除 {len(delete_hashes)} 个")
         return delete_hashes
-
-    def __apply_seed_ratio_limit_actions(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
-                                         skip_hashes: Optional[Set[str]] = None) -> None:
-        """
-        执行低分享率一次性检测产生的下载限速/恢复动作。
-        """
-        if not torrents:
-            return
-
-        skip_hashes = skip_hashes or set()
-        action_count = 0
-        for torrent in torrents:
-            torrent_hash = self.__normalize_hash(self.__get_hash(torrent))
-            if not torrent_hash or torrent_hash in skip_hashes:
-                continue
-            torrent_task = torrent_tasks.get(torrent_hash)
-            if not torrent_task or torrent_task.get("deleted"):
-                continue
-            action = str(torrent_task.get("seed_ratio_limit_pending_action") or "").strip().lower()
-            if action not in {"limit", "restore_limit"}:
-                continue
-            site_name = torrent_task.get("site_name", "")
-            brush_config = self.__get_brush_config(sitename=site_name)
-            reason = torrent_task.get("seed_ratio_limit_last_reason") or "低分享率一次性检测动作"
-            if self.__apply_seed_ratio_limit_action_for_task(
-                    torrent_hash=torrent_hash,
-                    torrent_task=torrent_task,
-                    brush_config=brush_config,
-                    site_name=site_name,
-                    reason=reason):
-                action_count += 1
-                logger.info(f"站点：{site_name}，{reason}，已执行低分享率限速动作：{action}")
-
-        if action_count > 0:
-            logger.info(f"低分享率限速：本轮已执行动作 {action_count} 个")
 
     def __log_yield_guard_detail_if_enabled(self, site_name: str, brush_config: BrushConfig, torrent_hash: str,
                                             torrent_info: dict, torrent_task: dict, should_delete: bool,
@@ -5611,7 +5617,7 @@ class BrushFlowLowFreq(_PluginBase):
                                              seeding_torrents_dict: Dict[str, Any]):
         brush_config = self.__get_brush_config()
 
-        if not self.downloader_helper.is_downloader("qbittorrent", service=self.service_info):
+        if not self._is_qb:
             logger.info("同步种子刷流标签记录目前仅支持qbittorrent")
             return
 
@@ -5933,12 +5939,7 @@ class BrushFlowLowFreq(_PluginBase):
 
     @staticmethod
     def __non_negative_int(value: Any, default_value: int = 0) -> int:
-        try:
-            if value in (None, ""):
-                return default_value
-            return max(0, int(float(value)))
-        except (TypeError, ValueError):
-            return default_value
+        return BrushFlowLowFreq.__positive_int(value, default_value)
 
     def __ensure_upload_protection_task_state(self, torrent_task: dict) -> None:
         if not isinstance(torrent_task, dict):
@@ -5958,7 +5959,12 @@ class BrushFlowLowFreq(_PluginBase):
         torrent_task["upload_protection_last_reason"] = reason
 
     def __evaluate_upload_protection(self, site_name: str, brush_config: BrushConfig,
-                                     torrent_info: dict, torrent_task: dict) -> Tuple[bool, str]:
+                                     torrent_info: dict, torrent_task: dict,
+                                     no_upload_kbs: float = 5.0, low_kbs: float = 150.0,
+                                     good_kbs: float = 150.0, low_limit_checks: int = 2,
+                                     low_strict_checks: int = 3, good_restore_checks: int = 2,
+                                     good_release_checks: int = 3, min_elapsed: float = 10.0,
+                                     min_downloaded_bytes: float = 0.0, base_limit_kbs: float = 512.0) -> Tuple[bool, str]:
         """
         评估新上传保护状态机。返回 True 表示应交给删种流程删除。
         """
@@ -5999,27 +6005,13 @@ class BrushFlowLowFreq(_PluginBase):
             return finish(False, reason)
 
         elapsed_source = torrent_task.get("first_downloaded_time") or torrent_task.get("first_uploaded_time")
-        min_elapsed = self.__non_negative_float(brush_config.upload_protection_min_elapsed_minutes, 10)
         if min_elapsed > 0:
             elapsed_minutes = self.__get_task_elapsed_minutes(elapsed_source) if elapsed_source else 0
             if elapsed_minutes < min_elapsed:
                 reason = f"上传保护：实际传输 {elapsed_minutes:.0f} 分钟，未到观察门槛 {min_elapsed:.0f} 分钟"
                 return finish(False, reason)
 
-        no_upload_kbs = self.__non_negative_float(brush_config.upload_protection_no_upload_kbs, 5)
         no_upload_checks = max(1, self.__positive_int(brush_config.upload_protection_no_upload_checks, 6))
-        low_kbs = self.__positive_float(brush_config.upload_protection_low_upspeed_kbs, 150)
-        good_kbs = self.__positive_float(brush_config.upload_protection_good_upspeed_kbs, 150)
-        low_limit_checks = max(1, self.__positive_int(brush_config.upload_protection_low_limit_checks, 2))
-        low_strict_checks = max(low_limit_checks, self.__positive_int(
-            brush_config.upload_protection_low_strict_checks, 3
-        ))
-        good_restore_checks = max(1, self.__positive_int(
-            brush_config.upload_protection_good_restore_checks, 2
-        ))
-        good_release_checks = max(good_restore_checks, self.__positive_int(
-            brush_config.upload_protection_good_release_checks, 3
-        ))
 
         if no_upload_kbs > 0 and interval_upspeed <= no_upload_kbs * 1024:
             torrent_task["upload_protection_no_upload_streak"] = (
@@ -6691,64 +6683,6 @@ class BrushFlowLowFreq(_PluginBase):
         torrent_task["seed_ratio_limit_last_reason"] = reason
         return False, reason
 
-    def __evaluate_seed_ratio_once_limit(self, brush_config: BrushConfig, torrent_task: dict,
-                                         ratio: Optional[float], downloaded_elapsed_minutes: Optional[float],
-                                         ratio_check_minutes: float, download_protection_active: bool,
-                                         yield_guard_good_protected: bool, speed_protection_active: bool) \
-            -> Tuple[bool, str]:
-        """
-        低分享率限速模式：达到时间后只判断一次分享率，失败后进入下载限速观察。
-        """
-        if not (brush_config.seed_ratio_min_30m and self.__is_seed_ratio_limit_enabled(brush_config)):
-            return False, ""
-
-        if download_protection_active:
-            return False, "下载保护已跳过最低分享率一次性判断"
-        if yield_guard_good_protected:
-            return False, torrent_task.get("yield_guard_last_reason") or "上传收益保护已跳过最低分享率一次性判断"
-
-        if torrent_task.get("seed_ratio_limit_active"):
-            _, restore_reason = self.__evaluate_seed_ratio_limit_restore(
-                brush_config=brush_config,
-                torrent_task=torrent_task
-            )
-            return False, restore_reason
-
-        if torrent_task.get("seed_ratio_once_checked"):
-            return False, "最低分享率已完成一次性判断，后续不再重复判断"
-
-        if downloaded_elapsed_minutes is None or downloaded_elapsed_minutes < float(ratio_check_minutes):
-            return False, ""
-
-        if speed_protection_active:
-            self.__mark_seed_ratio_once_result(torrent_task=torrent_task, passed=True, ratio=ratio)
-            reason = "分享率一次性检测时平均上传速度已达到保护阈值，视为通过"
-            torrent_task["seed_ratio_limit_last_reason"] = reason
-            return False, reason
-
-        try:
-            min_ratio = float(brush_config.seed_ratio_min_30m)
-        except (TypeError, ValueError):
-            return False, "最低分享率配置无效，已跳过一次性判断"
-
-        if ratio is None:
-            return False, "分享率为空，已跳过最低分享率一次性判断"
-
-        ratio_value = float(ratio)
-        if ratio_value >= min_ratio:
-            self.__mark_seed_ratio_once_result(torrent_task=torrent_task, passed=True, ratio=ratio_value)
-            reason = f"分享率一次性检测通过：分享率 {ratio_value:.2f}，不低于 {min_ratio}"
-            torrent_task["seed_ratio_limit_last_reason"] = reason
-            return False, reason
-
-        self.__mark_seed_ratio_once_result(torrent_task=torrent_task, passed=False, ratio=ratio_value)
-        torrent_task["seed_ratio_limit_pending_action"] = "limit"
-        torrent_task["seed_ratio_limit_restore_hit_records"] = []
-        reason = (f"低分享率一次性检测未达标：有下载数据 {downloaded_elapsed_minutes:.0f} 分钟后"
-                  f"分享率 {ratio_value:.2f}，低于 {min_ratio}，限制下载速度")
-        torrent_task["seed_ratio_limit_last_reason"] = reason
-        return False, reason
-
     def __evaluate_conditions_for_delete(self, site_name: str, torrent_info: dict, torrent_task: dict,
                                           downloading_count: int = 0) \
             -> Tuple[bool, str]:
@@ -6816,10 +6750,25 @@ class BrushFlowLowFreq(_PluginBase):
         if not self.__is_free_torrent(torrent_task):
             return False, ""
 
+        threshold_minutes = self.__get_delete_free_remaining_threshold(brush_config=brush_config)
+        now_ts = time.time()
+        cached_at = torrent_task.get("free_check_cached_at")
+        cached_remaining = self.__number_or_none(torrent_task.get("free_check_cached_remaining"))
+        if (cached_at and cached_remaining is not None
+                and (now_ts - float(cached_at)) < 300
+                and cached_remaining > threshold_minutes * 10):
+            logger.debug(
+                f"失去免费删种[缓存命中]：站点={site_name}，标题={torrent_task.get('title', '')}，"
+                f"剩余={self.__format_minutes(cached_remaining)}，阈值={self.__format_minutes(threshold_minutes)}"
+            )
+            return False, f"缓存命中：仍为免费种子，剩余 {cached_remaining:.0f} 分钟"
+
         is_still_free, free_reason, free_remaining_minutes = self.__check_torrent_current_free_status(
             torrent_task=torrent_task
         )
-        threshold_minutes = self.__get_delete_free_remaining_threshold(brush_config=brush_config)
+        torrent_task["free_check_cached_at"] = now_ts
+        if free_remaining_minutes is not None:
+            torrent_task["free_check_cached_remaining"] = free_remaining_minutes
         logger.info(
             f"失去免费删种评估：站点={site_name}，标题={torrent_task.get('title', '')}，"
             f"原始免费=True，当前免费={is_still_free}，详情页结果={free_reason or '无'}，"
@@ -6872,145 +6821,6 @@ class BrushFlowLowFreq(_PluginBase):
                 logger.info(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
 
         return delete_hashes
-
-    def __delete_torrent_for_yield_guard(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
-                                         delete_message_map: Optional[Dict[str, List[dict]]] = None) -> List:
-        """
-        根据上传收益保护已缓存的删除决策获取待删列表，不受动态删种体积阈值影响。
-        """
-        delete_hashes = []
-
-        for torrent in torrents:
-            torrent_hash = self.__get_hash(torrent)
-            torrent_task = torrent_tasks.get(torrent_hash, None)
-            if not torrent_task:
-                continue
-
-            site_name = torrent_task.get("site_name", "")
-            brush_config = self.__get_brush_config(sitename=site_name)
-            if not brush_config.yield_guard_enabled:
-                continue
-            if not torrent_task.get("yield_guard_evaluated_in_check"):
-                continue
-            if not torrent_task.get("yield_guard_should_delete"):
-                continue
-
-            torrent_title = torrent_task.get("title", "")
-            torrent_desc = torrent_task.get("description", "")
-            reason = torrent_task.get("yield_guard_last_reason") or "上传收益保护：低收益，最终删除"
-            delete_hashes.append(torrent_hash)
-            self.__append_delete_message(delete_message_map=delete_message_map, torrent_hash=torrent_hash,
-                                         site_name=site_name, torrent_title=torrent_title,
-                                         torrent_desc=torrent_desc, reason=reason)
-            logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
-
-        return delete_hashes
-
-    def __evaluate_interval_upspeed_condition_for_delete(self, site_name: str, brush_config: BrushConfig,
-                                                         torrent_task: dict, task_elapsed_minutes: Optional[float]) \
-            -> Tuple[bool, str]:
-        """
-        评估检查间上传速度删除条件
-        """
-        if brush_config.interval_upspeed in (None, ""):
-            return False, ""
-
-        try:
-            threshold_kb = float(brush_config.interval_upspeed)
-        except (TypeError, ValueError):
-            return False, "检查间上传速度阈值配置无效，已跳过低速统计"
-
-        if threshold_kb < 0:
-            return False, "检查间上传速度阈值不能小于0，已跳过低速统计"
-
-        def _to_positive_int(value: Any, default_value: int) -> int:
-            try:
-                if value in (None, ""):
-                    return default_value
-                return max(1, int(float(value)))
-            except (TypeError, ValueError):
-                return default_value
-
-        check_count = _to_positive_int(brush_config.interval_upspeed_check_count, 3)
-        low_count = _to_positive_int(brush_config.interval_upspeed_low_count, 2)
-        low_count = min(low_count, check_count)
-        require_continuous = bool(brush_config.interval_upspeed_continuous)
-        rehearsal_mode = bool(brush_config.interval_upspeed_rehearsal)
-
-        try:
-            start_minutes = float(brush_config.interval_upspeed_start_minutes) \
-                if brush_config.interval_upspeed_start_minutes not in (None, "") else 30.0
-        except (TypeError, ValueError):
-            start_minutes = 30.0
-        start_minutes = max(0.0, start_minutes)
-
-        if task_elapsed_minutes is None:
-            return False, "检查间上传速度：有上传数据时间无效，已跳过低速统计"
-
-        if task_elapsed_minutes < start_minutes:
-            return False, (f"检查间上传速度：有上传数据 {task_elapsed_minutes:.0f} 分钟，"
-                           f"未到统计起始 {start_minutes:.0f} 分钟")
-
-        interval_valid = bool(torrent_task.get("last_check_interval_upspeed_valid"))
-        if not interval_valid:
-            reason = torrent_task.get("last_check_interval_reason") or "采样尚未就绪"
-            return False, f"检查间上传速度：{reason}"
-
-        interval_speed = torrent_task.get("last_check_interval_upspeed")
-        if not isinstance(interval_speed, (int, float)):
-            return False, "检查间上传速度：采样异常，已跳过低速统计"
-
-        threshold_bytes = threshold_kb * 1024
-        is_low_speed = interval_speed <= threshold_bytes
-
-        records = torrent_task.get("interval_upspeed_hit_records")
-        if not isinstance(records, list):
-            records = []
-        records = [1 if bool(record) else 0 for record in records if isinstance(record, (int, float, bool))]
-        records.append(1 if is_low_speed else 0)
-        max_keep = max(check_count, low_count, 20)
-        if len(records) > max_keep:
-            records = records[-max_keep:]
-        torrent_task["interval_upspeed_hit_records"] = records
-
-        recent_records = records[-check_count:]
-        hit_count = int(sum(recent_records))
-        consecutive_hit_count = 0
-        for record in reversed(recent_records):
-            if record == 1:
-                consecutive_hit_count += 1
-            else:
-                break
-
-        if require_continuous:
-            required_samples = min(low_count, check_count)
-            if len(recent_records) < required_samples:
-                return False, (f"检查间上传速度：连续低速命中 {consecutive_hit_count}/{required_samples} 次，"
-                               f"等待收集足够检查样本后再判定")
-
-            if consecutive_hit_count >= low_count:
-                reason = (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s，低于阈值 {threshold_kb:.1f} KB/s；"
-                          f"最近连续命中 {consecutive_hit_count} 次（阈值 {low_count} 次）")
-                if rehearsal_mode:
-                    return False, f"演练模式命中删除条件，{reason}"
-                return True, reason
-
-            return False, (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s；"
-                           f"最近连续命中 {consecutive_hit_count} 次，未达到删除阈值 {low_count} 次")
-
-        if len(recent_records) < check_count:
-            return False, (f"检查间上传速度：低速命中 {hit_count}/{len(recent_records)} 次，"
-                           f"等待收集满 {check_count} 次检查后再判定")
-
-        if hit_count >= low_count:
-            reason = (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s，低于阈值 {threshold_kb:.1f} KB/s；"
-                      f"最近 {check_count} 次命中 {hit_count} 次（阈值 {low_count} 次）")
-            if rehearsal_mode:
-                return False, f"演练模式命中删除条件，{reason}"
-            return True, reason
-
-        return False, (f"检查间上传速度 {interval_speed / 1024:.1f} KB/s；最近 {check_count} 次命中 {hit_count} 次，"
-                       f"未达到删除阈值 {low_count} 次")
 
     def __evaluate_proxy_pre_conditions_for_delete(self, site_name: str, torrent_info: dict) -> Tuple[bool, str]:
         """
@@ -8352,7 +8162,7 @@ class BrushFlowLowFreq(_PluginBase):
         if not downloader:
             return None
 
-        if self.downloader_helper.is_downloader("qbittorrent", service=self.service_info):
+        if self._is_qb:
             # 限速值转为bytes
             up_speed = up_speed * 1024 if up_speed else None
             down_speed = down_speed * 1024 if down_speed else None
@@ -8708,7 +8518,7 @@ class BrushFlowLowFreq(_PluginBase):
         获取种子hash
         """
         try:
-            hash_value = torrent.get("hash") if self.downloader_helper.is_downloader("qbittorrent", service=self.service_info) \
+            hash_value = torrent.get("hash") if self._is_qb \
                 else torrent.hashString
             return self.__normalize_hash(hash_value)
         except Exception as e:
@@ -8755,7 +8565,7 @@ class BrushFlowLowFreq(_PluginBase):
         """
         date_now = int(time.time())
         # QB
-        if self.downloader_helper.is_downloader("qbittorrent", service=self.service_info):
+        if self._is_qb:
             """
             {
               "added_on": 1693359031,
@@ -9629,15 +9439,16 @@ class BrushFlowLowFreq(_PluginBase):
         """
        自动归档已经删除的种子数据
        """
-        if not self._brush_config.auto_archive_days or self._brush_config.auto_archive_days <= 0:
-            logger.info("自动归档记录天数小于等于0，取消自动归档")
-            return
+        effective_days = self._brush_config.auto_archive_days
+        if not effective_days or effective_days <= 0:
+            effective_days = 7
+            logger.info(f"自动归档未配置，使用默认 {effective_days} 天")
 
         # 用于存储已删除的数据
         archived_tasks: Dict[str, dict] = self.get_data("archived") or {}
 
         current_time = time.time()
-        archive_threshold_seconds = self._brush_config.auto_archive_days * 86400  # 将天数转换为秒数
+        archive_threshold_seconds = effective_days * 86400  # 将天数转换为秒数
 
         # 准备一个列表，记录所有需要从原始数据中删除的键
         keys_to_delete = set()
