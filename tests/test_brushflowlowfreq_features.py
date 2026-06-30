@@ -434,6 +434,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         }, downloader=FakeDownloader())
         plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
         plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.subscribe_oper = SimpleNamespace(list=lambda: [])
         plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
         plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
             lambda *, site_id, page_url: (
@@ -682,6 +683,117 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         summary_result = summary_plugin._BrushFlowLowFreq__evaluate_conditions_for_brush(torrent=torrent, torrent_tasks={})
 
         self.assertEqual(full_result, summary_result)
+
+    def test_summary_log_mode_suppresses_routine_logs_but_keeps_key_events(self):
+        plugin = self._new_qb_plugin({
+            "log_mode": "summary",
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+            "freeleech": "",
+            "hr": "no",
+            "upload_protection_enabled": True,
+            "upload_protection_detail_log": False,
+        })
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.subscribe_oper = SimpleNamespace(list=lambda: [])
+        plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
+        plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+            lambda *, site_id, page_url: ("<a href='download.php?id=1'>下载</a><h1 id='top'>normal torrent</h1>", "")
+        )
+        plugin._BrushFlowLowFreq__get_torrent_info = lambda torrent: {
+            "title": torrent.get("name", ""),
+            "total_size": torrent.get("total_size", 100),
+            "downloaded": torrent.get("downloaded", 100),
+            "uploaded": torrent.get("uploaded", 0),
+            "ratio": torrent.get("ratio", 0),
+            "seeding_time": torrent.get("seeding_time", 3600),
+            "avg_upspeed": 0,
+            "avg_downspeed": 0,
+            "completion_on": 0,
+            "add_on": 1,
+        }
+        torrent = {
+            "hash": "abcdef",
+            "name": "summary torrent",
+            "tags": "刷流",
+            "state": "downloading",
+            "downloaded": 100,
+            "uploaded": 0,
+            "total_size": 100,
+            "ratio": 0,
+            "added_on": 1,
+            "completion_on": 0,
+            "last_activity": 1,
+            "tracker": "tracker",
+            "downloadvolumefactor": 0,
+            "freedate": "",
+            "freedate_diff": "10分钟",
+        }
+        torrent_tasks = {
+            "abcdef": {
+                "site": 1,
+                "site_name": "站点1",
+                "title": "summary torrent",
+                "description": "desc",
+                "page_url": "details.php?id=1",
+                "time": 0,
+                "downloaded": 100,
+                "uploaded": 0,
+                "total_size": 100,
+                "ratio": 0,
+                "seeding_time": 3600,
+                "hit_and_run": False,
+                "freedate": "",
+                "freedate_diff": "10分钟",
+                "downloadvolumefactor": 0,
+                "deleted": False,
+                "first_downloaded_time": 1,
+                "first_uploaded_time": 1,
+                "last_check_time": 1,
+                "last_check_uploaded": 0,
+                "last_check_downloaded": 0,
+            }
+        }
+        start_info_count = len(self.module.logger.info_messages)
+        start_debug_count = len(self.module.logger.debug_messages)
+        plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete("站点1", torrent_tasks["abcdef"])
+        plugin._BrushFlowLowFreq__delete_torrent_for_no_free([torrent], torrent_tasks, {})
+        plugin._BrushFlowLowFreq__apply_upload_protection_actions([torrent], torrent_tasks, {})
+        plugin._BrushFlowLowFreq__log_summary_routine("routine probe")
+        plugin._BrushFlowLowFreq__log_summary_key("key probe")
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        new_debug_logs = self.module.logger.debug_messages[start_debug_count:]
+        self.assertFalse(any("自动归档未配置" in msg for msg in new_info_logs))
+        self.assertFalse(any("没有开启排除订阅" in msg for msg in new_info_logs))
+        self.assertFalse(any("失去免费删种评估" in msg for msg in new_info_logs))
+        self.assertTrue(any("routine probe" in msg for msg in new_debug_logs))
+        self.assertTrue(any("key probe" in msg for msg in new_info_logs))
+
+    def test_silent_log_mode_keeps_key_events_but_hides_routine_logs(self):
+        plugin = self._new_qb_plugin({
+            "log_mode": "silent",
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+            "freeleech": "",
+            "hr": "no",
+        })
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
+        plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+            lambda *, site_id, page_url: ("<a href='download.php?id=1'>下载</a><h1 id='top'>normal torrent</h1>", "")
+        )
+        torrent_task = self._free_torrent_task()
+        torrent_task["site_name"] = "站点1"
+        torrent_task["site"] = 1
+
+        start_info_count = len(self.module.logger.info_messages)
+        plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete("站点1", torrent_task)
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertFalse(any("失去免费删种评估" in msg for msg in new_info_logs))
+        self.assertFalse(any("失去免费删种检测跳过" in msg for msg in new_info_logs))
 
     def test_low_ratio_limit_options_default_disabled_and_configurable(self):
         default_config = self.module.BrushConfig({})

@@ -537,6 +537,16 @@ class BrushFlowLowFreq(_PluginBase):
 
     # endregion
 
+    def __log_summary_routine(self, message: str) -> None:
+        log_mode = getattr(self._brush_config, "log_mode", "full") if self._brush_config else "full"
+        if log_mode in {"summary", "silent"}:
+            logger.debug(message)
+        else:
+            logger.info(message)
+
+    def __log_summary_key(self, message: str) -> None:
+        logger.info(message)
+
     def init_plugin(self, config: dict = None):
         self.sites_helper = SitesHelper()
         self.site_oper = SiteOper()
@@ -1959,6 +1969,27 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }
                                                     }
                                                 ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'log_mode',
+                                                            'label': '日志模式',
+                                                            'items': [
+                                                                {'title': '完整日志', 'value': 'full'},
+                                                                {'title': '摘要日志', 'value': 'summary'},
+                                                                {'title': '静默日志', 'value': 'silent'}
+                                                            ]
+                                                        }
+                                                    }
+                                                ]
                                             }
                                         ]
                                     },
@@ -3084,6 +3115,7 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_promising_pubtime_minutes": 15,
             "yield_guard_rehearsal": True,
             "yield_guard_detail_log": False,
+            "log_mode": "full",
             "freeleech": "free",
             "hr": "yes",
             "enable_site_config": False,
@@ -3110,6 +3142,7 @@ class BrushFlowLowFreq(_PluginBase):
             "upload_protection_min_downloaded_gb": 0,
             "upload_protection_detail_log": False,
             "upload_protection_skip_when_downloading_le": 0,
+            "log_mode": "full",
             "plugin_version": "current",
         }
 
@@ -3132,6 +3165,7 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_enabled",
             "yield_guard_rehearsal",
             "yield_guard_detail_log",
+            "log_mode",
             "yield_guard_protect_delete_rules",
             "yield_guard_high_download_kbs",
             "yield_guard_low_upload_kbs",
@@ -5243,7 +5277,7 @@ class BrushFlowLowFreq(_PluginBase):
                     torrent_desc=torrent_task.get("description", ""),
                     reason=reason
                 )
-                logger.info(
+                self.__log_summary_key(
                     f"站点：{site_name}，{reason}，命中删除条件："
                     f"{torrent_task.get('title', '')}|{torrent_task.get('description', '')}"
                 )
@@ -5271,10 +5305,10 @@ class BrushFlowLowFreq(_PluginBase):
                     torrent_task["upload_protection_last_action_time"] = time.time()
                     torrent_task["upload_protection_pending_action"] = None
                     action_count += 1
-                    logger.info(f"站点：{site_name}，{reason}，已执行上传保护动作：{action}")
+                    self.__log_summary_key(f"站点：{site_name}，{reason}，已执行上传保护动作：{action}")
 
         if evaluated_count > 0:
-            logger.info(f"上传保护：本轮检查已评估 {evaluated_count} 个下载中任务，已执行动作 {action_count} 个，待删除 {len(delete_hashes)} 个")
+            self.__log_summary_routine(f"上传保护：本轮检查已评估 {evaluated_count} 个下载中任务，已执行动作 {action_count} 个，待删除 {len(delete_hashes)} 个")
         return delete_hashes
 
     def __log_yield_guard_detail_if_enabled(self, site_name: str, brush_config: BrushConfig, torrent_hash: str,
@@ -6808,7 +6842,10 @@ class BrushFlowLowFreq(_PluginBase):
         is_still_free, free_reason, free_remaining_minutes = self.__check_torrent_current_free_status(
             torrent_task=torrent_task
         )
-        logger.info(
+        torrent_task["free_check_cached_at"] = now_ts
+        if free_remaining_minutes is not None:
+            torrent_task["free_check_cached_remaining"] = free_remaining_minutes
+        self.__log_summary_routine(
             f"失去免费删种评估：站点={site_name}，标题={torrent_task.get('title', '')}，"
             f"原始免费=True，当前免费={is_still_free}，详情页结果={free_reason or '无'}，"
             f"剩余={self.__format_minutes(free_remaining_minutes)}，阈值={self.__format_minutes(threshold_minutes)}"
@@ -6818,7 +6855,7 @@ class BrushFlowLowFreq(_PluginBase):
         if is_still_free is None:
             undetermined_count = self.__positive_int(torrent_task.get("free_undetermined_count"), 0) + 1
             torrent_task["free_undetermined_count"] = undetermined_count
-            logger.info(
+            self.__log_summary_routine(
                 f"失去免费删种检测跳过：站点={site_name}，标题={torrent_task.get('title', '')}，"
                 f"原因={free_reason or '未知'}，连续无法判断={undetermined_count} 次，"
                 f"剩余={self.__format_minutes(free_remaining_minutes)}，"
@@ -6862,9 +6899,9 @@ class BrushFlowLowFreq(_PluginBase):
                 self.__append_delete_message(delete_message_map=delete_message_map, torrent_hash=torrent_hash,
                                              site_name=site_name, torrent_title=torrent_title,
                                              torrent_desc=torrent_desc, reason=reason)
-                logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
+                self.__log_summary_key(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
             elif reason and reason.startswith("失去免费删种检测跳过"):
-                logger.info(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
+                self.__log_summary_routine(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
 
         return delete_hashes
 
@@ -7028,15 +7065,15 @@ class BrushFlowLowFreq(_PluginBase):
                 self.__append_delete_message(delete_message_map=delete_message_map, torrent_hash=torrent_hash,
                                              site_name=site_name, torrent_title=torrent_title,
                                              torrent_desc=torrent_desc, reason=reason)
-                logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
+                self.__log_summary_key(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
             else:
                 if reason and reason.startswith("演练模式命中删除条件"):
                     self.__send_delete_message(site_name=site_name, torrent_title=torrent_title,
                                                torrent_desc=torrent_desc, reason=reason,
                                                title="【刷流任务删种演练】")
-                    logger.info(f"站点：{site_name}，{reason}，演练模式不删除种子：{torrent_title}|{torrent_desc}")
+                    self.__log_summary_key(f"站点：{site_name}，{reason}，演练模式不删除种子：{torrent_title}|{torrent_desc}")
                 else:
-                    logger.debug(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
+                    self.__log_summary_routine(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
 
         return delete_hashes
 
@@ -7080,9 +7117,9 @@ class BrushFlowLowFreq(_PluginBase):
                 self.__append_delete_message(delete_message_map=delete_message_map, torrent_hash=torrent_hash,
                                              site_name=site_name, torrent_title=torrent_title,
                                              torrent_desc=torrent_desc, reason=reason)
-                logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
+                self.__log_summary_key(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
             else:
-                logger.debug(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
+                self.__log_summary_routine(f"站点：{site_name}，{reason}，不删除种子：{torrent_title}|{torrent_desc}")
 
         return delete_hashes
 
@@ -7123,7 +7160,7 @@ class BrushFlowLowFreq(_PluginBase):
         # 计算当前总做种体积
         total_torrent_size = self.__calculate_seeding_torrents_size(torrent_tasks=torrent_tasks)
 
-        logger.info(
+        self.__log_summary_routine(
             f"当前做种体积 {self.__bytes_to_gb(total_torrent_size):.1f} GB，正在准备计算满足动态前置删除条件的种子")
 
         # 执行排除H&R种子后满足前置删除条件的种子
@@ -7143,12 +7180,17 @@ class BrushFlowLowFreq(_PluginBase):
                 if self.__get_hash(torrent) in pre_delete_hash_set
             )
             total_torrent_size = total_torrent_size - pre_delete_total_size
+<<<<<<< HEAD
             torrents = [torrent for torrent in torrents if self.__get_hash(torrent) not in pre_delete_hash_set]
             logger.info(
+=======
+            torrents = [torrent for torrent in torrents if self.__get_hash(torrent) not in pre_delete_hashes]
+            self.__log_summary_routine(
+>>>>>>> 3260cb3 (brushflowlowfreq: add configurable log mode)
                 f"满足动态删除前置条件的种子共 {len(pre_delete_hashes)} 个，体积 {self.__bytes_to_gb(pre_delete_total_size):.1f} GB，"
                 f"删除种子后，当前做种体积 {self.__bytes_to_gb(total_torrent_size):.1f} GB")
         else:
-            logger.info(f"没有找到任何满足动态删除前置条件的种子")
+            self.__log_summary_routine("没有找到任何满足动态删除前置条件的种子")
 
         # 解析删除阈值范围
         sizes = [float(size) * 1024 ** 3 for size in brush_config.delete_size_range.split("-")]
@@ -7160,12 +7202,12 @@ class BrushFlowLowFreq(_PluginBase):
 
         # 当总体积未超过最大阈值时，不需要执行删除操作
         if total_torrent_size < max_size:
-            logger.info(
+            self.__log_summary_routine(
                 f"当前做种体积 {self.__bytes_to_gb(total_torrent_size):.1f} GB，上限 {self.__bytes_to_gb(max_size):.1f} GB，"
                 f"下限 {self.__bytes_to_gb(min_size):.1f} GB，未进一步触发动态删除")
             return pre_delete_hashes or []
         else:
-            logger.info(
+            self.__log_summary_routine(
                 f"当前做种体积 {self.__bytes_to_gb(total_torrent_size):.1f} GB，上限 {self.__bytes_to_gb(max_size):.1f} GB，"
                 f"下限 {self.__bytes_to_gb(min_size):.1f} GB，进一步触发动态删除")
 
@@ -7175,7 +7217,7 @@ class BrushFlowLowFreq(_PluginBase):
         # 即使开了动态删除，但是也有可能部分站点单独设置了关闭，这里根据种子托管进行分组，先处理不需要托管的种子，按设置的规则进行删除
         proxy_delete_torrents, not_proxy_delete_torrents = self.__group_torrents_by_proxy_delete(torrents=torrents,
                                                                                                  torrent_tasks=torrent_tasks)
-        logger.info(f"托管种子数 {len(proxy_delete_torrents)}，未托管种子数 {len(not_proxy_delete_torrents)}")
+        self.__log_summary_routine(f"托管种子数 {len(proxy_delete_torrents)}，未托管种子数 {len(not_proxy_delete_torrents)}")
         if not_proxy_delete_torrents:
             not_proxy_delete_hashes = self.__delete_torrent_for_evaluate_conditions(torrents=not_proxy_delete_torrents,
                                                                                     torrent_tasks=torrent_tasks,
@@ -7236,7 +7278,7 @@ class BrushFlowLowFreq(_PluginBase):
                     self.__append_delete_message(delete_message_map=delete_message_map, torrent_hash=torrent_hash,
                                                  site_name=site_name, torrent_title=torrent_title,
                                                  torrent_desc=torrent_desc, reason=reason)
-                    logger.info(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
+                    self.__log_summary_key(f"站点：{site_name}，{reason}，命中删除条件：{torrent_title}|{torrent_desc}")
 
         need_delete_hashes = list(dict.fromkeys([hash_value for hash_value in need_delete_hashes if hash_value]))
 
@@ -7244,7 +7286,7 @@ class BrushFlowLowFreq(_PluginBase):
                         hash_key in torrent_tasks}
         msg = (f"站点：{'，'.join(delete_sites)}\n内容：已命中 {len(need_delete_hashes)} 个待删种子，"
                f"当前做种体积 {self.__bytes_to_gb(total_torrent_size):.1f} GB\n原因：触发动态删除阈值，等待下载器执行删除")
-        logger.info(msg)
+        self.__log_summary_routine(msg)
 
         # 如果是区间删除，这里记录统一推送，待删种成功后再发送
         if proxy_size_range:
@@ -8517,14 +8559,14 @@ class BrushFlowLowFreq(_PluginBase):
                     limit=download_limit,
                     torrent_hashes=[torrent_hash]
                 )
-                logger.info(
+                self.__log_summary_key(
                     f"上传保护执行 qB 动作成功，站点：{site_name}，hash={torrent_hash}，"
                     f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}，原因={reason}"
                 )
                 return True
             if hasattr(downloader, "change_torrent"):
                 downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)
-                logger.info(
+                self.__log_summary_key(
                     f"上传保护执行下载器动作成功，站点：{site_name}，hash={torrent_hash}，"
                     f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}，原因={reason}"
                 )
@@ -8598,8 +8640,10 @@ class BrushFlowLowFreq(_PluginBase):
         获取种子hash
         """
         try:
-            is_qb_torrent = getattr(self, "_is_qb", False) or isinstance(torrent, dict)
-            hash_value = torrent.get("hash") if is_qb_torrent else torrent.hashString
+            is_qb = getattr(self, "_is_qb", None)
+            if is_qb is None:
+                is_qb = self.downloader_helper.is_downloader("qbittorrent", service=self.service_info)
+            hash_value = torrent.get("hash") if is_qb else torrent.hashString
             return self.__normalize_hash(hash_value)
         except Exception as e:
             logger.warning(f"获取种子hash异常: {e}")
@@ -8646,7 +8690,10 @@ class BrushFlowLowFreq(_PluginBase):
         date_now = int(time.time())
         is_qb_torrent = getattr(self, "_is_qb", False) or isinstance(torrent, dict)
         # QB
-        if is_qb_torrent:
+        is_qb = getattr(self, "_is_qb", None)
+        if is_qb is None:
+            is_qb = self.downloader_helper.is_downloader("qbittorrent", service=self.service_info)
+        if is_qb:
             """
             {
               "added_on": 1693359031,
@@ -9392,10 +9439,10 @@ class BrushFlowLowFreq(_PluginBase):
         """
         brush_config = self.__get_brush_config()
         if not brush_config.except_subscribe:
-            logger.info("没有开启排除订阅，取消订阅标题匹配")
+            self.__log_summary_routine("没有开启排除订阅，取消订阅标题匹配")
             return set()
 
-        logger.info("已开启排除订阅，正在准备订阅标题匹配 ...")
+        self.__log_summary_routine("已开启排除订阅，正在准备订阅标题匹配 ...")
 
         if not self._subscribe_infos:
             self._subscribe_infos = {}
@@ -9422,13 +9469,13 @@ class BrushFlowLowFreq(_PluginBase):
                                                                       doubanid=subscribe.doubanid,
                                                                       cache=True)
                     if mediainfo:
-                        logger.info(f"订阅 {subscribe.name} 已识别到媒体信息")
+                        self.__log_summary_routine(f"订阅 {subscribe.name} 已识别到媒体信息")
                         logger.debug(f"subscribe {subscribe.name} {mediainfo.to_dict()}")
                         subscribe_titles.extend(mediainfo.names)
                         subscribe_titles = [title.strip() for title in subscribe_titles if title and title.strip()]
                         self._subscribe_infos[subscribe_key] = subscribe_titles
                     else:
-                        logger.info(f"订阅 {subscribe.name} 没有识别到媒体信息，跳过订阅标题匹配")
+                        self.__log_summary_routine(f"订阅 {subscribe.name} 没有识别到媒体信息，跳过订阅标题匹配")
                 except Exception as e:
                     logger.error(f"识别订阅 {subscribe.name} 媒体信息失败，错误详情: {e}")
 
@@ -9437,13 +9484,12 @@ class BrushFlowLowFreq(_PluginBase):
             for key in set(self._subscribe_infos) - current_keys:
                 del self._subscribe_infos[key]
 
-        logger.info("订阅标题匹配完成")
+        self.__log_summary_routine("订阅标题匹配完成")
         logger.debug(f"当前订阅的标题集合为：{self._subscribe_infos}")
         unique_titles = {title for titles in self._subscribe_infos.values() for title in titles}
         return unique_titles
 
-    @staticmethod
-    def __filter_torrents_contains_subscribe(torrents: Any, subscribe_titles: Set[str]):
+    def __filter_torrents_contains_subscribe(self, torrents: Any, subscribe_titles: Set[str]):
         # 初始化两个列表，一个用于收集未被排除的种子，一个用于记录被排除的种子
         included_torrents = []
         excluded_torrents = []
@@ -9457,13 +9503,13 @@ class BrushFlowLowFreq(_PluginBase):
             if any(subscribe_title in title or subscribe_title in description for subscribe_title in subscribe_titles):
                 # 如果种子的标题或描述包含订阅标题中的任一项，则记录为被排除
                 excluded_torrents.append(torrent)
-                logger.info(f"命中订阅内容，排除种子：{title}|{description}")
+                self.__log_summary_key(f"命中订阅内容，排除种子：{title}|{description}")
             else:
                 # 否则，收集为未被排除的种子
                 included_torrents.append(torrent)
 
         if not excluded_torrents:
-            logger.info(f"没有命中订阅内容，不需要排除种子")
+            self.__log_summary_routine("没有命中订阅内容，不需要排除种子")
 
         # 返回未被排除的种子列表
         return included_torrents
@@ -9523,7 +9569,7 @@ class BrushFlowLowFreq(_PluginBase):
         effective_days = self._brush_config.auto_archive_days
         if not effective_days or effective_days <= 0:
             effective_days = 7
-            logger.info(f"自动归档未配置，使用默认 {effective_days} 天")
+            self.__log_summary_routine(f"自动归档未配置，使用默认 {effective_days} 天")
 
         # 用于存储已删除的数据
         archived_tasks: Dict[str, dict] = self.get_data("archived") or {}
