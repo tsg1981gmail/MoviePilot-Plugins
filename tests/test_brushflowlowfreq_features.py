@@ -648,6 +648,67 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertEqual("full", brush_config.log_mode)
 
+    def test_legacy_silent_log_mode_maps_to_concise(self):
+        brush_config = self.module.BrushConfig({"log_mode": "silent"})
+
+        self.assertEqual("concise", brush_config.log_mode)
+
+    def test_concise_log_mode_suppresses_status_logs_but_keeps_key_events(self):
+        plugin = self._new_plugin({"log_mode": "concise"})
+        start_info_count = len(self.module.logger.info_messages)
+        start_debug_count = len(self.module.logger.debug_messages)
+
+        plugin._BrushFlowLowFreq__log_status("status probe")
+        plugin._BrushFlowLowFreq__log_summary_routine("routine probe")
+        plugin._BrushFlowLowFreq__log_summary_key("key probe")
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        new_debug_logs = self.module.logger.debug_messages[start_debug_count:]
+        self.assertFalse(any("status probe" in msg for msg in new_info_logs))
+        self.assertFalse(any("routine probe" in msg for msg in new_info_logs))
+        self.assertTrue(any("status probe" in msg for msg in new_debug_logs))
+        self.assertTrue(any("routine probe" in msg for msg in new_debug_logs))
+        self.assertTrue(any("key probe" in msg for msg in new_info_logs))
+
+    def test_summary_log_mode_keeps_status_logs_but_suppresses_routine_logs(self):
+        plugin = self._new_plugin({"log_mode": "summary"})
+        start_info_count = len(self.module.logger.info_messages)
+        start_debug_count = len(self.module.logger.debug_messages)
+
+        plugin._BrushFlowLowFreq__log_status("status probe")
+        plugin._BrushFlowLowFreq__log_summary_routine("routine probe")
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        new_debug_logs = self.module.logger.debug_messages[start_debug_count:]
+        self.assertTrue(any("status probe" in msg for msg in new_info_logs))
+        self.assertFalse(any("routine probe" in msg for msg in new_info_logs))
+        self.assertTrue(any("routine probe" in msg for msg in new_debug_logs))
+
+    def test_concise_log_mode_suppresses_common_polling_phrases(self):
+        plugin = self._new_plugin({"log_mode": "concise"})
+        phrases = [
+            "开始执行刷流任务 ...",
+            "开始获取站点 天空 的新种子 ...",
+            "站点 天空 第1页获取到 100 个种子",
+            "正在准备种子刷流，数量 200",
+            "开始检查刷流下载任务 ...",
+            "共有 14 个活跃任务正在刷流，开始检查任务状态",
+            "没有开启动态删种，按用户设置删种条件开始检查任务",
+            "刷流下载任务检查完成",
+            "刷流任务统计数据，总任务数：6220",
+        ]
+        start_info_count = len(self.module.logger.info_messages)
+        start_debug_count = len(self.module.logger.debug_messages)
+
+        for phrase in phrases:
+            plugin._BrushFlowLowFreq__log_status(phrase)
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        new_debug_logs = self.module.logger.debug_messages[start_debug_count:]
+        for phrase in phrases:
+            self.assertFalse(any(phrase in msg for msg in new_info_logs), phrase)
+            self.assertTrue(any(phrase in msg for msg in new_debug_logs), phrase)
+
     def test_summary_log_mode_does_not_change_task_decision_output(self):
         full_plugin = self._new_plugin({
             "brushsites": ["站点1"],
@@ -771,9 +832,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(any("routine probe" in msg for msg in new_debug_logs))
         self.assertTrue(any("key probe" in msg for msg in new_info_logs))
 
-    def test_silent_log_mode_keeps_key_events_but_hides_routine_logs(self):
+    def test_concise_log_mode_keeps_key_events_but_hides_routine_logs(self):
         plugin = self._new_qb_plugin({
-            "log_mode": "silent",
+            "log_mode": "concise",
             "delete_when_no_free": True,
             "delete_free_remaining_minutes": 5,
             "freeleech": "",
@@ -4359,13 +4420,39 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     models.update(collect_models(child))
             return models
 
+        def find_control(node, model):
+            if isinstance(node, dict):
+                props = node.get("props") or {}
+                if props.get("model") == model:
+                    return node
+                for child in node.get("content") or []:
+                    found = find_control(child, model)
+                    if found:
+                        return found
+            elif isinstance(node, list):
+                for child in node:
+                    found = find_control(child, model)
+                    if found:
+                        return found
+            return None
+
         other_tab = find_window_item(form, "other_tab")
         delete_tab = find_window_item(form, "delete_tab")
+        log_mode_control = find_control(other_tab, "log_mode")
 
         self.assertIsNotNone(other_tab)
         self.assertIsNotNone(delete_tab)
         self.assertIn("log_mode", collect_models(other_tab))
         self.assertNotIn("log_mode", collect_models(delete_tab))
+        self.assertIsNotNone(log_mode_control)
+        self.assertEqual(
+            ["full", "summary", "concise"],
+            [item.get("value") for item in log_mode_control["props"].get("items")]
+        )
+        self.assertEqual(
+            ["完整日志", "摘要日志", "精简日志"],
+            [item.get("title") for item in log_mode_control["props"].get("items")]
+        )
         self.assertEqual("full", defaults.get("log_mode"))
 
     def test_upload_protection_defaults_are_disabled_and_configurable(self):

@@ -422,7 +422,9 @@ class BrushConfig:
     @staticmethod
     def __normalize_log_mode(value) -> str:
         normalized_value = str(value or "full").strip().lower()
-        return normalized_value if normalized_value in {"full", "summary", "silent"} else "full"
+        if normalized_value == "silent":
+            return "concise"
+        return normalized_value if normalized_value in {"full", "summary", "concise"} else "full"
 
     @staticmethod
     def __parse_brush_interval_minutes(value) -> int:
@@ -499,7 +501,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.64"
+    plugin_version = "4.3.65"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -539,7 +541,14 @@ class BrushFlowLowFreq(_PluginBase):
 
     def __log_summary_routine(self, message: str) -> None:
         log_mode = getattr(self._brush_config, "log_mode", "full") if self._brush_config else "full"
-        if log_mode in {"summary", "silent"}:
+        if log_mode in {"summary", "concise"}:
+            logger.debug(message)
+        else:
+            logger.info(message)
+
+    def __log_status(self, message: str) -> None:
+        log_mode = getattr(self._brush_config, "log_mode", "full") if self._brush_config else "full"
+        if log_mode == "concise":
             logger.debug(message)
         else:
             logger.info(message)
@@ -2867,7 +2876,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                             'items': [
                                                                 {'title': '完整日志', 'value': 'full'},
                                                                 {'title': '摘要日志', 'value': 'summary'},
-                                                                {'title': '静默日志', 'value': 'silent'}
+                                                                {'title': '精简日志', 'value': 'concise'}
                                                             ],
                                                             'hint': '控制刷流检查日志可见性，不改变任务判断结果'
                                                         }
@@ -4155,11 +4164,11 @@ class BrushFlowLowFreq(_PluginBase):
             return
 
         if not self.__is_current_time_in_range():
-            logger.info(f"当前不在指定的刷流时间区间内，刷流操作将暂时暂停")
+            self.__log_status("当前不在指定的刷流时间区间内，刷流操作将暂时暂停")
             return
 
         with lock:
-            logger.info(f"开始执行刷流任务 ...")
+            self.__log_status("开始执行刷流任务 ...")
 
             torrent_tasks: Dict[str, dict] = self.get_data("torrents") or {}
             self.__normalize_task_hash_keys(torrent_tasks)
@@ -4169,14 +4178,14 @@ class BrushFlowLowFreq(_PluginBase):
             size_condition_passed, reason = self.__evaluate_size_condition_for_brush(torrents_size=torrents_size)
             self.__log_brush_conditions(passed=size_condition_passed, reason=reason)
             if not size_condition_passed:
-                logger.info(f"刷流任务执行完成")
+                self.__log_status("刷流任务执行完成")
                 return
 
             # 判断能否通过刷流前置条件
             pre_condition_passed, reason = self.__evaluate_pre_conditions_for_brush(include_yield_guard=False)
             self.__log_brush_conditions(passed=pre_condition_passed, reason=reason)
             if not pre_condition_passed:
-                logger.info(f"刷流任务执行完成")
+                self.__log_status("刷流任务执行完成")
                 return
 
             statistic_info = self.__get_statistic_info()
@@ -4192,7 +4201,7 @@ class BrushFlowLowFreq(_PluginBase):
             if not brush_config.brush_sequential:
                 random.shuffle(site_infos)
 
-            logger.info(f"即将针对站点 {', '.join(site.name for site in site_infos)} 开始刷流")
+            self.__log_status(f"即将针对站点 {', '.join(site.name for site in site_infos)} 开始刷流")
 
             # 获取订阅标题
             subscribe_titles = self.__get_subscribe_titles()
@@ -4203,16 +4212,16 @@ class BrushFlowLowFreq(_PluginBase):
                 if not self.__brush_site_torrents(siteid=site.id, torrent_tasks=torrent_tasks,
                                                   statistic_info=statistic_info,
                                                   subscribe_titles=subscribe_titles):
-                    logger.info(f"站点 {site.name} 刷流中途结束，停止后续刷流")
+                    self.__log_status(f"站点 {site.name} 刷流中途结束，停止后续刷流")
                     break
                 else:
-                    logger.info(f"站点 {site.name} 刷流完成")
+                    self.__log_status(f"站点 {site.name} 刷流完成")
 
             # 保存数据
             self.save_data("torrents", torrent_tasks)
             # 保存统计数据
             self.save_data("statistic", statistic_info)
-            logger.info(f"刷流任务执行完成")
+            self.__log_status("刷流任务执行完成")
 
     def __brush_site_torrents(self, siteid, torrent_tasks: Dict[str, dict], statistic_info: Dict[str, int],
                               subscribe_titles: Set[str]) -> bool:
@@ -4226,24 +4235,24 @@ class BrushFlowLowFreq(_PluginBase):
 
         brush_config = self.__get_brush_config(sitename=siteinfo.name)
 
-        logger.info(f"开始获取站点 {siteinfo.name} 的新种子 ...")
+        self.__log_status(f"开始获取站点 {siteinfo.name} 的新种子 ...")
         if brush_config.include_second_page:
             torrents = []
             for page in range(2):
                 page_torrents = self.torrents_chain.browse(domain=siteinfo.domain, page=page)
                 if page_torrents:
                     torrents.extend(page_torrents)
-                    logger.info(f"站点 {siteinfo.name} 第{page + 1}页获取到 {len(page_torrents)} 个种子")
+                    self.__log_status(f"站点 {siteinfo.name} 第{page + 1}页获取到 {len(page_torrents)} 个种子")
                 else:
                     break
         else:
             torrents = self.torrents_chain.browse(domain=siteinfo.domain)
         if not torrents:
-            logger.info(f"站点 {siteinfo.name} 没有获取到种子")
+            self.__log_status(f"站点 {siteinfo.name} 没有获取到种子")
             return True
 
         if brush_config.site_hr_active:
-            logger.info(f"站点 {siteinfo.name} 已开启全站H&R选项，所有种子设置为H&R种子")
+            self.__log_status(f"站点 {siteinfo.name} 已开启全站H&R选项，所有种子设置为H&R种子")
 
         # 排除包含订阅的种子
         if brush_config.except_subscribe:
@@ -4254,7 +4263,7 @@ class BrushFlowLowFreq(_PluginBase):
 
         torrents_size = self.__calculate_seeding_torrents_size(torrent_tasks=torrent_tasks)
 
-        logger.info(f"正在准备种子刷流，数量 {len(torrents)}")
+        self.__log_status(f"正在准备种子刷流，数量 {len(torrents)}")
 
         # 过滤种子
         for torrent in torrents:
@@ -4806,8 +4815,10 @@ class BrushFlowLowFreq(_PluginBase):
         # 免费剩余时间（最后判断）
         if brush_config.free_remaining_time and self.__is_free_torrent(torrent):
             if self.__should_skip_free_remaining_time_filter(brush_config=brush_config):
-                logger.info(f"免费剩余时间校验：当前处于例外时段 {brush_config.free_remaining_time_skip_range}，"
-                            f"跳过该条件，种子：{torrent.title}")
+                self.__log_summary_routine(
+                    f"免费剩余时间校验：当前处于例外时段 {brush_config.free_remaining_time_skip_range}，"
+                    f"跳过该条件，种子：{torrent.title}"
+                )
                 return True, None
 
             free_remaining_threshold = float(brush_config.free_remaining_time)
@@ -4832,8 +4843,10 @@ class BrushFlowLowFreq(_PluginBase):
                         description=detail_page_text
                     )
                     if free_remaining_minutes is not None:
-                        logger.info(f"免费剩余时间校验：已通过详情页兜底解析，剩余 {free_remaining_minutes:.0f} 分钟，"
-                                    f"种子：{torrent.title}")
+                        self.__log_summary_routine(
+                            f"免费剩余时间校验：已通过详情页兜底解析，剩余 {free_remaining_minutes:.0f} 分钟，"
+                            f"种子：{torrent.title}"
+                        )
 
             if free_remaining_minutes is None:
                 reason = (f"无法识别免费剩余时间（截止：{torrent.freedate or '未知'}，"
@@ -4849,8 +4862,7 @@ class BrushFlowLowFreq(_PluginBase):
 
         return True, None
 
-    @staticmethod
-    def __log_brush_conditions(passed: bool, reason: str, torrent: Any = None):
+    def __log_brush_conditions(self, passed: bool, reason: str, torrent: Any = None):
         """
         记录刷流日志
         """
@@ -4858,9 +4870,10 @@ class BrushFlowLowFreq(_PluginBase):
             if not torrent:
                 logger.warning(f"没有通过前置刷流条件校验，原因：{reason}")
             else:
-                # 与免费相关的过滤建议默认可见，便于排查“为何仍下载不到免费种”
                 if any(keyword in reason for keyword in ["免费剩余时间", "无法识别免费", "非免费种子"]):
-                    logger.info(f"种子没有通过刷流条件校验，原因：{reason} 种子：{torrent.title}|{torrent.description}")
+                    self.__log_summary_routine(
+                        f"种子没有通过刷流条件校验，原因：{reason} 种子：{torrent.title}|{torrent.description}"
+                    )
                 else:
                     logger.debug(f"种子没有通过刷流条件校验，原因：{reason} 种子：{torrent.title}|{torrent.description}")
 
@@ -4881,7 +4894,7 @@ class BrushFlowLowFreq(_PluginBase):
             return
 
         with lock:
-            logger.info("开始检查刷流下载任务 ...")
+            self.__log_status("开始检查刷流下载任务 ...")
             torrent_tasks: Dict[str, dict] = self.get_data("torrents") or {}
             torrent_info_cache: Dict[str, dict] = {}
             live_info_cache: Dict[str, dict] = {}
@@ -4916,12 +4929,12 @@ class BrushFlowLowFreq(_PluginBase):
 
             torrent_check_hashes = list(active_torrent_tasks.keys())
             if not active_torrent_tasks or not torrent_check_hashes:
-                logger.info("没有需要检查的刷流下载任务")
+                self.__log_status("没有需要检查的刷流下载任务")
                 return
             for torrent_task in torrent_tasks.values():
                 self.__clear_yield_guard_check_cache(torrent_task)
 
-            logger.info(f"共有 {len(active_torrent_tasks)} 个活跃任务正在刷流，开始检查任务状态")
+            self.__log_status(f"共有 {len(active_torrent_tasks)} 个活跃任务正在刷流，开始检查任务状态")
 
             # 获取到当前所有做种数据中需要被检查的种子数据
             check_torrents = [seeding_torrents_dict[th] for th in torrent_check_hashes if th in seeding_torrents_dict]
@@ -4962,7 +4975,7 @@ class BrushFlowLowFreq(_PluginBase):
 
             # 种子删除检查
             if not check_torrents:
-                logger.info("没有需要检查的任务，跳过")
+                self.__log_status("没有需要检查的任务，跳过")
             else:
                 need_delete_hashes = []
                 delete_message_map = {}
@@ -4986,7 +4999,7 @@ class BrushFlowLowFreq(_PluginBase):
 
                 # 如果配置了动态删除以及删种阈值，则根据动态删种进行分组处理
                 if brush_config.proxy_delete and brush_config.delete_size_range:
-                    logger.info("已开启动态删种，按系统默认动态删种条件开始检查任务")
+                    self.__log_status("已开启动态删种，按系统默认动态删种条件开始检查任务")
                     no_free_delete_hashes = self.__delete_torrent_for_no_free(
                         torrents=check_torrents,
                         torrent_tasks=torrent_tasks,
@@ -5009,7 +5022,7 @@ class BrushFlowLowFreq(_PluginBase):
                     need_delete_hashes.extend(proxy_delete_hashes)
                 # 否则均认为是没有开启动态删种
                 else:
-                    logger.info("没有开启动态删种，按用户设置删种条件开始检查任务")
+                    self.__log_status("没有开启动态删种，按用户设置删种条件开始检查任务")
                     no_free_delete_hashes = self.__delete_torrent_for_no_free(
                         torrents=check_torrents,
                         torrent_tasks=torrent_tasks,
@@ -5076,7 +5089,7 @@ class BrushFlowLowFreq(_PluginBase):
 
             self.save_data("torrents", torrent_tasks)
 
-            logger.info("刷流下载任务检查完成")
+            self.__log_status("刷流下载任务检查完成")
 
     def __update_torrent_tasks_state(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                      torrent_info_cache: Optional[Dict[str, dict]] = None):
@@ -5999,7 +6012,7 @@ class BrushFlowLowFreq(_PluginBase):
                 executed=handled,
                 site_name=site_name
             )
-        logger.info(
+        self.__log_summary_routine(
             f"上传保护放开限速评估：站点：{site_name}，hash={torrent_hash}，阶段={stage}，"
             f"待处理动作={pending_action or 'none'}，下载中任务数={downloading_count}，例外阈值={skip_threshold}，"
             f"目标限速={self.__format_speed_kbs(target_limit)}，执行结果={'已执行' if handled else '未执行'}，原因={reason}"
@@ -7569,12 +7582,14 @@ class BrushFlowLowFreq(_PluginBase):
             "active_downloaded": active_downloaded
         })
 
-        logger.info(f"刷流任务统计数据，总任务数：{total_count}，活跃任务数：{active_count}，已删除：{total_deleted}，"
-                    f"待归档：{total_unarchived}，"
-                    f"活跃上传量：{StringUtils.str_filesize(active_uploaded)}，"
-                    f"活跃下载量：{StringUtils.str_filesize(active_downloaded)}，"
-                    f"总上传量：{StringUtils.str_filesize(total_uploaded)}，"
-                    f"总下载量：{StringUtils.str_filesize(total_downloaded)}")
+        self.__log_status(
+            f"刷流任务统计数据，总任务数：{total_count}，活跃任务数：{active_count}，已删除：{total_deleted}，"
+            f"待归档：{total_unarchived}，"
+            f"活跃上传量：{StringUtils.str_filesize(active_uploaded)}，"
+            f"活跃下载量：{StringUtils.str_filesize(active_downloaded)}，"
+            f"总上传量：{StringUtils.str_filesize(total_uploaded)}，"
+            f"总下载量：{StringUtils.str_filesize(total_downloaded)}"
+        )
 
         self.save_data("statistic", statistic_info)
         self.save_data("torrents", torrent_tasks)
@@ -8070,7 +8085,7 @@ class BrushFlowLowFreq(_PluginBase):
 
         snapshot = self.__build_config_snapshot(brush_config=brush_config)
         reason = reason or "配置写回"
-        logger.info(f"插件配置快照[{reason}]：{json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)}")
+        self.__log_status(f"插件配置快照[{reason}]：{json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)}")
 
     def __update_config(self, brush_config: BrushConfig = None, reason: str = ""):
         """
