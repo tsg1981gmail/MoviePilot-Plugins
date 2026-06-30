@@ -637,6 +637,52 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(brush_config.yield_guard_rehearsal)
         self.assertFalse(brush_config.yield_guard_detail_log)
 
+    def test_log_mode_defaults_to_full(self):
+        brush_config = self.module.BrushConfig({})
+
+        self.assertEqual("full", brush_config.log_mode)
+
+    def test_log_mode_unknown_values_fall_back_to_full(self):
+        brush_config = self.module.BrushConfig({"log_mode": "unexpected"})
+
+        self.assertEqual("full", brush_config.log_mode)
+
+    def test_summary_log_mode_does_not_change_task_decision_output(self):
+        full_plugin = self._new_plugin({
+            "brushsites": ["站点1"],
+            "freeleech": "free",
+            "hr": "no",
+            "include": "",
+            "exclude": "",
+            "log_mode": "full",
+        })
+        summary_plugin = self._new_plugin({
+            "brushsites": ["站点1"],
+            "freeleech": "free",
+            "hr": "no",
+            "include": "",
+            "exclude": "",
+            "log_mode": "summary",
+        })
+        torrent = SimpleNamespace(
+            site_name="站点1",
+            title="free torrent",
+            description="free",
+            page_url="details.php?id=1",
+            pubdate="",
+            downloadvolumefactor=0,
+            freedate="",
+            freedate_diff="10分钟",
+            hit_and_run=False,
+            size=10 * 1024 ** 3,
+            seeders=1,
+        )
+
+        full_result = full_plugin._BrushFlowLowFreq__evaluate_conditions_for_brush(torrent=torrent, torrent_tasks={})
+        summary_result = summary_plugin._BrushFlowLowFreq__evaluate_conditions_for_brush(torrent=torrent, torrent_tasks={})
+
+        self.assertEqual(full_result, summary_result)
+
     def test_low_ratio_limit_options_default_disabled_and_configurable(self):
         default_config = self.module.BrushConfig({})
         custom_config = self.module.BrushConfig({

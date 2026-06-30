@@ -204,6 +204,7 @@ class BrushConfig:
         )
         self.yield_guard_rehearsal = config.get("yield_guard_rehearsal", True)
         self.yield_guard_detail_log = config.get("yield_guard_detail_log", False)
+        self.log_mode = self.__normalize_log_mode(config.get("log_mode", "full"))
 
         self.brush_tag = "刷流"
         # 站点独立配置
@@ -419,6 +420,11 @@ class BrushConfig:
         return normalized_value if normalized_value in allowed_values else default_value
 
     @staticmethod
+    def __normalize_log_mode(value) -> str:
+        normalized_value = str(value or "full").strip().lower()
+        return normalized_value if normalized_value in {"full", "summary", "silent"} else "full"
+
+    @staticmethod
     def __parse_brush_interval_minutes(value) -> int:
         try:
             if value in (None, ""):
@@ -448,6 +454,15 @@ class BrushConfig:
                     return number
             except (ValueError, TypeError):
                 return 0
+
+    def is_log_always_visible(self, _message=None) -> bool:
+        return True
+
+    def is_log_summary_visible(self, _message=None) -> bool:
+        return self.log_mode in {"full", "summary"}
+
+    def is_log_debug_only(self, _message=None) -> bool:
+        return self.log_mode == "full"
 
     def __format_value(self, v):
         """
@@ -4792,8 +4807,8 @@ class BrushFlowLowFreq(_PluginBase):
                 if detail_parse_reason:
                     reason = f"{reason}，详情页解析失败：{detail_parse_reason}"
                 return False, f"{reason}，按阈值策略跳过"
-            logger.info(f"免费剩余时间校验：剩余 {free_remaining_minutes:.0f} 分钟，"
-                        f"阈值 {free_remaining_threshold:.0f} 分钟，种子：{torrent.title}")
+            logger.debug(f"免费剩余时间校验：剩余 {free_remaining_minutes:.0f} 分钟，"
+                         f"阈值 {free_remaining_threshold:.0f} 分钟，种子：{torrent.title}")
             if free_remaining_minutes < free_remaining_threshold:
                 return False, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
                                f"低于设置的 {free_remaining_threshold:.0f} 分钟")
@@ -4856,6 +4871,8 @@ class BrushFlowLowFreq(_PluginBase):
             seeding_torrents_dict = {self.__get_hash(torrent): torrent for torrent in seeding_torrents}
             seeding_torrents_dict = {hash_value: torrent for hash_value, torrent in seeding_torrents_dict.items()
                                      if hash_value}
+            torrent_info_cache: Dict[str, dict] = {}
+            live_info_cache: Dict[str, dict] = {}
 
             # 检查种子刷流标签变更情况
             self.__update_seeding_tasks_based_on_tags(torrent_tasks=torrent_tasks, unmanaged_tasks=unmanaged_tasks,
@@ -4890,7 +4907,7 @@ class BrushFlowLowFreq(_PluginBase):
 
             # 根据配置的标签进行种子排除
             if check_torrents:
-                logger.info(f"当前刷流任务共 {len(check_torrents)} 个有效种子，正在准备按设定的种子标签进行排除")
+                logger.debug(f"当前刷流任务共 {len(check_torrents)} 个有效种子，正在准备按设定的种子标签进行排除")
                 # 初始化一个空的列表来存储需要排除的标签
                 tags_to_exclude = set()
                 # 如果 delete_except_tags 非空且不是纯空白，则添加到排除列表中
@@ -4903,11 +4920,11 @@ class BrushFlowLowFreq(_PluginBase):
                     check_torrents = self.__filter_torrents_by_tag(torrents=check_torrents, exclude_tag=combined_tags)
                     post_filter_count = len(check_torrents)  # 获取过滤后的任务数量
                     excluded_count = pre_filter_count - post_filter_count  # 计算被排除的任务数量
-                    logger.info(
+                    logger.debug(
                         f"有效种子数 {pre_filter_count}，排除标签 '{combined_tags}' 后，"
                         f"剩余种子数 {post_filter_count}，排除种子数 {excluded_count}")
                 else:
-                    logger.info("没有配置有效的排除标签，所有种子均参与后续处理")
+                    logger.debug("没有配置有效的排除标签，所有种子均参与后续处理")
 
             # 种子删除检查
             if not check_torrents:
@@ -4939,7 +4956,8 @@ class BrushFlowLowFreq(_PluginBase):
                     no_free_delete_hashes = self.__delete_torrent_for_no_free(
                         torrents=check_torrents,
                         torrent_tasks=torrent_tasks,
-                        delete_message_map=delete_message_map
+                        delete_message_map=delete_message_map,
+                        torrent_info_cache=torrent_info_cache
                     ) or []
                     upload_protection_delete_hash_set = set(upload_protection_delete_hashes)
                     proxy_check_torrents = [torrent for torrent in check_torrents
@@ -4961,7 +4979,8 @@ class BrushFlowLowFreq(_PluginBase):
                     no_free_delete_hashes = self.__delete_torrent_for_no_free(
                         torrents=check_torrents,
                         torrent_tasks=torrent_tasks,
-                        delete_message_map=delete_message_map
+                        delete_message_map=delete_message_map,
+                        torrent_info_cache=torrent_info_cache
                     ) or []
                     not_proxy_delete_hashes = self.__delete_torrent_for_evaluate_conditions(torrents=check_torrents,
                                                                                             torrent_tasks=torrent_tasks,
@@ -6797,23 +6816,30 @@ class BrushFlowLowFreq(_PluginBase):
         if is_still_free is False:
             return True, "检测到种子已不免费，按配置执行彻底删除"
         if is_still_free is None:
+            undetermined_count = self.__positive_int(torrent_task.get("free_undetermined_count"), 0) + 1
+            torrent_task["free_undetermined_count"] = undetermined_count
             logger.info(
                 f"失去免费删种检测跳过：站点={site_name}，标题={torrent_task.get('title', '')}，"
-                f"原因={free_reason or '未知'}，剩余={self.__format_minutes(free_remaining_minutes)}，"
+                f"原因={free_reason or '未知'}，连续无法判断={undetermined_count} 次，"
+                f"剩余={self.__format_minutes(free_remaining_minutes)}，"
                 f"阈值={self.__format_minutes(threshold_minutes)}"
             )
             return False, f"失去免费删种检测跳过，原因：{free_reason}"
 
         if free_remaining_minutes is None:
+            torrent_task.pop("free_undetermined_count", None)
             return False, "仍为免费种子"
         if free_remaining_minutes < threshold_minutes:
+            torrent_task.pop("free_undetermined_count", None)
             return True, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，不足 "
                           f"{threshold_minutes:.0f} 分钟，按配置执行彻底删除")
+        torrent_task.pop("free_undetermined_count", None)
         return False, (f"仍为免费种子，免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
                        f"不低于 {threshold_minutes:.0f} 分钟")
 
     def __delete_torrent_for_no_free(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
-                                     delete_message_map: Optional[Dict[str, List[dict]]] = None) -> List:
+                                     delete_message_map: Optional[Dict[str, List[dict]]] = None,
+                                     torrent_info_cache: Optional[Dict[str, dict]] = None) -> List:
         """
         根据“失去免费即删种”规则删除种子并获取已删除列表
         """
