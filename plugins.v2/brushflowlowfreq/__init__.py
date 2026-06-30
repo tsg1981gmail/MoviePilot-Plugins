@@ -2,6 +2,7 @@ import base64
 import hashlib
 import html
 import json
+import logging
 import random
 import re
 import threading
@@ -501,7 +502,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.65"
+    plugin_version = "4.3.66"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -555,6 +556,22 @@ class BrushFlowLowFreq(_PluginBase):
 
     def __log_summary_key(self, message: str) -> None:
         logger.info(message)
+
+    def __with_quiet_external_fetch_logs(self, func, *args, **kwargs):
+        log_mode = getattr(self._brush_config, "log_mode", "full") if self._brush_config else "full"
+        if log_mode != "concise":
+            return func(*args, **kwargs)
+
+        external_logger_names = ("indexer", "spider", "torrents.py")
+        external_loggers = [logging.getLogger(name) for name in external_logger_names]
+        previous_levels = [log.level for log in external_loggers]
+        try:
+            for log in external_loggers:
+                log.setLevel(logging.WARNING)
+            return func(*args, **kwargs)
+        finally:
+            for log, level in zip(external_loggers, previous_levels):
+                log.setLevel(level)
 
     def init_plugin(self, config: dict = None):
         self.sites_helper = SitesHelper()
@@ -4239,14 +4256,21 @@ class BrushFlowLowFreq(_PluginBase):
         if brush_config.include_second_page:
             torrents = []
             for page in range(2):
-                page_torrents = self.torrents_chain.browse(domain=siteinfo.domain, page=page)
+                page_torrents = self.__with_quiet_external_fetch_logs(
+                    self.torrents_chain.browse,
+                    domain=siteinfo.domain,
+                    page=page
+                )
                 if page_torrents:
                     torrents.extend(page_torrents)
                     self.__log_status(f"站点 {siteinfo.name} 第{page + 1}页获取到 {len(page_torrents)} 个种子")
                 else:
                     break
         else:
-            torrents = self.torrents_chain.browse(domain=siteinfo.domain)
+            torrents = self.__with_quiet_external_fetch_logs(
+                self.torrents_chain.browse,
+                domain=siteinfo.domain
+            )
         if not torrents:
             self.__log_status(f"站点 {siteinfo.name} 没有获取到种子")
             return True
@@ -8570,17 +8594,25 @@ class BrushFlowLowFreq(_PluginBase):
                     limit=download_limit,
                     torrent_hashes=[torrent_hash]
                 )
-                self.__log_summary_key(
+                success_message = (
                     f"上传保护执行 qB 动作成功，站点：{site_name}，hash={torrent_hash}，"
                     f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}，原因={reason}"
                 )
+                if getattr(brush_config, "log_mode", "full") == "concise":
+                    logger.debug(success_message)
+                else:
+                    self.__log_summary_key(success_message)
                 return True
             if hasattr(downloader, "change_torrent"):
                 downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)
-                self.__log_summary_key(
+                success_message = (
                     f"上传保护执行下载器动作成功，站点：{site_name}，hash={torrent_hash}，"
                     f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}，原因={reason}"
                 )
+                if getattr(brush_config, "log_mode", "full") == "concise":
+                    logger.debug(success_message)
+                else:
+                    self.__log_summary_key(success_message)
                 return True
         except Exception as err:
             logger.error(

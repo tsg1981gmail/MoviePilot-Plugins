@@ -1,6 +1,7 @@
 import importlib.util
 import hashlib
 import json
+import logging
 import sys
 import types
 import unittest
@@ -708,6 +709,112 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         for phrase in phrases:
             self.assertFalse(any(phrase in msg for msg in new_info_logs), phrase)
             self.assertTrue(any(phrase in msg for msg in new_debug_logs), phrase)
+
+    def test_concise_log_mode_temporarily_raises_external_fetch_loggers(self):
+        plugin = self._new_plugin({"log_mode": "concise"})
+        logger_names = ["indexer", "spider", "torrents.py"]
+        external_loggers = [logging.getLogger(name) for name in logger_names]
+        original_levels = [log.level for log in external_loggers]
+        observed_levels = []
+
+        def probe():
+            observed_levels.extend(log.level for log in external_loggers)
+            return "result"
+
+        try:
+            result = plugin._BrushFlowLowFreq__with_quiet_external_fetch_logs(probe)
+        finally:
+            for log, level in zip(external_loggers, original_levels):
+                log.setLevel(level)
+
+        self.assertEqual("result", result)
+        self.assertEqual([logging.WARNING, logging.WARNING, logging.WARNING], observed_levels)
+        self.assertEqual(original_levels, [log.level for log in external_loggers])
+
+    def test_full_log_mode_keeps_external_fetch_loggers_unchanged(self):
+        plugin = self._new_plugin({"log_mode": "full"})
+        logger_names = ["indexer", "spider", "torrents.py"]
+        external_loggers = [logging.getLogger(name) for name in logger_names]
+        original_levels = [log.level for log in external_loggers]
+        observed_levels = []
+
+        def probe():
+            observed_levels.extend(log.level for log in external_loggers)
+            return "result"
+
+        try:
+            result = plugin._BrushFlowLowFreq__with_quiet_external_fetch_logs(probe)
+        finally:
+            for log, level in zip(external_loggers, original_levels):
+                log.setLevel(level)
+
+        self.assertEqual("result", result)
+        self.assertEqual(original_levels, observed_levels)
+        self.assertEqual(original_levels, [log.level for log in external_loggers])
+
+    def test_concise_log_mode_suppresses_duplicate_upload_protection_success_log(self):
+        calls = []
+
+        class FakeQbc:
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
+                calls.append((limit, torrent_hashes))
+
+        plugin = self._new_qb_plugin(
+            {"log_mode": "concise"},
+            downloader=SimpleNamespace(qbc=FakeQbc(), is_inactive=lambda: False)
+        )
+        brush_config = self.module.BrushConfig({
+            "log_mode": "concise",
+            "upload_protection_download_limit_kbs": 300,
+        })
+        torrent_task = {"download_limit": 0}
+        start_info_count = len(self.module.logger.info_messages)
+
+        handled = plugin._BrushFlowLowFreq__apply_qb_upload_protection_action(
+            torrent_hash="hash1",
+            action="limit",
+            brush_config=brush_config,
+            torrent_task=torrent_task,
+            site_name="天空",
+            reason="检查间上传 1.0 KB/s",
+        )
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(handled)
+        self.assertEqual([(300 * 1024, ["hash1"])], calls)
+        self.assertFalse(any("上传保护执行 qB 动作成功" in msg for msg in new_info_logs))
+
+    def test_full_log_mode_keeps_upload_protection_success_log(self):
+        calls = []
+
+        class FakeQbc:
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
+                calls.append((limit, torrent_hashes))
+
+        plugin = self._new_qb_plugin(
+            {"log_mode": "full"},
+            downloader=SimpleNamespace(qbc=FakeQbc(), is_inactive=lambda: False)
+        )
+        brush_config = self.module.BrushConfig({
+            "log_mode": "full",
+            "upload_protection_download_limit_kbs": 300,
+        })
+        torrent_task = {"download_limit": 0}
+        start_info_count = len(self.module.logger.info_messages)
+
+        handled = plugin._BrushFlowLowFreq__apply_qb_upload_protection_action(
+            torrent_hash="hash1",
+            action="limit",
+            brush_config=brush_config,
+            torrent_task=torrent_task,
+            site_name="天空",
+            reason="检查间上传 1.0 KB/s",
+        )
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(handled)
+        self.assertEqual([(300 * 1024, ["hash1"])], calls)
+        self.assertTrue(any("上传保护执行 qB 动作成功" in msg for msg in new_info_logs))
 
     def test_summary_log_mode_does_not_change_task_decision_output(self):
         full_plugin = self._new_plugin({
