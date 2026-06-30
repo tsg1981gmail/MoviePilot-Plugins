@@ -731,6 +731,30 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual([logging.WARNING, logging.WARNING, logging.WARNING], observed_levels)
         self.assertEqual(original_levels, [log.level for log in external_loggers])
 
+    def test_concise_log_mode_filters_app_logger_fetch_noise(self):
+        plugin = self._new_plugin({"log_mode": "concise"})
+        start_info_count = len(self.module.logger.info_messages)
+        start_debug_count = len(self.module.logger.debug_messages)
+
+        def probe():
+            self.module.logger.info("开始请求：https://hdsky.me/torrents.php")
+            self.module.logger.info("天空 搜索完成，耗时 1 秒，返回数据：100")
+            self.module.logger.info("开始获取站点 hdsky.me 最新种子 ...")
+            self.module.logger.info("站点 天空，新增刷流种子下载：title|desc")
+            return "result"
+
+        result = plugin._BrushFlowLowFreq__with_quiet_external_fetch_logs(probe)
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        new_debug_logs = self.module.logger.debug_messages[start_debug_count:]
+        self.assertEqual("result", result)
+        self.assertFalse(any("开始请求：" in msg for msg in new_info_logs), new_info_logs)
+        self.assertFalse(any("搜索完成" in msg for msg in new_info_logs), new_info_logs)
+        self.assertFalse(any("开始获取站点 hdsky.me 最新种子" in msg for msg in new_info_logs), new_info_logs)
+        self.assertTrue(any("新增刷流种子下载" in msg for msg in new_info_logs), new_info_logs)
+        self.assertTrue(any("开始请求：" in msg for msg in new_debug_logs), new_debug_logs)
+        self.assertTrue(any("搜索完成" in msg for msg in new_debug_logs), new_debug_logs)
+
     def test_full_log_mode_keeps_external_fetch_loggers_unchanged(self):
         plugin = self._new_plugin({"log_mode": "full"})
         logger_names = ["indexer", "spider", "torrents.py"]
@@ -815,6 +839,50 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual([(300 * 1024, ["hash1"])], calls)
         self.assertTrue(any("上传保护执行 qB 动作成功" in msg for msg in new_info_logs))
+
+    def test_concise_upload_protection_action_log_includes_torrent_title(self):
+        calls = []
+
+        class FakeQbc:
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
+                calls.append((limit, torrent_hashes))
+
+        plugin = self._new_qb_plugin(
+            {
+                "log_mode": "concise",
+                "upload_protection_enabled": True,
+                "upload_protection_download_limit_kbs": 300,
+            },
+            downloader=SimpleNamespace(qbc=FakeQbc(), is_inactive=lambda: False)
+        )
+        torrent = {"hash": "hash1", "name": "动作种子", "state": "downloading", "progress": 0.5}
+        torrent_tasks = {
+            "hash1": {
+                "site_name": "天空",
+                "title": "动作种子",
+                "description": "desc",
+                "deleted": False,
+                "download_limit": 0,
+                "upload_protection_pending_action": "limit",
+            }
+        }
+        plugin._BrushFlowLowFreq__evaluate_upload_protection = (
+            lambda **kwargs: (False, "检查间上传 1.0 KB/s，连续低速 2/2 次，降低下载速度")
+        )
+        start_info_count = len(self.module.logger.info_messages)
+
+        plugin._BrushFlowLowFreq__apply_upload_protection_actions(
+            [torrent],
+            torrent_tasks,
+            {},
+        )
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertEqual([(300 * 1024, ["hash1"])], calls)
+        self.assertTrue(
+            any("已执行上传保护动作：limit" in msg and "种子：动作种子" in msg for msg in new_info_logs),
+            new_info_logs
+        )
 
     def test_summary_log_mode_does_not_change_task_decision_output(self):
         full_plugin = self._new_plugin({

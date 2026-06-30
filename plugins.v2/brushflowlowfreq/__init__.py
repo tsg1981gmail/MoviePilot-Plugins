@@ -502,7 +502,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.66"
+    plugin_version = "4.3.67"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -557,6 +557,16 @@ class BrushFlowLowFreq(_PluginBase):
     def __log_summary_key(self, message: str) -> None:
         logger.info(message)
 
+    @staticmethod
+    def __is_external_fetch_noise_log_message(message: str) -> bool:
+        if not message:
+            return False
+        return (
+                "开始请求：" in message
+                or ("搜索完成" in message and "返回数据：" in message)
+                or (message.startswith("开始获取站点 ") and " 最新种子" in message)
+        )
+
     def __with_quiet_external_fetch_logs(self, func, *args, **kwargs):
         log_mode = getattr(self._brush_config, "log_mode", "full") if self._brush_config else "full"
         if log_mode != "concise":
@@ -565,13 +575,68 @@ class BrushFlowLowFreq(_PluginBase):
         external_logger_names = ("indexer", "spider", "torrents.py")
         external_loggers = [logging.getLogger(name) for name in external_logger_names]
         previous_levels = [log.level for log in external_loggers]
+        original_info = getattr(logger, "info", None)
+        original_debug = getattr(logger, "debug", None)
+        app_logger_info_wrapped = False
+
+        def quiet_info(*log_args, **log_kwargs):
+            message = " ".join(str(arg) for arg in log_args)
+            if self.__is_external_fetch_noise_log_message(message):
+                if callable(original_debug):
+                    return original_debug(*log_args, **log_kwargs)
+                return None
+            return original_info(*log_args, **log_kwargs)
+
         try:
             for log in external_loggers:
                 log.setLevel(logging.WARNING)
+            if callable(original_info):
+                try:
+                    setattr(logger, "info", quiet_info)
+                    app_logger_info_wrapped = True
+                except Exception:
+                    app_logger_info_wrapped = False
             return func(*args, **kwargs)
         finally:
+            if app_logger_info_wrapped:
+                try:
+                    setattr(logger, "info", original_info)
+                except Exception:
+                    pass
             for log, level in zip(external_loggers, previous_levels):
                 log.setLevel(level)
+
+    @staticmethod
+    def __upload_protection_torrent_title(torrent_task: Optional[dict],
+                                          torrent_info: Optional[dict] = None,
+                                          torrent_hash: str = "") -> str:
+        candidates = []
+        if isinstance(torrent_task, dict):
+            candidates.extend([
+                torrent_task.get("title"),
+                torrent_task.get("name"),
+            ])
+        if isinstance(torrent_info, dict):
+            candidates.extend([
+                torrent_info.get("title"),
+                torrent_info.get("name"),
+            ])
+        candidates.append(torrent_hash)
+        for candidate in candidates:
+            title = str(candidate or "").strip()
+            if title:
+                return title
+        return ""
+
+    def __format_upload_protection_torrent_part(self, torrent_task: Optional[dict],
+                                                torrent_info: Optional[dict] = None,
+                                                torrent_hash: str = "") -> str:
+        title = self.__upload_protection_torrent_title(
+            torrent_task=torrent_task,
+            torrent_info=torrent_info,
+            torrent_hash=torrent_hash
+        )
+        return f"，种子：{title}" if title else ""
 
     def init_plugin(self, config: dict = None):
         self.sites_helper = SitesHelper()
@@ -5322,13 +5387,24 @@ class BrushFlowLowFreq(_PluginBase):
 
             action = str(torrent_task.get("upload_protection_pending_action") or "").strip().lower()
             if action in {"limit", "strict_limit", "restore_limit", "release_limit"}:
+                torrent_title = self.__upload_protection_torrent_title(
+                    torrent_task=torrent_task,
+                    torrent_info=torrent_info,
+                    torrent_hash=torrent_hash
+                )
+                torrent_log_part = self.__format_upload_protection_torrent_part(
+                    torrent_task=torrent_task,
+                    torrent_info=torrent_info,
+                    torrent_hash=torrent_hash
+                )
                 handled = self.__apply_qb_upload_protection_action(
                     torrent_hash=torrent_hash,
                     action=action,
                     brush_config=brush_config,
                     torrent_task=torrent_task,
                     site_name=site_name,
-                    reason=reason
+                    reason=reason,
+                    torrent_title=torrent_title
                 )
                 self.__record_upload_protection_action_detail(
                     brush_config=brush_config,
@@ -5342,7 +5418,9 @@ class BrushFlowLowFreq(_PluginBase):
                     torrent_task["upload_protection_last_action_time"] = time.time()
                     torrent_task["upload_protection_pending_action"] = None
                     action_count += 1
-                    self.__log_summary_key(f"站点：{site_name}，{reason}，已执行上传保护动作：{action}")
+                    self.__log_summary_key(
+                        f"站点：{site_name}，{reason}，已执行上传保护动作：{action}{torrent_log_part}"
+                    )
 
         if evaluated_count > 0:
             self.__log_summary_routine(f"上传保护：本轮检查已评估 {evaluated_count} 个下载中任务，已执行动作 {action_count} 个，待删除 {len(delete_hashes)} 个")
@@ -6019,6 +6097,14 @@ class BrushFlowLowFreq(_PluginBase):
         stage = str(torrent_task.get("upload_protection_stage") or "normal")
         pending_action = str(torrent_task.get("upload_protection_pending_action") or "").strip().lower()
         target_limit = int(self.__positive_float(getattr(brush_config, "dl_speed", 0), 0.0) * 1024)
+        torrent_title = self.__upload_protection_torrent_title(
+            torrent_task=torrent_task,
+            torrent_hash=torrent_hash
+        )
+        torrent_log_part = self.__format_upload_protection_torrent_part(
+            torrent_task=torrent_task,
+            torrent_hash=torrent_hash
+        )
         if stage in {"limited", "strict_limited", "released"} or pending_action:
             handled = self.__apply_qb_upload_protection_action(
                 torrent_hash=torrent_hash,
@@ -6026,7 +6112,8 @@ class BrushFlowLowFreq(_PluginBase):
                 brush_config=brush_config,
                 torrent_task=torrent_task,
                 site_name=site_name,
-                reason=reason
+                reason=reason,
+                torrent_title=torrent_title
             )
             self.__record_upload_protection_action_detail(
                 brush_config=brush_config,
@@ -6039,7 +6126,8 @@ class BrushFlowLowFreq(_PluginBase):
         self.__log_summary_routine(
             f"上传保护放开限速评估：站点：{site_name}，hash={torrent_hash}，阶段={stage}，"
             f"待处理动作={pending_action or 'none'}，下载中任务数={downloading_count}，例外阈值={skip_threshold}，"
-            f"目标限速={self.__format_speed_kbs(target_limit)}，执行结果={'已执行' if handled else '未执行'}，原因={reason}"
+            f"目标限速={self.__format_speed_kbs(target_limit)}{torrent_log_part}，"
+            f"执行结果={'已执行' if handled else '未执行'}，原因={reason}"
         )
 
         torrent_task["upload_protection_stage"] = "released"
@@ -8549,7 +8637,8 @@ class BrushFlowLowFreq(_PluginBase):
         return False
 
     def __apply_qb_upload_protection_action(self, torrent_hash: str, action: str, brush_config: BrushConfig,
-                                            torrent_task: dict, site_name: str = "", reason: str = "") -> bool:
+                                            torrent_task: dict, site_name: str = "", reason: str = "",
+                                            torrent_title: str = "") -> bool:
         """
         执行上传保护下载限速动作。delete 动作由删种流程处理。
         """
@@ -8558,8 +8647,15 @@ class BrushFlowLowFreq(_PluginBase):
         action = str(action or "").strip().lower()
         if action not in {"limit", "strict_limit", "restore_limit", "release_limit"}:
             return False
+        torrent_log_part = f"，种子：{torrent_title}" if torrent_title else self.__format_upload_protection_torrent_part(
+            torrent_task=torrent_task,
+            torrent_hash=torrent_hash
+        )
         if brush_config.upload_protection_rehearsal:
-            logger.info(f"站点：{site_name}，上传保护演练模式：hash={torrent_hash}，动作={action}，原因：{reason}")
+            logger.info(
+                f"站点：{site_name}，上传保护演练模式：hash={torrent_hash}{torrent_log_part}，"
+                f"动作={action}，原因：{reason}"
+            )
             return False
 
         base_limit_kbs = self.__positive_float(brush_config.upload_protection_download_limit_kbs, 512)
@@ -8596,7 +8692,7 @@ class BrushFlowLowFreq(_PluginBase):
                 )
                 success_message = (
                     f"上传保护执行 qB 动作成功，站点：{site_name}，hash={torrent_hash}，"
-                    f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}，原因={reason}"
+                    f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}{torrent_log_part}，原因={reason}"
                 )
                 if getattr(brush_config, "log_mode", "full") == "concise":
                     logger.debug(success_message)
@@ -8607,7 +8703,7 @@ class BrushFlowLowFreq(_PluginBase):
                 downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)
                 success_message = (
                     f"上传保护执行下载器动作成功，站点：{site_name}，hash={torrent_hash}，"
-                    f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}，原因={reason}"
+                    f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}{torrent_log_part}，原因={reason}"
                 )
                 if getattr(brush_config, "log_mode", "full") == "concise":
                     logger.debug(success_message)
@@ -8617,7 +8713,7 @@ class BrushFlowLowFreq(_PluginBase):
         except Exception as err:
             logger.error(
                 f"上传保护执行 qB 动作失败，站点：{site_name}，hash={torrent_hash}，"
-                f"动作={action}，原因={reason}，错误：{err}"
+                f"动作={action}{torrent_log_part}，原因={reason}，错误：{err}"
             )
         return False
 
