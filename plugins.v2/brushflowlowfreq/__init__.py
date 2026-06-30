@@ -6842,6 +6842,7 @@ class BrushFlowLowFreq(_PluginBase):
         is_still_free, free_reason, free_remaining_minutes = self.__check_torrent_current_free_status(
             torrent_task=torrent_task
         )
+        now_ts = time.time()
         torrent_task["free_check_cached_at"] = now_ts
         if free_remaining_minutes is not None:
             torrent_task["free_check_cached_remaining"] = free_remaining_minutes
@@ -7180,13 +7181,8 @@ class BrushFlowLowFreq(_PluginBase):
                 if self.__get_hash(torrent) in pre_delete_hash_set
             )
             total_torrent_size = total_torrent_size - pre_delete_total_size
-<<<<<<< HEAD
-            torrents = [torrent for torrent in torrents if self.__get_hash(torrent) not in pre_delete_hash_set]
-            logger.info(
-=======
             torrents = [torrent for torrent in torrents if self.__get_hash(torrent) not in pre_delete_hashes]
             self.__log_summary_routine(
->>>>>>> 3260cb3 (brushflowlowfreq: add configurable log mode)
                 f"满足动态删除前置条件的种子共 {len(pre_delete_hashes)} 个，体积 {self.__bytes_to_gb(pre_delete_total_size):.1f} GB，"
                 f"删除种子后，当前做种体积 {self.__bytes_to_gb(total_torrent_size):.1f} GB")
         else:
@@ -8640,10 +8636,13 @@ class BrushFlowLowFreq(_PluginBase):
         获取种子hash
         """
         try:
-            is_qb = getattr(self, "_is_qb", None)
-            if is_qb is None:
-                is_qb = self.downloader_helper.is_downloader("qbittorrent", service=self.service_info)
-            hash_value = torrent.get("hash") if is_qb else torrent.hashString
+            if isinstance(torrent, dict):
+                hash_value = torrent.get("hash") or torrent.get("hashString")
+            else:
+                is_qb = getattr(self, "_is_qb", None)
+                if is_qb is None:
+                    is_qb = self.downloader_helper.is_downloader("qbittorrent", service=self.service_info)
+                hash_value = torrent.get("hash") if is_qb else torrent.hashString
             return self.__normalize_hash(hash_value)
         except Exception as e:
             logger.warning(f"获取种子hash异常: {e}")
@@ -8659,11 +8658,7 @@ class BrushFlowLowFreq(_PluginBase):
         try:
             all_hashes = []
             for torrent in torrents:
-                # 根据下载器类型获取Hash值
-                hash_value = torrent.get("hash") if self.downloader_helper.is_downloader("qbittorrent",
-                                                                                         service=self.service_info) \
-                    else torrent.hashString
-                hash_value = self.__normalize_hash(hash_value)
+                hash_value = self.__get_hash(torrent)
                 if hash_value:
                     all_hashes.append(hash_value)
             return all_hashes
@@ -8688,12 +8683,12 @@ class BrushFlowLowFreq(_PluginBase):
         获取种子信息
         """
         date_now = int(time.time())
-        is_qb_torrent = getattr(self, "_is_qb", False) or isinstance(torrent, dict)
+        is_qb_torrent = isinstance(torrent, dict) or getattr(self, "_is_qb", False)
         # QB
         is_qb = getattr(self, "_is_qb", None)
         if is_qb is None:
             is_qb = self.downloader_helper.is_downloader("qbittorrent", service=self.service_info)
-        if is_qb:
+        if is_qb_torrent:
             """
             {
               "added_on": 1693359031,
