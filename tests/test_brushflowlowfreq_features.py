@@ -4323,6 +4323,51 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIn("brush_interval_minutes", collect_models(form))
         self.assertEqual(10, defaults.get("brush_interval_minutes"))
 
+    def test_get_form_places_log_mode_in_more_config_tab(self):
+        plugin = self._new_qb_plugin()
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.downloader_helper.get_configs = lambda: {}
+
+        form, defaults = plugin.get_form()
+
+        def find_window_item(node, value):
+            if isinstance(node, dict):
+                if node.get("component") == "VWindowItem" and (node.get("props") or {}).get("value") == value:
+                    return node
+                for child in node.get("content") or []:
+                    found = find_window_item(child, value)
+                    if found:
+                        return found
+            elif isinstance(node, list):
+                for child in node:
+                    found = find_window_item(child, value)
+                    if found:
+                        return found
+            return None
+
+        def collect_models(node):
+            models = set()
+            if isinstance(node, dict):
+                props = node.get("props") or {}
+                model = props.get("model")
+                if model:
+                    models.add(model)
+                for child in node.get("content") or []:
+                    models.update(collect_models(child))
+            elif isinstance(node, list):
+                for child in node:
+                    models.update(collect_models(child))
+            return models
+
+        other_tab = find_window_item(form, "other_tab")
+        delete_tab = find_window_item(form, "delete_tab")
+
+        self.assertIsNotNone(other_tab)
+        self.assertIsNotNone(delete_tab)
+        self.assertIn("log_mode", collect_models(other_tab))
+        self.assertNotIn("log_mode", collect_models(delete_tab))
+        self.assertEqual("full", defaults.get("log_mode"))
+
     def test_upload_protection_defaults_are_disabled_and_configurable(self):
         default_config = self.module.BrushConfig({})
         custom_config = self.module.BrushConfig({

@@ -499,7 +499,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.63"
+    plugin_version = "4.3.64"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1970,27 +1970,6 @@ class BrushFlowLowFreq(_PluginBase):
                                                     }
                                                 ]
                                             },
-                                            {
-                                                'component': 'VCol',
-                                                'props': {
-                                                    'cols': 12,
-                                                    'md': 4
-                                                },
-                                                'content': [
-                                                    {
-                                                        'component': 'VSelect',
-                                                        'props': {
-                                                            'model': 'log_mode',
-                                                            'label': '日志模式',
-                                                            'items': [
-                                                                {'title': '完整日志', 'value': 'full'},
-                                                                {'title': '摘要日志', 'value': 'summary'},
-                                                                {'title': '静默日志', 'value': 'silent'}
-                                                            ]
-                                                        }
-                                                    }
-                                                ]
-                                            }
                                         ]
                                     },
                                     {
@@ -2872,6 +2851,28 @@ class BrushFlowLowFreq(_PluginBase):
                                                         }]
                                                     }
                                                 ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSelect',
+                                                        'props': {
+                                                            'model': 'log_mode',
+                                                            'label': '日志模式',
+                                                            'items': [
+                                                                {'title': '完整日志', 'value': 'full'},
+                                                                {'title': '摘要日志', 'value': 'summary'},
+                                                                {'title': '静默日志', 'value': 'silent'}
+                                                            ],
+                                                            'hint': '控制刷流检查日志可见性，不改变任务判断结果'
+                                                        }
+                                                    }
+                                                ]
                                             }
                                         ]
                                     }
@@ -3165,7 +3166,6 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_enabled",
             "yield_guard_rehearsal",
             "yield_guard_detail_log",
-            "log_mode",
             "yield_guard_protect_delete_rules",
             "yield_guard_high_download_kbs",
             "yield_guard_low_upload_kbs",
