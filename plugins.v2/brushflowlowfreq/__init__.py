@@ -524,7 +524,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.69"
+    plugin_version = "4.3.70"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -6138,6 +6138,44 @@ class BrushFlowLowFreq(_PluginBase):
         })
         torrent_task["upload_protection_action_records"] = self.__limit_recent_records(records)
 
+    def __get_upload_protection_elapsed_minutes(self, torrent_task: dict,
+                                                torrent_info: Optional[dict] = None) -> Optional[float]:
+        candidates = []
+        if isinstance(torrent_task, dict):
+            candidates.extend([
+                torrent_task.get("first_downloaded_time"),
+                torrent_task.get("first_uploaded_time"),
+            ])
+
+        timestamps = []
+        for candidate in candidates:
+            value = self.__number_or_none(candidate)
+            if value is not None and value > 0:
+                timestamps.append(value)
+        if not timestamps:
+            return None
+        return self.__get_task_elapsed_minutes(min(timestamps))
+
+    def __log_upload_protection_sampling_wait(self, site_name: str, torrent_task: dict,
+                                              torrent_info: Optional[dict], reason: str,
+                                              elapsed_minutes: Optional[float],
+                                              min_elapsed: float) -> None:
+        if not isinstance(torrent_task, dict):
+            return
+        log_key = str(reason or "")
+        if torrent_task.get("upload_protection_sampling_wait_log_key") == log_key:
+            return
+        torrent_task["upload_protection_sampling_wait_log_key"] = log_key
+        torrent_log_part = self.__format_upload_protection_torrent_part(
+            torrent_task=torrent_task,
+            torrent_info=torrent_info
+        )
+        elapsed_text = "未知" if elapsed_minutes is None else f"{elapsed_minutes:.0f} 分钟"
+        self.__log_summary_key(
+            f"站点：{site_name}，上传保护计数暂未开始，原因={reason}，"
+            f"实际传输={elapsed_text}，观察门槛={min_elapsed:.0f} 分钟{torrent_log_part}"
+        )
+
     def __release_upload_protection_for_small_pool(self, torrent_hash: str, torrent_task: dict,
                                                    brush_config: BrushConfig, site_name: str,
                                                    downloading_count: int, skip_threshold: int) -> None:
@@ -6266,15 +6304,37 @@ class BrushFlowLowFreq(_PluginBase):
         torrent_task["upload_protection_evaluated_in_check"] = True
         interval_valid = bool(torrent_task.get("last_check_interval_upspeed_valid"))
         interval_upspeed = self.__number_or_none(torrent_task.get("last_check_interval_upspeed"))
-        if not interval_valid or interval_upspeed is None:
-            reason = torrent_task.get("last_check_interval_reason") or "上传保护：采样尚未就绪"
-            return finish(False, reason)
-
-        elapsed_source = torrent_task.get("first_downloaded_time") or torrent_task.get("first_uploaded_time")
+        elapsed_minutes = self.__get_upload_protection_elapsed_minutes(
+            torrent_task=torrent_task,
+            torrent_info=torrent_info
+        )
         if min_elapsed > 0:
-            elapsed_minutes = self.__get_task_elapsed_minutes(elapsed_source) if elapsed_source else 0
-            if elapsed_minutes < min_elapsed:
-                reason = f"上传保护：实际传输 {elapsed_minutes:.0f} 分钟，未到观察门槛 {min_elapsed:.0f} 分钟"
+            current_elapsed = elapsed_minutes or 0
+            if current_elapsed < min_elapsed:
+                reason = f"上传保护：实际传输 {current_elapsed:.0f} 分钟，未到观察门槛 {min_elapsed:.0f} 分钟"
+                return finish(False, reason)
+
+        if not interval_valid or interval_upspeed is None:
+            current_upspeed = self.__number_or_none(torrent_info.get("upspeed"))
+            current_downspeed = self.__number_or_none(torrent_info.get("dlspeed"))
+            if current_upspeed is not None and current_downspeed is not None and current_downspeed > 0:
+                interval_upspeed = current_upspeed
+                torrent_task["last_check_interval_upspeed"] = current_upspeed
+                torrent_task["last_check_interval_upspeed_valid"] = True
+                torrent_task["last_check_interval_reason"] = "检查间上传采样未就绪，使用当前上传速度兜底"
+                torrent_task["last_check_interval_downspeed"] = current_downspeed
+                torrent_task["last_check_interval_downspeed_valid"] = True
+                torrent_task["last_check_interval_downspeed_reason"] = "检查间下载采样未就绪，使用当前下载速度兜底"
+            else:
+                reason = torrent_task.get("last_check_interval_reason") or "上传保护：采样尚未就绪"
+                self.__log_upload_protection_sampling_wait(
+                    site_name=site_name,
+                    torrent_task=torrent_task,
+                    torrent_info=torrent_info,
+                    reason=reason,
+                    elapsed_minutes=elapsed_minutes,
+                    min_elapsed=min_elapsed
+                )
                 return finish(False, reason)
 
         no_upload_checks = max(1, self.__positive_int(brush_config.upload_protection_no_upload_checks, 6))
@@ -7727,7 +7787,8 @@ class BrushFlowLowFreq(_PluginBase):
             "upload_protection_last_reason": "",
             "upload_protection_evaluated_in_check": False,
             "upload_protection_interval_records": [],
-            "upload_protection_action_records": []
+            "upload_protection_action_records": [],
+            "upload_protection_sampling_wait_log_key": "",
         }
 
     @staticmethod
@@ -9039,6 +9100,9 @@ class BrushFlowLowFreq(_PluginBase):
             ratio = torrent.get("ratio") or 0
             # 上传量
             uploaded = torrent.get("uploaded") or 0
+            # 当前上传/下载速度 Byte/s
+            upspeed = torrent.get("upspeed")
+            dlspeed = torrent.get("dlspeed")
             # 平均上传速度 Byte/s
             if dltime:
                 avg_upspeed = int(uploaded / dltime)
@@ -9097,6 +9161,9 @@ class BrushFlowLowFreq(_PluginBase):
             ratio = torrent.ratio or 0
             # 上传量
             uploaded = int(downloaded * torrent.ratio)
+            # 当前上传/下载速度 Byte/s
+            upspeed = getattr(torrent, "rateUpload", None)
+            dlspeed = getattr(torrent, "rateDownload", None)
             # 平均上传速度
             if dltime:
                 avg_upspeed = int(uploaded / dltime)
@@ -9128,6 +9195,8 @@ class BrushFlowLowFreq(_PluginBase):
             "ratio": ratio,
             "uploaded": uploaded,
             "downloaded": downloaded,
+            "upspeed": upspeed,
+            "dlspeed": dlspeed,
             "avg_upspeed": avg_upspeed,
             "avg_downspeed": avg_downspeed,
             "download_limit": download_limit,

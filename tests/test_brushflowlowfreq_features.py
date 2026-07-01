@@ -4850,6 +4850,130 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(180, custom_config.upload_protection_good_upspeed_kbs)
         self.assertEqual(400, custom_config.upload_protection_download_limit_kbs)
 
+    def test_upload_protection_uses_current_speed_when_interval_sample_is_not_ready(self):
+        plugin = self._new_qb_plugin({
+            "upload_protection_enabled": True,
+            "upload_protection_low_upspeed_kbs": 150,
+            "upload_protection_low_limit_checks": 1,
+            "upload_protection_min_elapsed_minutes": 4,
+        })
+        torrent_task = {
+            "site_name": "站点1",
+            "title": "slow current torrent",
+            "first_downloaded_time": 1000,
+            "last_check_interval_upspeed": None,
+            "last_check_interval_upspeed_valid": False,
+            "last_check_interval_reason": "首次检查，暂不计算检查间上传速度",
+            "upload_protection_stage": "normal",
+        }
+        torrent_info = {
+            "state": "downloading",
+            "downloaded": 100 * 1024 * 1024,
+            "uploaded": 0,
+            "total_size": 10 * 1024 * 1024 * 1024,
+            "upspeed": 0,
+            "dlspeed": 1024 * 1024,
+        }
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000 + 5 * 60
+        try:
+            should_delete, reason = plugin._BrushFlowLowFreq__evaluate_upload_protection(
+                site_name="站点1",
+                brush_config=plugin._brush_config,
+                torrent_info=torrent_info,
+                torrent_task=torrent_task,
+                no_upload_kbs=40,
+                low_kbs=150,
+                good_kbs=150,
+                low_limit_checks=1,
+                low_strict_checks=2,
+                good_restore_checks=2,
+                good_release_checks=3,
+                min_elapsed=4,
+                min_downloaded_bytes=0,
+                base_limit_kbs=300,
+            )
+        finally:
+            self.module.time.time = original_time
+
+        self.assertFalse(should_delete, reason)
+        self.assertEqual("limit", torrent_task.get("upload_protection_pending_action"))
+        self.assertEqual(1, torrent_task.get("upload_protection_low_streak"))
+        self.assertEqual(0, torrent_task.get("last_check_interval_upspeed"))
+        self.assertTrue(torrent_task.get("last_check_interval_upspeed_valid"))
+        self.assertIn("连续低速 1/1", reason)
+
+    def test_upload_protection_does_not_use_task_added_time_for_observation_window(self):
+        plugin = self._new_qb_plugin({
+            "upload_protection_enabled": True,
+            "upload_protection_low_upspeed_kbs": 150,
+            "upload_protection_low_limit_checks": 1,
+            "upload_protection_min_elapsed_minutes": 4,
+        })
+        torrent_task = {
+            "site_name": "站点1",
+            "time": 1000,
+            "last_check_interval_upspeed": 0,
+            "last_check_interval_upspeed_valid": True,
+            "upload_protection_stage": "normal",
+        }
+        torrent_info = {
+            "state": "downloading",
+            "downloaded": 100 * 1024 * 1024,
+            "uploaded": 0,
+            "total_size": 10 * 1024 * 1024 * 1024,
+        }
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000 + 30 * 60
+        try:
+            should_delete, reason = plugin._BrushFlowLowFreq__evaluate_upload_protection(
+                site_name="站点1",
+                brush_config=plugin._brush_config,
+                torrent_info=torrent_info,
+                torrent_task=torrent_task,
+                no_upload_kbs=40,
+                low_kbs=150,
+                good_kbs=150,
+                low_limit_checks=1,
+                low_strict_checks=2,
+                good_restore_checks=2,
+                good_release_checks=3,
+                min_elapsed=4,
+                min_downloaded_bytes=0,
+                base_limit_kbs=300,
+            )
+        finally:
+            self.module.time.time = original_time
+
+        self.assertFalse(should_delete, reason)
+        self.assertIsNone(torrent_task.get("upload_protection_pending_action"))
+        self.assertIn("实际传输 0 分钟，未到观察门槛 4 分钟", reason)
+
+    def test_update_config_does_not_reset_upload_protection_runtime_state(self):
+        plugin = self._new_qb_plugin({
+            "enabled": True,
+            "upload_protection_enabled": True,
+        })
+        store = self._attach_memory_store(plugin, {
+            "torrents": {
+                "abcdef": {
+                    "upload_protection_low_streak": 2,
+                    "upload_protection_no_upload_streak": 5,
+                    "upload_protection_stage": "limited",
+                    "last_check_time": 123,
+                    "last_check_uploaded": 456,
+                }
+            }
+        })
+        plugin.update_config = lambda config: None
+
+        plugin._BrushFlowLowFreq__update_config(reason="配置写回")
+
+        self.assertEqual(2, store["torrents"]["abcdef"].get("upload_protection_low_streak"))
+        self.assertEqual(5, store["torrents"]["abcdef"].get("upload_protection_no_upload_streak"))
+        self.assertEqual("limited", store["torrents"]["abcdef"].get("upload_protection_stage"))
+        self.assertEqual(123, store["torrents"]["abcdef"].get("last_check_time"))
+
     def test_upload_protection_site_config_overrides_global_values(self):
         brush_config = self.module.BrushConfig({
             "enable_site_config": True,
