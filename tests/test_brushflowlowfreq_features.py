@@ -5914,10 +5914,10 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertEqual(512 * 1024, downloader.qbc.calls[0]["limit"])
         self.assertEqual(256 * 1024, downloader.qbc.calls[1]["limit"])
-        self.assertEqual(128 * 1024, downloader.qbc.calls[2]["limit"])
+        self.assertEqual(512 * 1024, downloader.qbc.calls[2]["limit"])
         self.assertEqual(0, downloader.qbc.calls[3]["limit"])
 
-    def test_upload_protection_restore_limit_prefers_original_download_limit_snapshot(self):
+    def test_upload_protection_restore_limit_uses_base_limit_instead_of_original_snapshot(self):
         class FakeQbc:
             def __init__(self):
                 self.calls = []
@@ -5957,7 +5957,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             brush_config=plugin._brush_config,
             torrent_task=torrent_task,
         ))
-        self.assertEqual(200 * 1024, downloader.qbc.calls[-1]["limit"])
+        self.assertEqual(512 * 1024, downloader.qbc.calls[-1]["limit"])
 
     def test_check_applies_upload_protection_to_downloading_managed_torrents(self):
         class FakeQbc:

@@ -524,7 +524,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.70"
+    plugin_version = "4.3.71"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -8859,11 +8859,7 @@ class BrushFlowLowFreq(_PluginBase):
         elif action == "strict_limit":
             download_limit = int(max(1.0, base_limit_kbs / 2) * 1024)
         elif action == "restore_limit":
-            original_limit = self.__number_or_none((torrent_task or {}).get("upload_protection_original_download_limit"))
-            if original_limit is not None:
-                download_limit = int(max(0.0, original_limit))
-            else:
-                download_limit = int(self.__positive_float(getattr(brush_config, "dl_speed", 0), 0.0) * 1024)
+            download_limit = int(max(1.0, base_limit_kbs) * 1024)
         else:
             download_limit = 0
 
