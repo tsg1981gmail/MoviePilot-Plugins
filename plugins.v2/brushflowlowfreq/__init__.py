@@ -524,7 +524,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.68"
+    plugin_version = "4.3.69"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -8306,7 +8306,28 @@ class BrushFlowLowFreq(_PluginBase):
 
         snapshot = self.__build_config_snapshot(brush_config=brush_config)
         reason = reason or "配置写回"
-        self.__log_status(f"插件配置快照[{reason}]：{json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)}")
+        detail_message = f"插件配置快照[{reason}]：{json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)}"
+        if brush_config.log_mode == "concise":
+            logger.debug(detail_message)
+            log_mode_title = {
+                "full": "完整日志",
+                "summary": "摘要日志",
+                "concise": "精简日志",
+            }.get(brush_config.log_mode, brush_config.log_mode)
+            if not brush_config.active_time_range_enabled:
+                active_time_range = "未启用"
+            else:
+                active_time_range = brush_config.active_time_range or "全天"
+            logger.info(
+                f"插件配置确认[{reason}]："
+                f"日志模式={log_mode_title}，"
+                f"刷流间隔={brush_config.brush_interval_seconds} 秒，"
+                f"检查间隔={brush_config.check_interval_seconds} 秒，"
+                f"开启时间段={active_time_range}"
+            )
+            return
+
+        self.__log_status(detail_message)
 
     def __update_config(self, brush_config: BrushConfig = None, reason: str = ""):
         """

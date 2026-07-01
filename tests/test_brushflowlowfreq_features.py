@@ -1448,6 +1448,33 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIn('"yield_guard_enabled": true', joined_logs)
         self.assertIn('"site_config_count": 0', joined_logs)
 
+    def test_concise_update_config_logs_compact_config_confirmation(self):
+        plugin = self._new_plugin({
+            "enabled": True,
+            "notify": False,
+            "downloader": "qb",
+            "log_mode": "concise",
+            "brush_interval_seconds": 127,
+            "check_interval_seconds": 113,
+            "active_time_range_enabled": False,
+            "active_time_range": "",
+        })
+        plugin.update_config = lambda config: None
+        start_info_count = len(self.module.logger.info_messages)
+        start_debug_count = len(self.module.logger.debug_messages)
+
+        plugin._BrushFlowLowFreq__update_config(reason="配置写回")
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        new_debug_logs = self.module.logger.debug_messages[start_debug_count:]
+        self.assertTrue(any("插件配置确认[配置写回]" in msg for msg in new_info_logs), new_info_logs)
+        self.assertTrue(any("日志模式=精简日志" in msg for msg in new_info_logs), new_info_logs)
+        self.assertTrue(any("刷流间隔=127 秒" in msg for msg in new_info_logs), new_info_logs)
+        self.assertTrue(any("检查间隔=113 秒" in msg for msg in new_info_logs), new_info_logs)
+        self.assertTrue(any("开启时间段=未启用" in msg for msg in new_info_logs), new_info_logs)
+        self.assertFalse(any("插件配置快照[配置写回]" in msg for msg in new_info_logs), new_info_logs)
+        self.assertTrue(any("插件配置快照[配置写回]" in msg for msg in new_debug_logs), new_debug_logs)
+
     def test_validate_and_fix_config_reports_invalid_yield_guard_values(self):
         plugin = self._new_plugin({"enabled": True})
         plugin.systemmessage = SimpleNamespace(put=lambda *args, **kwargs: None)
