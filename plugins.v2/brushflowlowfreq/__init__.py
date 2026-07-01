@@ -90,10 +90,19 @@ class BrushConfig:
         self.filter_seeding_torrents = config.get("filter_seeding_torrents", True)
         self.delete_when_no_free = config.get("delete_when_no_free", False)
         self.delete_free_remaining_minutes = self.__parse_number(config.get("delete_free_remaining_minutes", 5))
+        self.active_time_range_enabled = config.get("active_time_range_enabled", False)
         self.active_time_range = config.get("active_time_range")
         self.cron = config.get("cron")
         self.brush_interval_minutes = self.__parse_brush_interval_minutes(
             config.get("brush_interval_minutes", 10)
+        )
+        self.brush_interval_seconds = self.__parse_interval_seconds(
+            config.get("brush_interval_seconds"),
+            default_value=self.brush_interval_minutes * 60
+        )
+        self.check_interval_seconds = self.__parse_interval_seconds(
+            config.get("check_interval_seconds"),
+            default_value=150
         )
         self.qb_category = config.get("qb_category")
         self.site_hr_active = config.get("site_hr_active", False)
@@ -440,6 +449,19 @@ class BrushConfig:
         return min(interval, 59)
 
     @staticmethod
+    def __parse_interval_seconds(value, default_value: int = 600,
+                                 min_value: int = 10, max_value: int = 86400) -> int:
+        try:
+            if value in (None, ""):
+                return int(default_value)
+            interval = int(float(value))
+        except (TypeError, ValueError):
+            return int(default_value)
+        if interval <= 0:
+            return int(default_value)
+        return min(max(interval, min_value), max_value)
+
+    @staticmethod
     def __parse_number(value):
         if value is None or value == "":  # 更精确地检查None或空字符串
             return value
@@ -502,7 +524,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.67"
+    plugin_version = "4.3.68"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -826,41 +848,29 @@ class BrushFlowLowFreq(_PluginBase):
             return services
 
         if self._task_brush_enable:
-            brush_interval_minutes = brush_config.brush_interval_minutes
-            if brush_config.cron:
-                values = brush_config.cron.split()
-                values[0] = f"{datetime.now().minute % brush_interval_minutes}/{brush_interval_minutes}"
-                cron = " ".join(values)
-                logger.info(f"站点刷流定时服务启动，执行周期 {cron}")
-                cron_trigger = CronTrigger.from_crontab(cron)
-                services.append({
-                    "id": "BrushFlowLowFreq",
-                    "name": "shualiu服务",
-                    "trigger": cron_trigger,
-                    "func": self.brush
-                })
-            else:
-                logger.info(f"站点刷流定时服务启动，时间间隔 {brush_interval_minutes} 分钟")
-                services.append({
-                    "id": "BrushFlowLowFreq",
-                    "name": "shualiu服务",
-                    "trigger": "interval",
-                    "func": self.brush,
-                    "kwargs": {"minutes": brush_interval_minutes}
-                })
+            brush_interval_seconds = brush_config.brush_interval_seconds
+            self.__log_status(f"站点刷流定时服务启动，时间间隔 {brush_interval_seconds} 秒")
+            services.append({
+                "id": "BrushFlowLowFreq",
+                "name": "shualiu服务",
+                "trigger": "interval",
+                "func": self.brush,
+                "kwargs": {"seconds": brush_interval_seconds}
+            })
 
         if brush_config.enabled:
-            logger.info(f"站点刷流检查定时服务启动，时间间隔 {self._check_interval} 秒")
+            check_interval_seconds = brush_config.check_interval_seconds
+            self.__log_status(f"站点刷流检查定时服务启动，时间间隔 {check_interval_seconds} 秒")
             services.append({
                 "id": "BrushFlowLowFreqCheck",
                 "name": "shualiu检查服务",
                 "trigger": "interval",
                 "func": self.check,
-                "kwargs": {"seconds": self._check_interval}
+                "kwargs": {"seconds": check_interval_seconds}
             })
 
         if not services:
-            logger.info("站点刷流服务未开启")
+            self.__log_status("站点刷流服务未开启")
 
         return services
 
@@ -1297,7 +1307,7 @@ class BrushFlowLowFreq(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     "cols": 12,
-                                    "md": 3
+                                    "md": 2
                                 },
                                 'content': [
                                     {
@@ -1314,44 +1324,80 @@ class BrushFlowLowFreq(_PluginBase):
                                 'component': 'VCol',
                                 'props': {
                                     "cols": 12,
-                                    "md": 3
+                                    "md": 2
                                 },
                                 'content': [
                                     {
                                         'component': 'VCronField',
                                         'props': {
                                             'model': 'cron',
-                                            'label': '运行时段/周期范围',
-                                            'placeholder': '如：0 0-1 * * FRI,SUN，新增频率由间隔控制'
+                                            'label': '兼容运行范围',
+                                            'placeholder': '保留旧配置；秒级间隔由下方配置控制'
                                         }
-                                    }
+                                    },
                                 ]
                             },
                             {
                                 'component': 'VCol',
                                 'props': {
                                     "cols": 12,
-                                    "md": 3
+                                    "md": 2
                                 },
                                 'content': [
                                     {
                                         'component': 'VTextField',
                                         'props': {
-                                            'model': 'brush_interval_minutes',
-                                            'label': '新增种子间隔（分钟）',
-                                            'placeholder': '默认10；cron只限定运行时段',
+                                            'model': 'brush_interval_seconds',
+                                            'label': '刷流间隔（秒）',
+                                            'placeholder': '默认600；建议180-600',
                                             'type': 'number',
-                                            'min': '1',
-                                            'max': '59'
+                                            'min': '10',
+                                            'max': '86400'
                                         }
-                                    }
+                                    },
                                 ]
                             },
                             {
                                 'component': 'VCol',
                                 'props': {
                                     "cols": 12,
-                                    "md": 3
+                                    "md": 2
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextField',
+                                        'props': {
+                                            'model': 'check_interval_seconds',
+                                            'label': '检查间隔（秒）',
+                                            'placeholder': '默认150；建议150-300',
+                                            'type': 'number',
+                                            'min': '10',
+                                            'max': '86400'
+                                        }
+                                    },
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    "cols": 12,
+                                    "md": 2
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VSwitch',
+                                        'props': {
+                                            'model': 'active_time_range_enabled',
+                                            'label': '启用开启时间段',
+                                        }
+                                    },
+                                ]
+                            },
+                            {
+                                'component': 'VCol',
+                                'props': {
+                                    "cols": 12,
+                                    "md": 2
                                 },
                                 'content': [
                                     {
@@ -1359,9 +1405,9 @@ class BrushFlowLowFreq(_PluginBase):
                                         'props': {
                                             'model': 'active_time_range',
                                             'label': '开启时间段',
-                                            'placeholder': '如：00:00-08:00'
+                                            'placeholder': '如：00:00-08:00，留空默认全天'
                                         }
-                                    }
+                                    },
                                 ]
                             },
                         ]
@@ -3158,6 +3204,10 @@ class BrushFlowLowFreq(_PluginBase):
             "onlyonce": False,
             "clear_task": False,
             "brush_interval_minutes": 10,
+            "brush_interval_seconds": 600,
+            "check_interval_seconds": 150,
+            "active_time_range_enabled": False,
+            "active_time_range": "",
             "delete_except_tags": f"{settings.TORRENT_TAG},H&R" if settings.TORRENT_TAG else "H&R",
             "except_subscribe": True,
             "brush_sequential": False,
@@ -3235,6 +3285,9 @@ class BrushFlowLowFreq(_PluginBase):
             "upload_protection_detail_log": False,
             "upload_protection_skip_when_downloading_le": 0,
             "log_mode": "full",
+            "active_time_range_enabled": False,
+            "brush_interval_seconds": 600,
+            "check_interval_seconds": 150,
             "plugin_version": "current",
         }
 
@@ -6105,7 +6158,7 @@ class BrushFlowLowFreq(_PluginBase):
             torrent_task=torrent_task,
             torrent_hash=torrent_hash
         )
-        if stage in {"limited", "strict_limited", "released"} or pending_action:
+        if stage in {"limited", "strict_limited"} or pending_action:
             handled = self.__apply_qb_upload_protection_action(
                 torrent_hash=torrent_hash,
                 action="release_limit",
@@ -6964,10 +7017,19 @@ class BrushFlowLowFreq(_PluginBase):
             return False, ""
 
         threshold_minutes = self.__get_delete_free_remaining_threshold(brush_config=brush_config)
+        now_ts = time.time()
+        next_check_at = self.__number_or_none(torrent_task.get("free_undetermined_next_check_at"))
+        if next_check_at is not None and now_ts < next_check_at:
+            logger.debug(
+                f"失去免费删种检测退避中：站点={site_name}，标题={torrent_task.get('title', '')}，"
+                f"连续无法判断={torrent_task.get('free_undetermined_count', 0)} 次，"
+                f"下次检查时间戳={next_check_at:.0f}"
+            )
+            return False, ""
+
         is_still_free, free_reason, free_remaining_minutes = self.__check_torrent_current_free_status(
             torrent_task=torrent_task
         )
-        now_ts = time.time()
         torrent_task["free_check_cached_at"] = now_ts
         if free_remaining_minutes is not None:
             torrent_task["free_check_cached_remaining"] = free_remaining_minutes
@@ -6977,28 +7039,51 @@ class BrushFlowLowFreq(_PluginBase):
             f"剩余={self.__format_minutes(free_remaining_minutes)}，阈值={self.__format_minutes(threshold_minutes)}"
         )
         if is_still_free is False:
+            torrent_task.pop("free_undetermined_count", None)
+            torrent_task.pop("free_undetermined_next_check_at", None)
+            torrent_task.pop("free_undetermined_last_reason", None)
             return True, "检测到种子已不免费，按配置执行彻底删除"
         if is_still_free is None:
             undetermined_count = self.__positive_int(torrent_task.get("free_undetermined_count"), 0) + 1
             torrent_task["free_undetermined_count"] = undetermined_count
-            self.__log_summary_routine(
+            torrent_task["free_undetermined_last_reason"] = free_reason or "未知"
+            if undetermined_count >= 3:
+                torrent_task["free_undetermined_next_check_at"] = now_ts + 30 * 60
+            message = (
                 f"失去免费删种检测跳过：站点={site_name}，标题={torrent_task.get('title', '')}，"
                 f"原因={free_reason or '未知'}，连续无法判断={undetermined_count} 次，"
                 f"剩余={self.__format_minutes(free_remaining_minutes)}，"
                 f"阈值={self.__format_minutes(threshold_minutes)}"
             )
+            if self.__should_log_free_undetermined_count(undetermined_count):
+                self.__log_summary_key(message)
+                torrent_task["free_undetermined_last_log_at"] = now_ts
+            else:
+                logger.debug(message)
             return False, f"失去免费删种检测跳过，原因：{free_reason}"
 
         if free_remaining_minutes is None:
             torrent_task.pop("free_undetermined_count", None)
+            torrent_task.pop("free_undetermined_next_check_at", None)
+            torrent_task.pop("free_undetermined_last_reason", None)
             return False, "仍为免费种子"
         if free_remaining_minutes < threshold_minutes:
             torrent_task.pop("free_undetermined_count", None)
+            torrent_task.pop("free_undetermined_next_check_at", None)
+            torrent_task.pop("free_undetermined_last_reason", None)
             return True, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，不足 "
                           f"{threshold_minutes:.0f} 分钟，按配置执行彻底删除")
         torrent_task.pop("free_undetermined_count", None)
+        torrent_task.pop("free_undetermined_next_check_at", None)
+        torrent_task.pop("free_undetermined_last_reason", None)
         return False, (f"仍为免费种子，免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
                        f"不低于 {threshold_minutes:.0f} 分钟")
+
+    @staticmethod
+    def __should_log_free_undetermined_count(count: int) -> bool:
+        if count in {1, 3, 10, 50, 100}:
+            return True
+        return count > 100 and count % 100 == 0
 
     def __delete_torrent_for_no_free(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                      delete_message_map: Optional[Dict[str, List[dict]]] = None,
@@ -7060,7 +7145,7 @@ class BrushFlowLowFreq(_PluginBase):
 
         page_free_status = self.__parse_free_status_from_page(page_text)
         if page_free_status is None:
-            return None, "页面内容无法判断免费状态", None
+            return None, self.__build_free_status_undetermined_reason(page_text), None
 
         if not page_free_status:
             return False, "已失去免费", 0
@@ -7072,6 +7157,27 @@ class BrushFlowLowFreq(_PluginBase):
             description=page_text
         )
         return True, "仍为免费种子", free_remaining_minutes
+
+    @staticmethod
+    def __build_free_status_undetermined_reason(page_text: str) -> str:
+        text = html.unescape(page_text or "")
+        text_lower = text.lower()
+        challenge_keywords = [
+            "login.php", "name=\"username\"", "name='username'",
+            "cloudflare", "cf-browser-verification", "turnstile", "captcha", "验证"
+        ]
+        detail_patterns = [
+            r"download\.php\?id=",
+            r"<h1[^>]*id=[\"']top[\"']",
+            r"rowhead[^>]*>\s*下载"
+        ]
+        has_challenge = any(keyword in text_lower for keyword in challenge_keywords)
+        has_detail = any(re.search(pattern, text, re.IGNORECASE) for pattern in detail_patterns)
+        return (
+            "页面内容无法判断免费状态"
+            f"（页面长度={len(text)}，详情页特征={'是' if has_detail else '否'}，"
+            f"登录或验证页特征={'是' if has_challenge else '否'}）"
+        )
 
     def __get_torrent_detail_page_text(self, site_id: Any, page_url: str) -> Tuple[Optional[str], str]:
         """
@@ -8030,6 +8136,8 @@ class BrushFlowLowFreq(_PluginBase):
             "up_speed": "单任务上传限速",
             "dl_speed": "单任务下载限速",
             "auto_archive_days": "自动清理记录天数",
+            "brush_interval_seconds": "刷流间隔秒数",
+            "check_interval_seconds": "检查任务间隔秒数",
             "yield_guard_high_download_kbs": "收益保护高下载阈值",
             "yield_guard_low_upload_kbs": "收益保护低上传阈值",
             "yield_guard_low_ratio_percent": "收益保护低收益比阈值",
@@ -8117,7 +8225,8 @@ class BrushFlowLowFreq(_PluginBase):
                 config[attr] = normalized_value
 
         active_time_range = config.get("active_time_range")
-        if active_time_range and not self.__is_valid_time_range(time_range=active_time_range):
+        if (config.get("active_time_range_enabled")
+                and active_time_range and not self.__is_valid_time_range(time_range=active_time_range)):
             self.__log_and_notify_error(f"站点刷流任务出错，开启时间段设置错误：{active_time_range}")
             config["active_time_range"] = None
             found_error = True  # 更新错误标志
@@ -8265,8 +8374,12 @@ class BrushFlowLowFreq(_PluginBase):
             "proxy_delete": brush_config.proxy_delete,
             "include_second_page": brush_config.include_second_page,
             "active_time_range": brush_config.active_time_range,
+            "active_time_range_enabled": brush_config.active_time_range_enabled,
             "cron": brush_config.cron,
             "brush_interval_minutes": brush_config.brush_interval_minutes,
+            "brush_interval_seconds": brush_config.brush_interval_seconds,
+            "check_interval_seconds": brush_config.check_interval_seconds,
+            "log_mode": brush_config.log_mode,
             "qb_category": brush_config.qb_category,
             "enable_site_config": brush_config.enable_site_config,
             "site_config": brush_config.site_config,
@@ -9810,10 +9923,16 @@ class BrushFlowLowFreq(_PluginBase):
         """判断当前时间是否在开启时间区间内"""
 
         brush_config = self.__get_brush_config()
+        if not getattr(brush_config, "active_time_range_enabled", False):
+            return True
+
         active_time_range = brush_config.active_time_range
+        if not active_time_range:
+            logger.debug("已启用开启时间段但未填写时间段，默认全天运行")
+            return True
 
         if not self.__is_valid_time_range(active_time_range):
-            # 如果时间范围格式不正确或不存在，说明当前没有开启时间段，返回True
+            # 如果时间范围格式不正确，保持兼容：不阻断刷流，按全天运行。
             return True
 
         return self.__is_now_in_time_range(active_time_range)

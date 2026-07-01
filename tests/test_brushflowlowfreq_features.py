@@ -287,6 +287,52 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         new_logs = self.module.logger.info_messages[start_info_count:]
         self.assertTrue(any("失去免费删种检测跳过" in msg for msg in new_logs), new_logs)
 
+    def test_no_free_undetermined_backoff_skips_detail_page_until_next_check(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+        })
+        calls = []
+        torrent_task = self._free_torrent_task()
+        torrent_task.update({
+            "free_undetermined_count": 10,
+            "free_undetermined_next_check_at": 10 ** 12,
+            "free_undetermined_last_reason": "页面内容无法判断免费状态",
+        })
+        plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+            lambda *, site_id, page_url: calls.append((site_id, page_url)) or ("", "不应请求")
+        )
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete(
+            site_name="站点1",
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(should_delete)
+        self.assertEqual("", reason)
+        self.assertEqual([], calls)
+
+    def test_no_free_undetermined_sets_backoff_after_repeated_failures(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+        })
+        torrent_task = self._free_torrent_task()
+        torrent_task["free_undetermined_count"] = 2
+        plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+            lambda *, site_id, page_url: ("<html><body>ordinary page</body></html>", "")
+        )
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete(
+            site_name="站点1",
+            torrent_task=torrent_task,
+        )
+
+        self.assertFalse(should_delete)
+        self.assertTrue(reason.startswith("失去免费删种检测跳过"), reason)
+        self.assertEqual(3, torrent_task.get("free_undetermined_count"))
+        self.assertGreater(torrent_task.get("free_undetermined_next_check_at", 0), 0)
+
     def test_no_free_delete_removes_detail_page_without_free_marker(self):
         plugin = self._new_plugin({
             "delete_when_no_free": True,
@@ -840,6 +886,42 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual([(300 * 1024, ["hash1"])], calls)
         self.assertTrue(any("上传保护执行 qB 动作成功" in msg for msg in new_info_logs))
 
+    def test_upload_protection_small_pool_does_not_repeat_release_when_already_released(self):
+        calls = []
+
+        class FakeQbc:
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
+                calls.append((limit, torrent_hashes))
+
+        plugin = self._new_qb_plugin(
+            {
+                "upload_protection_enabled": True,
+                "upload_protection_skip_when_downloading_le": 1,
+            },
+            downloader=SimpleNamespace(qbc=FakeQbc(), is_inactive=lambda: False)
+        )
+        brush_config = self.module.BrushConfig({
+            "upload_protection_enabled": True,
+            "upload_protection_skip_when_downloading_le": 1,
+        })
+        torrent_task = {
+            "title": "已放开种子",
+            "upload_protection_stage": "released",
+            "upload_protection_pending_action": None,
+        }
+
+        plugin._BrushFlowLowFreq__release_upload_protection_for_small_pool(
+            torrent_hash="hash1",
+            torrent_task=torrent_task,
+            brush_config=brush_config,
+            site_name="天空",
+            downloading_count=1,
+            skip_threshold=1,
+        )
+
+        self.assertEqual([], calls)
+        self.assertEqual("released", torrent_task.get("upload_protection_stage"))
+
     def test_concise_upload_protection_action_log_includes_torrent_title(self):
         calls = []
 
@@ -1330,6 +1412,20 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         for key in removed_keys:
             with self.subTest(key=key):
                 self.assertNotIn(key, saved_config)
+
+    def test_update_config_preserves_log_mode(self):
+        plugin = self._new_plugin({
+            "enabled": True,
+            "notify": False,
+            "downloader": "qb",
+            "log_mode": "concise",
+        })
+        saved_config = {}
+        plugin.update_config = lambda config: saved_config.update(config)
+
+        plugin._BrushFlowLowFreq__update_config()
+
+        self.assertEqual("concise", saved_config.get("log_mode"))
 
     def test_update_config_logs_detailed_config_snapshot(self):
         plugin = self._new_plugin({
@@ -4488,12 +4584,24 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(10, self.module.BrushConfig({"brush_interval_minutes": -1}).brush_interval_minutes)
         self.assertEqual(59, self.module.BrushConfig({"brush_interval_minutes": 120}).brush_interval_minutes)
 
-    def test_brush_interval_minutes_controls_interval_service(self):
+    def test_interval_seconds_defaults_and_legacy_minutes_are_configurable(self):
+        self.assertEqual(600, self.module.BrushConfig({}).brush_interval_seconds)
+        self.assertEqual(180, self.module.BrushConfig({"brush_interval_minutes": 3}).brush_interval_seconds)
+        self.assertEqual(45, self.module.BrushConfig({"brush_interval_seconds": 45}).brush_interval_seconds)
+        self.assertEqual(600, self.module.BrushConfig({"brush_interval_seconds": ""}).brush_interval_seconds)
+        self.assertEqual(600, self.module.BrushConfig({"brush_interval_seconds": "bad"}).brush_interval_seconds)
+        self.assertEqual(600, self.module.BrushConfig({"brush_interval_seconds": 0}).brush_interval_seconds)
+        self.assertEqual(86400, self.module.BrushConfig({"brush_interval_seconds": 999999}).brush_interval_seconds)
+        self.assertEqual(150, self.module.BrushConfig({}).check_interval_seconds)
+        self.assertEqual(240, self.module.BrushConfig({"check_interval_seconds": 240}).check_interval_seconds)
+
+    def test_interval_seconds_control_services(self):
         plugin = self._new_qb_plugin({
             "enabled": True,
             "brushsites": [1],
             "downloader": "qb",
-            "brush_interval_minutes": 3,
+            "brush_interval_seconds": 45,
+            "check_interval_seconds": 240,
             "cron": "",
         })
         plugin._task_brush_enable = True
@@ -4501,11 +4609,13 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         services = plugin.get_service()
         brush_service = next(service for service in services if service["id"] == "BrushFlowLowFreq")
+        check_service = next(service for service in services if service["id"] == "BrushFlowLowFreqCheck")
 
         self.assertEqual("interval", brush_service["trigger"])
-        self.assertEqual({"minutes": 3}, brush_service["kwargs"])
+        self.assertEqual({"seconds": 45}, brush_service["kwargs"])
+        self.assertEqual({"seconds": 240}, check_service["kwargs"])
 
-    def test_brush_interval_minutes_controls_cron_minute_step(self):
+    def test_cron_no_longer_rewrites_second_based_brush_interval(self):
         captured = []
 
         class FakeCronTrigger:
@@ -4520,7 +4630,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "enabled": True,
             "brushsites": [1],
             "downloader": "qb",
-            "brush_interval_minutes": 3,
+            "brush_interval_seconds": 45,
             "cron": "0 0-8 * * *",
         })
         plugin._task_brush_enable = True
@@ -4531,11 +4641,59 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             self.module.CronTrigger = original_cron_trigger
 
         brush_service = next(service for service in services if service["id"] == "BrushFlowLowFreq")
-        self.assertEqual({"cron": captured[0]}, brush_service["trigger"])
-        self.assertRegex(captured[0].split()[0], r"^\d+/3$")
-        self.assertNotIn("/10", captured[0].split()[0])
+        self.assertEqual("interval", brush_service["trigger"])
+        self.assertEqual({"seconds": 45}, brush_service["kwargs"])
+        self.assertEqual([], captured)
 
-    def test_get_form_exposes_brush_interval_minutes(self):
+    def test_concise_log_mode_suppresses_service_startup_logs(self):
+        plugin = self._new_qb_plugin({
+            "enabled": True,
+            "brushsites": [1],
+            "downloader": "qb",
+            "brush_interval_seconds": 45,
+            "check_interval_seconds": 240,
+            "log_mode": "concise",
+        })
+        plugin._task_brush_enable = True
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        start_info_count = len(self.module.logger.info_messages)
+        start_debug_count = len(self.module.logger.debug_messages)
+
+        plugin.get_service()
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        new_debug_logs = self.module.logger.debug_messages[start_debug_count:]
+        self.assertFalse(any("站点刷流定时服务启动" in msg for msg in new_info_logs), new_info_logs)
+        self.assertFalse(any("站点刷流检查定时服务启动" in msg for msg in new_info_logs), new_info_logs)
+        self.assertTrue(any("站点刷流定时服务启动" in msg for msg in new_debug_logs), new_debug_logs)
+
+    def test_active_time_range_status_defaults_to_all_day(self):
+        plugin = self._new_plugin({
+            "active_time_range_enabled": False,
+            "active_time_range": "",
+        })
+
+        self.assertFalse(plugin._brush_config.active_time_range_enabled)
+        self.assertTrue(plugin._BrushFlowLowFreq__is_current_time_in_range())
+
+    def test_enabled_empty_active_time_range_allows_all_day(self):
+        plugin = self._new_plugin({
+            "active_time_range_enabled": True,
+            "active_time_range": "",
+        })
+
+        self.assertTrue(plugin._BrushFlowLowFreq__is_current_time_in_range())
+
+    def test_enabled_active_time_range_uses_time_window(self):
+        plugin = self._new_plugin({
+            "active_time_range_enabled": True,
+            "active_time_range": "00:00-00:01",
+        })
+        plugin._BrushFlowLowFreq__is_now_in_time_range = lambda value: value == "00:00-00:01"
+
+        self.assertTrue(plugin._BrushFlowLowFreq__is_current_time_in_range())
+
+    def test_get_form_exposes_second_intervals_and_active_time_range_switch(self):
         plugin = self._new_qb_plugin()
         plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
         plugin.downloader_helper.get_configs = lambda: {}
@@ -4556,8 +4714,14 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     models.update(collect_models(child))
             return models
 
-        self.assertIn("brush_interval_minutes", collect_models(form))
-        self.assertEqual(10, defaults.get("brush_interval_minutes"))
+        models = collect_models(form)
+        self.assertIn("brush_interval_seconds", models)
+        self.assertIn("check_interval_seconds", models)
+        self.assertIn("active_time_range_enabled", models)
+        self.assertIn("active_time_range", models)
+        self.assertEqual(600, defaults.get("brush_interval_seconds"))
+        self.assertEqual(150, defaults.get("check_interval_seconds"))
+        self.assertFalse(defaults.get("active_time_range_enabled"))
 
     def test_get_form_places_log_mode_in_more_config_tab(self):
         plugin = self._new_qb_plugin()
