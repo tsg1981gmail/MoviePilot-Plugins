@@ -256,6 +256,145 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(should_delete, reason)
         self.assertIn("不足 5", reason)
 
+    def test_no_free_delete_uses_cached_free_expire_without_detail_request(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+            "check_interval_seconds": 113,
+        })
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000
+        try:
+            torrent_task = self._free_torrent_task()
+            torrent_task["free_expires_at"] = 1000 + 2 * 60
+            plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+                lambda *, site_id, page_url: self.fail("有免费到期缓存时不应请求详情页")
+            )
+
+            should_delete, reason = plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete(
+                site_name="站点1",
+                torrent_task=torrent_task,
+            )
+        finally:
+            self.module.time.time = original_time
+
+        self.assertTrue(should_delete, reason)
+        self.assertIn("缓存免费剩余时间 2", reason)
+
+    def test_no_free_delete_skips_detail_when_cached_remaining_is_safe(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+            "free_expire_recheck_before_minutes": 1,
+        })
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000
+        try:
+            torrent_task = self._free_torrent_task()
+            torrent_task["free_expires_at"] = 1000 + 60 * 60
+            plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+                lambda *, site_id, page_url: self.fail("缓存仍安全时不应请求详情页")
+            )
+
+            should_delete, reason = plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete(
+                site_name="站点1",
+                torrent_task=torrent_task,
+            )
+        finally:
+            self.module.time.time = original_time
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("缓存免费剩余时间 60", reason)
+
+    def test_no_free_delete_rechecks_when_cache_enters_recheck_window(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+            "free_expire_recheck_before_minutes": 1,
+            "check_interval_seconds": 30,
+        })
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000
+        try:
+            torrent_task = self._free_torrent_task()
+            torrent_task["free_expires_at"] = 1000 + 5.5 * 60
+            plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+                lambda *, site_id, page_url:
+                ("<a href='download.php?id=1'>下载</a>优惠剩余时间：30分钟", "")
+            )
+
+            should_delete, reason = plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete(
+                site_name="站点1",
+                torrent_task=torrent_task,
+            )
+        finally:
+            self.module.time.time = original_time
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("30", reason)
+        self.assertAlmostEqual(1000 + 30 * 60, torrent_task.get("free_expires_at"), delta=1)
+        self.assertEqual("detail", torrent_task.get("free_expires_source"))
+
+    def test_no_free_detail_recheck_ignores_stale_task_free_remaining_diff(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+            "free_expire_recheck_before_minutes": 1,
+            "check_interval_seconds": 30,
+        })
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000
+        try:
+            torrent_task = self._free_torrent_task()
+            torrent_task["free_expires_at"] = 1000 + 5.5 * 60
+            torrent_task["freedate_diff"] = "60分钟"
+            plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+                lambda *, site_id, page_url:
+                ("<a href='download.php?id=1'>下载</a>优惠剩余时间：30分钟", "")
+            )
+
+            should_delete, reason = plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete(
+                site_name="站点1",
+                torrent_task=torrent_task,
+            )
+        finally:
+            self.module.time.time = original_time
+
+        self.assertFalse(should_delete, reason)
+        self.assertIn("30", reason)
+        self.assertAlmostEqual(1000 + 30 * 60, torrent_task.get("free_expires_at"), delta=1)
+
+    def test_no_free_delete_skips_completed_torrents(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+        })
+        torrent = {"hash": "ABCDEF"}
+        torrent_tasks = {
+            "abcdef": {
+                **self._free_torrent_task(),
+                "title": "completed free torrent",
+            }
+        }
+        torrent_info_cache = {
+            "abcdef": {
+                "downloaded": 100,
+                "total_size": 100,
+                "seeding_time": 0,
+            }
+        }
+        plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+            lambda *, site_id, page_url: self.fail("已完成任务不应参与免费到期检测")
+        )
+
+        delete_hashes = plugin._BrushFlowLowFreq__delete_torrent_for_no_free(
+            torrents=[torrent],
+            torrent_tasks=torrent_tasks,
+            torrent_info_cache=torrent_info_cache,
+        )
+
+        self.assertEqual([], delete_hashes)
+
     def test_no_free_delete_skips_when_detail_page_cannot_be_judged(self):
         plugin = self._new_plugin({
             "delete_when_no_free": True,
@@ -446,9 +585,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     "hash": "abcdef",
                     "name": "free ending torrent",
                     "tags": "刷流",
-                    "state": "seeding",
-                    "progress": 1.0,
-                    "downloaded": 100,
+                    "state": "downloading",
+                    "progress": 0.5,
+                    "downloaded": 50,
                     "uploaded": 0,
                     "total_size": 100,
                     "ratio": 0,
@@ -497,14 +636,14 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 "description": "desc",
                 "page_url": "details.php?id=1",
                 "time": 0,
-                "downloaded": 100,
+                "downloaded": 50,
                 "uploaded": 0,
                 "total_size": 100,
                 "ratio": 0,
-                "seeding_time": 3600,
+                "seeding_time": 0,
                 "hit_and_run": False,
                 "freedate": "",
-                "freedate_diff": "10分钟",
+                "freedate_diff": "",
                 "downloadvolumefactor": 0,
                 "deleted": False,
                 "first_downloaded_time": 1,
@@ -4621,6 +4760,11 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(86400, self.module.BrushConfig({"brush_interval_seconds": 999999}).brush_interval_seconds)
         self.assertEqual(150, self.module.BrushConfig({}).check_interval_seconds)
         self.assertEqual(240, self.module.BrushConfig({"check_interval_seconds": 240}).check_interval_seconds)
+        self.assertEqual(1, self.module.BrushConfig({}).free_expire_recheck_before_minutes)
+        self.assertEqual(
+            2,
+            self.module.BrushConfig({"free_expire_recheck_before_minutes": 2}).free_expire_recheck_before_minutes,
+        )
 
     def test_interval_seconds_control_services(self):
         plugin = self._new_qb_plugin({
@@ -5015,6 +5159,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "filter_seeding_torrents": True,
             "delete_when_no_free": False,
             "delete_free_remaining_minutes": 5,
+            "free_expire_recheck_before_minutes": 1,
             "yield_guard_enabled": False,
             "upload_protection_enabled": False,
             "site_config": (
@@ -5026,6 +5171,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 '"filter_seeding_torrents": false, '
                 '"delete_when_no_free": true, '
                 '"delete_free_remaining_minutes": 3, '
+                '"free_expire_recheck_before_minutes": 2, '
                 '"yield_guard_enabled": true, '
                 '"upload_protection_enabled": true}]'
             ),
@@ -5040,6 +5186,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(site_config.filter_seeding_torrents)
         self.assertTrue(site_config.delete_when_no_free)
         self.assertEqual(3, site_config.delete_free_remaining_minutes)
+        self.assertEqual(2, site_config.free_expire_recheck_before_minutes)
         self.assertFalse(site_config.yield_guard_enabled)
         self.assertTrue(site_config.upload_protection_enabled)
 
@@ -5054,6 +5201,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "filter_seeding_torrents": False,
             "delete_when_no_free": True,
             "delete_free_remaining_minutes": 5,
+            "free_expire_recheck_before_minutes": 2,
             "yield_guard_enabled": True,
             "interval_upspeed": 150,
             "seed_ratio_limit_download_kbs": 256,
@@ -5074,6 +5222,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(10, config.get("seed_size"))
         self.assertTrue(config.get("delete_when_no_free"))
         self.assertEqual(5, config.get("delete_free_remaining_minutes"))
+        self.assertEqual(2, config.get("free_expire_recheck_before_minutes"))
         self.assertNotIn("seed_ratio_check_minutes", config)
         self.assertNotIn("filter_seeding_torrents", config)
         self.assertNotIn("yield_guard_enabled", config)
@@ -5146,6 +5295,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "delete_except_tags",
             "delete_when_no_free",
             "delete_free_remaining_minutes",
+            "free_expire_recheck_before_minutes",
         }
 
         self.assertIn("上传保护", collect_texts(form))
@@ -5155,6 +5305,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(False, defaults.get("upload_protection_enabled"))
         self.assertEqual(512, defaults.get("upload_protection_download_limit_kbs"))
         self.assertEqual(0, defaults.get("upload_protection_skip_when_downloading_le"))
+        self.assertEqual(1, defaults.get("free_expire_recheck_before_minutes"))
         self.assertTrue(legacy_434_delete_models.issubset(models), legacy_434_delete_models - models)
         self.assertTrue(removed_models.isdisjoint(models), removed_models & models)
 
@@ -5187,6 +5338,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "download_time",
             "delete_size_range",
             "delete_except_tags",
+            "delete_when_no_free",
+            "delete_free_remaining_minutes",
+            "free_expire_recheck_before_minutes",
             "proxy_delete",
         }
         legacy_434_delete_models = {

@@ -90,6 +90,9 @@ class BrushConfig:
         self.filter_seeding_torrents = config.get("filter_seeding_torrents", True)
         self.delete_when_no_free = config.get("delete_when_no_free", False)
         self.delete_free_remaining_minutes = self.__parse_number(config.get("delete_free_remaining_minutes", 5))
+        self.free_expire_recheck_before_minutes = self.__parse_number(
+            config.get("free_expire_recheck_before_minutes", 1)
+        )
         self.active_time_range_enabled = config.get("active_time_range_enabled", False)
         self.active_time_range = config.get("active_time_range")
         self.cron = config.get("cron")
@@ -260,6 +263,7 @@ class BrushConfig:
             "proxy_delete",
             "delete_when_no_free",
             "delete_free_remaining_minutes",
+            "free_expire_recheck_before_minutes",
             "qb_category",
             "site_hr_active",
             "site_skip_tips",
@@ -524,7 +528,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.71"
+    plugin_version = "4.3.72"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2306,6 +2310,23 @@ class BrushFlowLowFreq(_PluginBase):
                                                 },
                                                 'content': [
                                                     {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'free_expire_recheck_before_minutes',
+                                                            'label': '免费到期兜底复查提前量（分钟）',
+                                                            'placeholder': '默认1，进入临期窗口前复查详情页'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
                                                         'component': 'VSwitch',
                                                         'props': {
                                                             'model': 'interval_upspeed_continuous',
@@ -3206,6 +3227,7 @@ class BrushFlowLowFreq(_PluginBase):
             "brush_interval_minutes": 10,
             "brush_interval_seconds": 600,
             "check_interval_seconds": 150,
+            "free_expire_recheck_before_minutes": 1,
             "active_time_range_enabled": False,
             "active_time_range": "",
             "delete_except_tags": f"{settings.TORRENT_TAG},H&R" if settings.TORRENT_TAG else "H&R",
@@ -3288,6 +3310,7 @@ class BrushFlowLowFreq(_PluginBase):
             "active_time_range_enabled": False,
             "brush_interval_seconds": 600,
             "check_interval_seconds": 150,
+            "free_expire_recheck_before_minutes": 1,
             "plugin_version": "current",
         }
 
@@ -4496,6 +4519,7 @@ class BrushFlowLowFreq(_PluginBase):
                 "deleted": False,
                 "time": time.time()
             }
+            self.__cache_free_expire_from_task_fields(torrent_task=torrent_task, source="list")
             torrent_task.update(self.__get_default_yield_guard_task_state())
             self.eventmanager.send_event(etype=EventType.PluginTriggered, data={
                 "plugin_id": self.__class__.__name__,
@@ -5762,7 +5786,9 @@ class BrushFlowLowFreq(_PluginBase):
                 "seed_ratio_once_passed", "seed_ratio_once_checked_at",
                 "seed_ratio_once_checked_ratio", "seed_ratio_limit_active",
                 "seed_ratio_limit_pending_action", "seed_ratio_limit_last_action_time",
-                "seed_ratio_limit_restore_hit_records", "seed_ratio_limit_last_reason"
+                "seed_ratio_limit_restore_hit_records", "seed_ratio_limit_last_reason",
+                "free_expires_at", "free_expires_source", "free_expires_checked_at",
+                "free_check_cached_at", "free_check_cached_remaining"
             }:
                 merged_task[key] = value
         return merged_task
@@ -7064,6 +7090,83 @@ class BrushFlowLowFreq(_PluginBase):
 
         return True, reason if not hit_and_run else "H&R种子（未设置H&R条件），" + reason
 
+    def __update_free_expire_cache(self, torrent_task: dict, remaining_minutes: Any,
+                                   source: str, now_ts: Optional[float] = None) -> Optional[float]:
+        if not isinstance(torrent_task, dict):
+            return None
+
+        remaining = self.__number_or_none(remaining_minutes)
+        if remaining is None:
+            return None
+        remaining = max(0.0, float(remaining))
+        now_ts = self.__number_or_none(now_ts)
+        if now_ts is None:
+            now_ts = time.time()
+
+        torrent_task["free_expires_at"] = float(now_ts) + remaining * 60
+        torrent_task["free_expires_source"] = source or "unknown"
+        torrent_task["free_expires_checked_at"] = float(now_ts)
+        torrent_task["free_check_cached_at"] = float(now_ts)
+        torrent_task["free_check_cached_remaining"] = remaining
+        return remaining
+
+    def __cache_free_expire_from_task_fields(self, torrent_task: dict, source: str = "task",
+                                             now_ts: Optional[float] = None) -> Optional[float]:
+        if not isinstance(torrent_task, dict) or not self.__is_free_torrent(torrent_task):
+            return None
+
+        remaining = self.__get_free_remaining_minutes(
+            freedate=torrent_task.get("freedate"),
+            freedate_diff=torrent_task.get("freedate_diff"),
+            title=torrent_task.get("title"),
+            description=torrent_task.get("description")
+        )
+        if remaining is None:
+            return None
+        return self.__update_free_expire_cache(
+            torrent_task=torrent_task,
+            remaining_minutes=remaining,
+            source=source,
+            now_ts=now_ts
+        )
+
+    def __get_cached_free_remaining_minutes(self, torrent_task: dict,
+                                            now_ts: Optional[float] = None) -> Optional[float]:
+        if not isinstance(torrent_task, dict):
+            return None
+
+        expires_at = self.__number_or_none(torrent_task.get("free_expires_at"))
+        if expires_at is None:
+            return None
+        now_ts = self.__number_or_none(now_ts)
+        if now_ts is None:
+            now_ts = time.time()
+        return max(0.0, (float(expires_at) - float(now_ts)) / 60)
+
+    @staticmethod
+    def __get_free_expire_recheck_before_minutes(brush_config: BrushConfig) -> float:
+        try:
+            value = float(brush_config.free_expire_recheck_before_minutes)
+        except (TypeError, ValueError):
+            return 1.0
+        return value if value >= 0 else 1.0
+
+    def __should_recheck_free_expire_cache(self, brush_config: BrushConfig,
+                                           cached_remaining_minutes: float,
+                                           threshold_minutes: float) -> bool:
+        recheck_before_minutes = self.__get_free_expire_recheck_before_minutes(brush_config=brush_config)
+        if recheck_before_minutes <= 0:
+            return False
+        return cached_remaining_minutes <= threshold_minutes + recheck_before_minutes
+
+    @staticmethod
+    def __clear_free_undetermined_state(torrent_task: dict) -> None:
+        if not isinstance(torrent_task, dict):
+            return
+        torrent_task.pop("free_undetermined_count", None)
+        torrent_task.pop("free_undetermined_next_check_at", None)
+        torrent_task.pop("free_undetermined_last_reason", None)
+
     def __evaluate_no_free_condition_for_delete(self, site_name: str, torrent_task: dict) -> Tuple[bool, str]:
         """
         评估“失去免费即删种”规则
@@ -7076,8 +7179,38 @@ class BrushFlowLowFreq(_PluginBase):
         if not self.__is_free_torrent(torrent_task):
             return False, ""
 
-        threshold_minutes = self.__get_delete_free_remaining_threshold(brush_config=brush_config)
+        threshold_minutes = self.__get_effective_delete_free_remaining_threshold(brush_config=brush_config)
         now_ts = time.time()
+        cached_remaining_minutes = self.__get_cached_free_remaining_minutes(
+            torrent_task=torrent_task,
+            now_ts=now_ts
+        )
+        if cached_remaining_minutes is None:
+            cached_remaining_minutes = self.__cache_free_expire_from_task_fields(
+                torrent_task=torrent_task,
+                source="task",
+                now_ts=now_ts
+            )
+
+        if cached_remaining_minutes is not None:
+            self.__log_summary_routine(
+                f"失去免费删种缓存评估：站点={site_name}，标题={torrent_task.get('title', '')}，"
+                f"剩余={self.__format_minutes(cached_remaining_minutes)}，"
+                f"阈值={self.__format_minutes(threshold_minutes)}，"
+                f"缓存来源={torrent_task.get('free_expires_source') or 'unknown'}"
+            )
+            if cached_remaining_minutes <= threshold_minutes:
+                self.__clear_free_undetermined_state(torrent_task)
+                return True, (f"缓存免费剩余时间 {cached_remaining_minutes:.0f} 分钟，不足 "
+                              f"{threshold_minutes:.0f} 分钟，按配置执行彻底删除")
+            if not self.__should_recheck_free_expire_cache(
+                    brush_config=brush_config,
+                    cached_remaining_minutes=cached_remaining_minutes,
+                    threshold_minutes=threshold_minutes):
+                self.__clear_free_undetermined_state(torrent_task)
+                return False, (f"仍为免费种子，缓存免费剩余时间 {cached_remaining_minutes:.0f} 分钟，"
+                               f"不低于 {threshold_minutes:.0f} 分钟")
+
         next_check_at = self.__number_or_none(torrent_task.get("free_undetermined_next_check_at"))
         if next_check_at is not None and now_ts < next_check_at:
             logger.debug(
@@ -7085,28 +7218,36 @@ class BrushFlowLowFreq(_PluginBase):
                 f"连续无法判断={torrent_task.get('free_undetermined_count', 0)} 次，"
                 f"下次检查时间戳={next_check_at:.0f}"
             )
+            if cached_remaining_minutes is not None:
+                return False, (f"仍为免费种子，缓存免费剩余时间 {cached_remaining_minutes:.0f} 分钟，"
+                               f"兜底复查退避中")
             return False, ""
 
         is_still_free, free_reason, free_remaining_minutes = self.__check_torrent_current_free_status(
             torrent_task=torrent_task
         )
-        torrent_task["free_check_cached_at"] = now_ts
         if free_remaining_minutes is not None:
-            torrent_task["free_check_cached_remaining"] = free_remaining_minutes
+            self.__update_free_expire_cache(
+                torrent_task=torrent_task,
+                remaining_minutes=free_remaining_minutes,
+                source="detail",
+                now_ts=now_ts
+            )
         self.__log_summary_routine(
             f"失去免费删种评估：站点={site_name}，标题={torrent_task.get('title', '')}，"
             f"原始免费=True，当前免费={is_still_free}，详情页结果={free_reason or '无'}，"
             f"剩余={self.__format_minutes(free_remaining_minutes)}，阈值={self.__format_minutes(threshold_minutes)}"
         )
         if is_still_free is False:
-            torrent_task.pop("free_undetermined_count", None)
-            torrent_task.pop("free_undetermined_next_check_at", None)
-            torrent_task.pop("free_undetermined_last_reason", None)
+            self.__clear_free_undetermined_state(torrent_task)
             return True, "检测到种子已不免费，按配置执行彻底删除"
         if is_still_free is None:
             undetermined_count = self.__positive_int(torrent_task.get("free_undetermined_count"), 0) + 1
             torrent_task["free_undetermined_count"] = undetermined_count
             torrent_task["free_undetermined_last_reason"] = free_reason or "未知"
+            if cached_remaining_minutes is not None:
+                return False, (f"仍为免费种子，缓存免费剩余时间 {cached_remaining_minutes:.0f} 分钟，"
+                               f"兜底复查失败：{free_reason or '未知'}")
             if undetermined_count >= 3:
                 torrent_task["free_undetermined_next_check_at"] = now_ts + 30 * 60
             message = (
@@ -7123,19 +7264,13 @@ class BrushFlowLowFreq(_PluginBase):
             return False, f"失去免费删种检测跳过，原因：{free_reason}"
 
         if free_remaining_minutes is None:
-            torrent_task.pop("free_undetermined_count", None)
-            torrent_task.pop("free_undetermined_next_check_at", None)
-            torrent_task.pop("free_undetermined_last_reason", None)
+            self.__clear_free_undetermined_state(torrent_task)
             return False, "仍为免费种子"
-        if free_remaining_minutes < threshold_minutes:
-            torrent_task.pop("free_undetermined_count", None)
-            torrent_task.pop("free_undetermined_next_check_at", None)
-            torrent_task.pop("free_undetermined_last_reason", None)
+        if free_remaining_minutes <= threshold_minutes:
+            self.__clear_free_undetermined_state(torrent_task)
             return True, (f"免费剩余时间 {free_remaining_minutes:.0f} 分钟，不足 "
                           f"{threshold_minutes:.0f} 分钟，按配置执行彻底删除")
-        torrent_task.pop("free_undetermined_count", None)
-        torrent_task.pop("free_undetermined_next_check_at", None)
-        torrent_task.pop("free_undetermined_last_reason", None)
+        self.__clear_free_undetermined_state(torrent_task)
         return False, (f"仍为免费种子，免费剩余时间 {free_remaining_minutes:.0f} 分钟，"
                        f"不低于 {threshold_minutes:.0f} 分钟")
 
@@ -7163,6 +7298,20 @@ class BrushFlowLowFreq(_PluginBase):
             site_name = torrent_task.get("site_name", "")
             torrent_title = torrent_task.get("title", "")
             torrent_desc = torrent_task.get("description", "")
+            torrent_info = None
+            if torrent_info_cache is not None:
+                torrent_info = torrent_info_cache.get(torrent_hash)
+            if torrent_info is None:
+                torrent_info = self.__get_torrent_info(torrent)
+                if torrent_info_cache is not None:
+                    torrent_info_cache[torrent_hash] = torrent_info
+            if self.__is_torrent_seeding_or_completed(torrent_info=torrent_info):
+                logger.debug(
+                    f"失去免费删种检测跳过已完成任务：站点={site_name}，"
+                    f"hash={torrent_hash}，种子={torrent_title}"
+                )
+                continue
+
             should_delete, reason = self.__evaluate_no_free_condition_for_delete(site_name=site_name,
                                                                                   torrent_task=torrent_task)
             if should_delete:
@@ -7212,7 +7361,7 @@ class BrushFlowLowFreq(_PluginBase):
 
         free_remaining_minutes = self.__get_free_remaining_minutes(
             freedate=torrent_task.get("freedate"),
-            freedate_diff=torrent_task.get("freedate_diff"),
+            freedate_diff=None,
             title=torrent_task.get("title"),
             description=page_text
         )
@@ -8176,6 +8325,7 @@ class BrushFlowLowFreq(_PluginBase):
             "brush_interval_minutes": "新增种子间隔",
             "free_remaining_time": "免费剩余时间",
             "delete_free_remaining_minutes": "免费临期删种阈值",
+            "free_expire_recheck_before_minutes": "免费到期兜底复查提前量",
             "upload_protection_low_upspeed_kbs": "上传保护低速上传阈值",
             "upload_protection_good_upspeed_kbs": "上传保护达标上传阈值",
             "upload_protection_low_limit_checks": "上传保护低速限速连续次数",
@@ -8445,6 +8595,7 @@ class BrushFlowLowFreq(_PluginBase):
             "delete_size_range": brush_config.delete_size_range,
             "delete_when_no_free": brush_config.delete_when_no_free,
             "delete_free_remaining_minutes": brush_config.delete_free_remaining_minutes,
+            "free_expire_recheck_before_minutes": brush_config.free_expire_recheck_before_minutes,
             "up_speed": brush_config.up_speed,
             "dl_speed": brush_config.dl_speed,
             "auto_archive_days": brush_config.auto_archive_days,
@@ -9891,6 +10042,23 @@ class BrushFlowLowFreq(_PluginBase):
         except (TypeError, ValueError):
             return 5.0
         return threshold if threshold >= 0 else 5.0
+
+    @staticmethod
+    def __get_effective_delete_free_remaining_threshold(brush_config: BrushConfig) -> float:
+        """
+        获取实际生效的临期删种阈值。检查任务按固定间隔触发，因此阈值至少要覆盖
+        一个检查周期再加一分钟缓冲，避免下一次检查已经超过免费到期时间。
+        """
+        threshold = BrushFlowLowFreq.__get_delete_free_remaining_threshold(brush_config=brush_config)
+        try:
+            check_interval_seconds = float(brush_config.check_interval_seconds)
+        except (TypeError, ValueError):
+            return threshold
+        if check_interval_seconds <= 0:
+            return threshold
+
+        interval_guard_minutes = int((check_interval_seconds + 59) // 60) + 1
+        return max(threshold, float(interval_guard_minutes))
 
     @staticmethod
     def __calculate_seeding_torrents_size(torrent_tasks: Dict[str, dict]) -> float:
