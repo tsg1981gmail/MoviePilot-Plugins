@@ -5488,8 +5488,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         window = find_component(form, "VWindow")
         self.assertFalse(has_empty_layout(window))
 
-    def test_get_page_download_dashboard_uses_popover_dialogs_without_anchor_targets(self):
-        now = datetime.now()
+    def test_get_page_download_dashboard_shows_compact_free_expire_cache_rows(self):
+        now = datetime(2026, 6, 26, 12, 0, 0)
+        now_ts = int(now.timestamp())
         today_completed = int((now - timedelta(hours=1)).timestamp())
         yesterday_completed = int((now - timedelta(days=1, hours=1)).timestamp())
         plugin = self._new_qb_plugin()
@@ -5508,6 +5509,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     "first_uploaded_time": int((now - timedelta(minutes=20)).timestamp()),
                     "avg_downspeed": 2048,
                     "avg_upspeed": 1024,
+                    "free_expires_at": now_ts + 45 * 60,
                     "last_check_interval_upspeed": 512,
                     "last_check_interval_downspeed": 4096,
                     "upload_protection_stage": "limited",
@@ -5533,6 +5535,31 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                         "rehearsal": False,
                         "reason": "检查间低速，执行限速",
                     }],
+                },
+                "upload_first": {
+                    "site_name": "站点1",
+                    "title": "先上传任务",
+                    "size": 100,
+                    "downloaded": 20,
+                    "total_size": 100,
+                    "uploaded": 10,
+                    "seeding_time": 0,
+                    "first_downloaded_time": int((now - timedelta(minutes=10)).timestamp()),
+                    "first_uploaded_time": int((now - timedelta(minutes=40)).timestamp()),
+                    "avg_downspeed": 4096,
+                    "avg_upspeed": 3072,
+                    "free_expires_at": now_ts + 12 * 60,
+                },
+                "unknown_expire": {
+                    "site_name": "站点1",
+                    "title": "无缓存任务",
+                    "size": 100,
+                    "downloaded": 10,
+                    "total_size": 100,
+                    "uploaded": 0,
+                    "seeding_time": 0,
+                    "first_downloaded_time": 0,
+                    "first_uploaded_time": 0,
                 },
                 "today_completed": {
                     "site_name": "站点1",
@@ -5568,7 +5595,12 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             }
         })
 
-        page = plugin.get_page()
+        original_time = self.module.time.time
+        self.module.time.time = lambda: now_ts
+        try:
+            page = plugin.get_page()
+        finally:
+            self.module.time.time = original_time
 
         def collect_text(node):
             texts = []
@@ -5607,20 +5639,6 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     components.extend(collect_components(child))
             return components
 
-        def collect_props(node, component_name):
-            props_list = []
-            if isinstance(node, dict):
-                if node.get("component") == component_name:
-                    props_list.append(node.get("props") or {})
-                content = node.get("content")
-                if isinstance(content, list):
-                    for child in content:
-                        props_list.extend(collect_props(child, component_name))
-            elif isinstance(node, list):
-                for child in node:
-                    props_list.extend(collect_props(child, component_name))
-            return props_list
-
         def collect_table_rows(node):
             rows = []
             if isinstance(node, dict):
@@ -5635,46 +5653,63 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     rows.extend(collect_table_rows(child))
             return rows
 
-        text = collect_text(page)
-        components = collect_components(page)
-        button_props = collect_props(page, "button")
-        popover_props = [
-            props for props in collect_props(page, "div")
-            if "brush-dashboard-popover" in str(props.get("class", ""))
-        ]
-        rows = collect_table_rows(page)
+        def find_dashboard(node):
+            if isinstance(node, dict):
+                if node.get("component") == "VCard" and "免费到期缓存看板" in collect_text(node):
+                    return node
+                content = node.get("content")
+                if isinstance(content, list):
+                    for child in content:
+                        found = find_dashboard(child)
+                        if found:
+                            return found
+            elif isinstance(node, list):
+                for child in node:
+                    found = find_dashboard(child)
+                    if found:
+                        return found
+            return None
+
+        dashboard = find_dashboard(page)
+        self.assertIsNotNone(dashboard)
+        dashboard_text = collect_text(dashboard)
+        dashboard_components = collect_components(dashboard)
+        rows = collect_table_rows(dashboard)
         downloading_row = next(row for row in rows if "正在下载任务" in collect_text(row))
-        self.assertIn("下载任务看板", text)
-        self.assertIn("正在下载中", text)
-        self.assertIn("今日已完成", text)
-        self.assertIn("正在下载任务", text)
-        self.assertIn("今日完成任务", text)
-        self.assertIn("有数据上传时间", text)
-        self.assertIn("平均下载速度", text)
-        self.assertIn("查看最近原因", text)
-        self.assertIn("查看详细记录", text)
-        self.assertIn("检查间低速，准备限速", text)
-        self.assertIn("检查间低速，执行限速", text)
-        self.assertIn("动作 降低下载速度", text)
-        self.assertNotIn("VSwitch", collect_components(downloading_row))
-        self.assertNotIn("VDialog", collect_components(downloading_row))
-        self.assertNotIn("VExpansionPanels", components)
-        self.assertNotIn("template", components)
-        self.assertGreaterEqual(len(popover_props), 4)
-        self.assertTrue(any(props.get("for", "").startswith("download_dashboard_reason_")
-                            for props in collect_props(page, "label")))
-        self.assertTrue(any(props.get("for", "").startswith("download_dashboard_records_")
-                            for props in collect_props(page, "label")))
-        self.assertFalse(any(str(props.get("href", "")).startswith("#download_dashboard_")
-                             for props in collect_props(page, "a")))
-        self.assertTrue(any("brush-dashboard-popover-toggle" in str(props.get("class", ""))
-                            for props in collect_props(page, "input")))
-        self.assertIn("查看最近原因", collect_text(downloading_row))
-        self.assertIn("查看详细记录", collect_text(downloading_row))
-        self.assertNotIn("检查间低速，准备限速", collect_text(downloading_row))
-        self.assertNotIn("动作 降低下载速度", collect_text(downloading_row))
-        self.assertNotIn("昨日完成任务", text)
-        self.assertNotIn("已删除任务", text)
+        upload_first_row = next(row for row in rows if "先上传任务" in collect_text(row))
+        unknown_row = next(row for row in rows if "无缓存任务" in collect_text(row))
+
+        self.assertIn("免费到期缓存看板", dashboard_text)
+        self.assertIn("正在下载中（3）", dashboard_text)
+        self.assertIn("标题", dashboard_text)
+        self.assertIn("进度", dashboard_text)
+        self.assertIn("有数据上传或下载时间", dashboard_text)
+        self.assertIn("平均下载速度", dashboard_text)
+        self.assertIn("到期剩余分钟", dashboard_text)
+        self.assertIn("50.0%", collect_text(downloading_row))
+        self.assertIn("45 分钟", collect_text(downloading_row))
+        self.assertIn(plugin._BrushFlowLowFreq__timestamp_to_text(
+            int((now - timedelta(minutes=30)).timestamp())
+        ), collect_text(downloading_row))
+        self.assertIn(plugin._BrushFlowLowFreq__timestamp_to_text(
+            int((now - timedelta(minutes=40)).timestamp())
+        ), collect_text(upload_first_row))
+        self.assertIn("未知", collect_text(unknown_row))
+        self.assertNotIn("今日完成任务", dashboard_text)
+        self.assertNotIn("昨日完成任务", dashboard_text)
+        self.assertNotIn("已删除任务", dashboard_text)
+        self.assertNotIn("今日已完成", dashboard_text)
+        self.assertNotIn("查看最近原因", dashboard_text)
+        self.assertNotIn("查看详细记录", dashboard_text)
+        self.assertNotIn("检查间低速，准备限速", dashboard_text)
+        self.assertNotIn("动作 降低下载速度", dashboard_text)
+        self.assertNotIn("下载中", collect_text(downloading_row))
+        self.assertNotIn("downloading", collect_text(downloading_row))
+        self.assertNotIn("VDialog", dashboard_components)
+        self.assertNotIn("VTabs", dashboard_components)
+        self.assertNotIn("VWindow", dashboard_components)
+        self.assertNotIn("VExpansionPanels", dashboard_components)
+        self.assertIn("text-caption", str(downloading_row.get("props") or {}))
 
     def test_upload_protection_detail_log_records_interval_and_action_history(self):
         class FakeQbc:

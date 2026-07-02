@@ -528,7 +528,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.72"
+    plugin_version = "4.3.73"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -3883,21 +3883,12 @@ class BrushFlowLowFreq(_PluginBase):
     def __get_download_dashboard_elements(self, torrents: Dict[str, dict]) -> List[dict]:
         torrents = torrents or {}
         now = time.time()
-        downloading_rows = []
-        downloading_dialogs = []
-        completed_rows = []
-        completed_dialogs = []
+        rows = []
         for torrent_hash, torrent_task in sorted(
                 torrents.items(), key=lambda item: item[1].get("last_check_time") or item[1].get("time") or 0,
                 reverse=True):
             if self.__is_download_dashboard_downloading_task(torrent_task):
-                row, dialogs = self.__build_download_dashboard_row(torrent_hash, torrent_task, "下载中")
-                downloading_rows.append(row)
-                downloading_dialogs.extend(dialogs)
-            elif self.__is_download_dashboard_today_completed_task(torrent_task, now=now):
-                row, dialogs = self.__build_download_dashboard_row(torrent_hash, torrent_task, "今日完成")
-                completed_rows.append(row)
-                completed_dialogs.extend(dialogs)
+                rows.append(self.__build_download_dashboard_row(torrent_hash, torrent_task, now_ts=now))
 
         return [
             {
@@ -3913,45 +3904,21 @@ class BrushFlowLowFreq(_PluginBase):
                                 "content": [
                                     {
                                         "component": "div",
-                                        "props": {"class": "text-h6 mb-2"},
-                                        "text": "下载任务看板"
-                                    },
-                                    {
-                                        "component": "VTabs",
-                                        "props": {"model": "download_dashboard_tabs", "density": "compact"},
+                                        "props": {"class": "d-flex align-center justify-space-between mb-2"},
                                         "content": [
                                             {
-                                                "component": "VTab",
-                                                "props": {"value": "downloading"},
-                                                "text": f"正在下载中（{len(downloading_rows)}）"
+                                                "component": "div",
+                                                "props": {"class": "text-h6"},
+                                                "text": "免费到期缓存看板"
                                             },
                                             {
-                                                "component": "VTab",
-                                                "props": {"value": "completed_today"},
-                                                "text": f"今日已完成（{len(completed_rows)}）"
+                                                "component": "div",
+                                                "props": {"class": "text-caption text-medium-emphasis"},
+                                                "text": f"正在下载中（{len(rows)}）"
                                             }
                                         ]
                                     },
-                                    {
-                                        "component": "VWindow",
-                                        "props": {"model": "download_dashboard_tabs"},
-                                        "content": [
-                                            {
-                                                "component": "VWindowItem",
-                                                "props": {"value": "downloading"},
-                                                "content": self.__build_download_dashboard_table(
-                                                    downloading_rows, downloading_dialogs
-                                                )
-                                            },
-                                            {
-                                                "component": "VWindowItem",
-                                                "props": {"value": "completed_today"},
-                                                "content": self.__build_download_dashboard_table(
-                                                    completed_rows, completed_dialogs
-                                                )
-                                            }
-                                        ]
-                                    }
+                                    *self.__build_download_dashboard_table(rows)
                                 ]
                             }
                         ]
@@ -3960,20 +3927,17 @@ class BrushFlowLowFreq(_PluginBase):
             }
         ]
 
-    def __build_download_dashboard_table(self, rows: List[dict], dialogs: List[dict] = None) -> List[dict]:
+    def __build_download_dashboard_table(self, rows: List[dict]) -> List[dict]:
         if not rows:
             return [{
                 "component": "div",
                 "props": {"class": "text-caption text-medium-emphasis pa-4"},
-                "text": "暂无任务"
+                "text": "暂无下载中任务"
             }]
-        dialogs = dialogs or []
         headers = [
-            "状态", "站点", "标题", "进度", "有数据上传时间", "有数据下载时间",
-            "平均上传速度", "平均下载速度", "检查间上传", "检查间下载", "上传保护", "最近原因", "详细记录"
+            "标题", "进度", "有数据上传或下载时间", "平均上传速度", "平均下载速度", "到期剩余分钟"
         ]
         return [
-            self.__download_dashboard_modal_style(),
             {
                 "component": "VTable",
                 "props": {"hover": True, "density": "compact"},
@@ -3997,278 +3961,60 @@ class BrushFlowLowFreq(_PluginBase):
                         "content": rows
                     }
                 ]
-            },
-            *dialogs
+            }
         ]
 
-    def __build_download_dashboard_row(self, torrent_hash: str, torrent_task: dict,
-                                       status_text: str) -> Tuple[dict, List[dict]]:
+    def __build_download_dashboard_row(self, torrent_hash: str, torrent_task: dict, now_ts: float) -> dict:
         downloaded = self.__number_or_none(torrent_task.get("downloaded")) or 0
         total_size = self.__number_or_none(torrent_task.get("total_size")) or self.__number_or_none(
             torrent_task.get("size")
         ) or 0
         progress = f"{downloaded / total_size * 100:.1f}%" if total_size > 0 else "N/A"
         title = torrent_task.get("title") or torrent_hash
-        desc = torrent_task.get("description")
-        title_html = f'<span style="font-size: .85rem;">{html.escape(str(title))}</span>'
-        if desc:
-            title_html += f'<br><span style="font-size: 0.75rem;">{html.escape(str(desc))}</span>'
-        title_html += f'<br><span style="font-size: 0.72rem;">{html.escape(str(torrent_hash))}</span>'
-        reason_cell, reason_dialog = self.__build_download_dashboard_reason_detail(torrent_hash, torrent_task)
-        records_cell, records_dialog = self.__build_download_dashboard_records_detail(torrent_hash, torrent_task)
+        title_html = (
+            '<span style="font-size:.82rem;line-height:1.15;display:block;max-width:32rem;'
+            'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'
+            f'{html.escape(str(title))}</span>'
+        )
+        first_transfer_time = self.__get_download_dashboard_first_transfer_time(torrent_task)
+        remaining_minutes = self.__get_cached_free_remaining_minutes(torrent_task=torrent_task, now_ts=now_ts)
 
-        row = {
+        return {
             "component": "tr",
-            "props": {"class": "text-sm"},
+            "props": {"class": "text-caption brush-free-expire-dashboard-row"},
             "content": [
-                {"component": "td", "text": status_text},
-                {"component": "td", "text": torrent_task.get("site_name") or ""},
-                {"component": "td", "html": title_html},
-                {"component": "td", "text": progress},
-                {"component": "td", "text": self.__timestamp_to_text(torrent_task.get("first_uploaded_time"))},
-                {"component": "td", "text": self.__timestamp_to_text(torrent_task.get("first_downloaded_time"))},
-                {"component": "td", "text": self.__format_speed_kbs(torrent_task.get("avg_upspeed"))},
-                {"component": "td", "text": self.__format_speed_kbs(torrent_task.get("avg_downspeed"))},
-                {"component": "td", "text": self.__format_speed_kbs(torrent_task.get("last_check_interval_upspeed"))},
-                {"component": "td", "text": self.__format_speed_kbs(torrent_task.get("last_check_interval_downspeed"))},
-                {"component": "td", "text": self.__upload_protection_stage_text(torrent_task.get("upload_protection_stage"))},
-                {"component": "td", "content": [reason_cell]},
-                {"component": "td", "content": [records_cell]},
-            ]
-        }
-        return row, [reason_dialog, records_dialog]
-
-    @staticmethod
-    def __upload_protection_stage_text(stage: Any) -> str:
-        return {
-            "normal": "正常",
-            "limited": "限速",
-            "strict_limited": "严格限速",
-            "released": "已放开",
-        }.get(str(stage or "normal"), str(stage or "正常"))
-
-    def __format_download_dashboard_detail_summary(self, torrent_task: dict) -> str:
-        interval_records = torrent_task.get("upload_protection_interval_records")
-        action_records = torrent_task.get("upload_protection_action_records")
-        interval_count = len(interval_records) if isinstance(interval_records, list) else 0
-        action_count = len(action_records) if isinstance(action_records, list) else 0
-        lines = [f"检查间记录 {interval_count} 条，操作记录 {action_count} 条"]
-        if isinstance(action_records, list) and action_records:
-            for action in action_records[-3:]:
-                lines.append(
-                    f"动作 {self.__upload_protection_action_text(action.get('action'))} | "
-                    f"{self.__timestamp_to_text(action.get('time'))} | "
-                    f"{'已执行' if action.get('executed') else '未执行'} | "
-                    f"{'演练' if action.get('rehearsal') else '真实'} | "
-                    f"依据：{action.get('reason') or '无'}"
-                )
-        if isinstance(interval_records, list) and interval_records:
-            for record in interval_records[-5:]:
-                lines.append(
-                    f"检查间 {self.__timestamp_to_text(record.get('time'))} | "
-                    f"间隔 {self.__format_seconds(record.get('interval_seconds'))} | "
-                    f"上传 {self.__format_speed_kbs(record.get('interval_upspeed'))} | "
-                    f"下载 {self.__format_speed_kbs(record.get('interval_downspeed'))} | "
-                    f"连续低速 {record.get('low_streak') or 0} | "
-                    f"连续达标 {record.get('good_streak') or 0} | "
-                    f"无上传 {record.get('no_upload_streak') or 0} | "
-                    f"计划 {self.__upload_protection_action_text(record.get('planned_action'))} | "
-                    f"依据：{record.get('reason') or '无'}"
-                )
-        return "<br>".join(html.escape(line) for line in lines)
-
-    def __build_download_dashboard_reason_detail(self, torrent_hash: str, torrent_task: dict) -> List[dict]:
-        reason = torrent_task.get("upload_protection_last_reason") or "暂无原因"
-        return self.__build_download_dashboard_dialog(
-            modal_id=self.__download_dashboard_modal_id(torrent_hash, "reason"),
-            button_text="查看最近原因",
-            title="最近原因",
-            summary=self.__short_text(reason, max_length=18),
-            html_lines=[reason]
-        )
-
-    def __build_download_dashboard_records_detail(self, torrent_hash: str, torrent_task: dict) -> List[dict]:
-        detail_html = self.__format_download_dashboard_detail_summary(torrent_task)
-        interval_records = torrent_task.get("upload_protection_interval_records")
-        action_records = torrent_task.get("upload_protection_action_records")
-        interval_count = len(interval_records) if isinstance(interval_records, list) else 0
-        action_count = len(action_records) if isinstance(action_records, list) else 0
-        return self.__build_download_dashboard_dialog(
-            modal_id=self.__download_dashboard_modal_id(torrent_hash, "records"),
-            button_text="查看详细记录",
-            title="详细记录",
-            summary=f"检查间 {interval_count} / 操作 {action_count}",
-            html_lines=[detail_html],
-            already_escaped=True
-        )
-
-    @staticmethod
-    def __download_dashboard_modal_id(torrent_hash: str, kind: str) -> str:
-        digest = hashlib.sha1(f"{kind}:{torrent_hash}".encode("utf-8")).hexdigest()[:12]
-        return f"download_dashboard_{kind}_{digest}"
-
-    @staticmethod
-    def __short_text(value: Any, max_length: int = 18) -> str:
-        text = str(value or "")
-        if len(text) <= max_length:
-            return text
-        return f"{text[:max_length]}..."
-
-    @staticmethod
-    def __build_download_dashboard_dialog(modal_id: str, button_text: str, title: str, summary: str,
-                                          html_lines: List[str], already_escaped: bool = False) -> Tuple[dict, dict]:
-        html_text = "<br>".join(html_lines or [""])
-        if not already_escaped:
-            html_text = "<br>".join(html.escape(str(line)) for line in (html_lines or [""]))
-        trigger = {
-            "component": "div",
-            "props": {
-                "class": "brush-dashboard-popover-host"
-            },
-            "content": [
+                {"component": "td", "props": {"class": "py-1 pe-3"}, "html": title_html},
+                {"component": "td", "props": {"class": "py-1 text-no-wrap"}, "text": progress},
                 {
-                    "component": "input",
-                    "props": {
-                        "id": modal_id,
-                        "type": "checkbox",
-                        "class": "brush-dashboard-popover-toggle",
-                    }
+                    "component": "td",
+                    "props": {"class": "py-1 text-no-wrap"},
+                    "text": self.__timestamp_to_text(first_transfer_time)
                 },
                 {
-                    "component": "label",
-                    "props": {
-                        "for": modal_id,
-                        "class": "brush-dashboard-popover-trigger text-primary text-decoration-none text-no-wrap"
-                    },
-                    "text": f"{button_text}：{summary}"
-                }
-            ]
-        }
-        modal = {
-            "component": "div",
-            "props": {
-                "class": "brush-dashboard-popover"
-            },
-            "content": [
-                {
-                    "component": "label",
-                    "props": {
-                        "for": modal_id,
-                        "class": "brush-dashboard-popover-backdrop",
-                        "aria-label": "关闭"
-                    },
+                    "component": "td",
+                    "props": {"class": "py-1 text-no-wrap"},
+                    "text": self.__format_speed_kbs(torrent_task.get("avg_upspeed"))
                 },
                 {
-                    "component": "div",
-                    "props": {
-                        "class": "brush-dashboard-popover-card"
-                    },
-                    "content": [
-                        {
-                            "component": "div",
-                            "props": {
-                                "class": "brush-dashboard-popover-title"
-                            },
-                            "text": title
-                        },
-                        {
-                            "component": "div",
-                            "props": {
-                                "class": "brush-dashboard-popover-body"
-                            },
-                            "html": html_text
-                        },
-                        {
-                            "component": "label",
-                            "props": {
-                                "for": modal_id,
-                                "class": "brush-dashboard-popover-close"
-                            },
-                            "text": "关闭"
-                        }
-                    ]
-                }
+                    "component": "td",
+                    "props": {"class": "py-1 text-no-wrap"},
+                    "text": self.__format_speed_kbs(torrent_task.get("avg_downspeed"))
+                },
+                {
+                    "component": "td",
+                    "props": {"class": "py-1 text-no-wrap"},
+                    "text": self.__format_minutes(remaining_minutes)
+                },
             ]
         }
-        return trigger, modal
 
-    @staticmethod
-    def __download_dashboard_modal_style() -> dict:
-        return {
-            "component": "style",
-            "text": """
-.brush-dashboard-popover-host {
-  display: inline-flex;
-  align-items: flex-start;
-  position: relative;
-}
-.brush-dashboard-popover-toggle {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  margin: 0;
-  opacity: 0;
-  pointer-events: none;
-  clip: rect(0 0 0 0);
-  clip-path: inset(50%);
-  overflow: hidden;
-  white-space: nowrap;
-}
-.brush-dashboard-popover-trigger {
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-}
-.brush-dashboard-popover {
-  display: none;
-}
-.brush-dashboard-popover-toggle:checked ~ .brush-dashboard-popover {
-  align-items: center;
-  display: flex;
-  inset: 0;
-  justify-content: center;
-  position: fixed;
-  z-index: 2400;
-}
-.brush-dashboard-popover-backdrop {
-  background: rgba(0, 0, 0, 0.5);
-  inset: 0;
-  position: absolute;
-}
-.brush-dashboard-popover-card {
-  background: rgb(var(--v-theme-surface));
-  border-radius: 8px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
-  color: rgb(var(--v-theme-on-surface));
-  max-height: 78vh;
-  max-width: min(45rem, calc(100vw - 32px));
-  overflow: hidden;
-  position: relative;
-  width: 45rem;
-}
-.brush-dashboard-popover-title {
-  border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-  font-size: 1rem;
-  font-weight: 600;
-  padding: 16px 20px;
-}
-.brush-dashboard-popover-body {
-  font-size: 0.82rem;
-  line-height: 1.6;
-  max-height: 58vh;
-  overflow-y: auto;
-  padding: 16px 20px;
-  word-break: break-word;
-}
-.brush-dashboard-popover-close {
-  color: rgb(var(--v-theme-primary));
-  display: block;
-  padding: 0 20px 16px;
-  text-align: right;
-  text-decoration: none;
-}
-"""
-        }
+    def __get_download_dashboard_first_transfer_time(self, torrent_task: dict) -> Optional[float]:
+        timestamps = []
+        for key in ("first_uploaded_time", "first_downloaded_time"):
+            timestamp_value = self.__number_or_none((torrent_task or {}).get(key))
+            if timestamp_value and timestamp_value > 0:
+                timestamps.append(timestamp_value)
+        return min(timestamps) if timestamps else None
 
     @staticmethod
     def __upload_protection_action_text(action: Any) -> str:
