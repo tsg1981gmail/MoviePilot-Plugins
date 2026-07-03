@@ -507,6 +507,85 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual("list", torrent_task.get("free_expires_source"))
         self.assertNotIn("free_unknown_started_at", torrent_task)
 
+    def test_brush_list_requests_detail_once_when_list_has_no_free_remaining(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+        })
+        torrent_task = self._free_torrent_task()
+        torrent_task["downloadvolumefactor"] = 0
+        torrent_tasks = {"abcdef": torrent_task}
+        torrents = [
+            SimpleNamespace(
+                site=1,
+                site_name="站点1",
+                page_url="details.php?id=1",
+                title="free torrent",
+                description="free",
+                downloadvolumefactor=0,
+                freedate="",
+                freedate_diff="",
+            )
+        ]
+        calls = []
+        plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+            lambda *, site_id, page_url:
+            calls.append((site_id, page_url)) or ("<a href='download.php?id=1'>下载</a>优惠剩余时间：30分钟", "")
+        )
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 2000
+        try:
+            repaired = plugin._BrushFlowLowFreq__cache_free_expire_from_brush_list(
+                siteinfo=SimpleNamespace(id=1, name="站点1"),
+                torrents=torrents,
+                torrent_tasks=torrent_tasks,
+            )
+        finally:
+            self.module.time.time = original_time
+
+        self.assertEqual(1, repaired)
+        self.assertEqual([(1, "details.php?id=1")], calls)
+        self.assertAlmostEqual(2000 + 30 * 60, torrent_task.get("free_expires_at"), delta=1)
+        self.assertEqual("detail", torrent_task.get("free_expires_source"))
+        self.assertIn("free_expires_detail_checked_at", torrent_task)
+
+    def test_brush_list_does_not_repeat_detail_when_free_remaining_still_unknown(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 5,
+        })
+        torrent_task = self._free_torrent_task()
+        torrent_task["downloadvolumefactor"] = 0
+        torrent_tasks = {"abcdef": torrent_task}
+        torrents = [
+            SimpleNamespace(
+                site=1,
+                site_name="站点1",
+                page_url="details.php?id=1",
+                title="free torrent",
+                description="free",
+                downloadvolumefactor=0,
+                freedate="",
+                freedate_diff="",
+            )
+        ]
+        calls = []
+        plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+            lambda *, site_id, page_url: calls.append((site_id, page_url)) or (None, "请求详情页失败")
+        )
+
+        for _ in range(2):
+            plugin._BrushFlowLowFreq__cache_free_expire_from_brush_list(
+                siteinfo=SimpleNamespace(id=1, name="站点1"),
+                torrents=torrents,
+                torrent_tasks=torrent_tasks,
+            )
+
+        self.assertEqual([(1, "details.php?id=1")], calls)
+        self.assertNotIn("free_expires_at", torrent_task)
+        self.assertIn("free_expires_detail_checked_at", torrent_task)
+        self.assertEqual("请求详情页失败", torrent_task.get("free_expires_detail_check_reason"))
+
     def test_completed_torrents_use_legacy_434_ratio_delete_rule(self):
         plugin = self._new_plugin({
             "seed_ratio": 1.0,
@@ -1733,6 +1812,71 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(0, task.get("yield_guard_idle_release_streak"))
         self.assertEqual("none", task.get("yield_guard_release_level"))
         self.assertEqual("", task.get("yield_guard_last_reason"))
+
+    def test_new_free_torrent_fetches_detail_when_list_has_no_free_remaining(self):
+        class FakeDownloader:
+            def is_inactive(self):
+                return False
+
+            def add_torrent(self, **kwargs):
+                return True
+
+            def get_torrent_id_by_tag(self, tags):
+                return "ABCDEF"
+
+        plugin = self._new_qb_plugin(downloader=FakeDownloader())
+        plugin.eventmanager = SimpleNamespace(send_event=lambda **kwargs: None)
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.site_oper = SimpleNamespace(get=lambda siteid: SimpleNamespace(id=siteid,
+                                                                              name="站点1",
+                                                                              domain="site1.test"))
+        plugin.torrents_chain = SimpleNamespace(browse=lambda domain: [
+            SimpleNamespace(
+                site=1,
+                site_name="站点1",
+                site_proxy=False,
+                site_cookie="",
+                site_ua="ua",
+                title="new free torrent",
+                description="desc",
+                imdbid=None,
+                page_url="details.php?id=1",
+                pubdate="",
+                date_elapsed=None,
+                freedate="",
+                uploadvolumefactor=1,
+                downloadvolumefactor=0,
+                hit_and_run=False,
+                volume_factor="",
+                freedate_diff="",
+                enclosure="magnet:?xt=urn:btih:ABCDEF",
+                size=1234,
+                seeders=1,
+            )
+        ])
+        calls = []
+        plugin._BrushFlowLowFreq__get_torrent_detail_page_text = (
+            lambda *, site_id, page_url:
+            calls.append((site_id, page_url)) or ("<a href='download.php?id=1'>下载</a>优惠剩余时间：40分钟", "")
+        )
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 3000
+        try:
+            torrent_tasks = {}
+            statistic_info = {"count": 0}
+            plugin._BrushFlowLowFreq__brush_site_torrents(
+                siteid=1,
+                torrent_tasks=torrent_tasks,
+                statistic_info=statistic_info,
+                subscribe_titles=set(),
+            )
+        finally:
+            self.module.time.time = original_time
+
+        task = torrent_tasks["abcdef"]
+        self.assertEqual([(1, "details.php?id=1")], calls)
+        self.assertAlmostEqual(3000 + 40 * 60, task.get("free_expires_at"), delta=1)
+        self.assertEqual("detail", task.get("free_expires_source"))
 
     def test_update_torrent_tasks_state_computes_interval_downspeed(self):
         plugin = self._new_qb_plugin()

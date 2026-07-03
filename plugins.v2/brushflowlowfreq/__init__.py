@@ -532,7 +532,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.74"
+    plugin_version = "4.3.75"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -4294,7 +4294,9 @@ class BrushFlowLowFreq(_PluginBase):
                 "deleted": False,
                 "time": time.time()
             }
-            self.__cache_free_expire_from_task_fields(torrent_task=torrent_task, source="list")
+            cached_remaining = self.__cache_free_expire_from_task_fields(torrent_task=torrent_task, source="list")
+            if cached_remaining is None:
+                self.__cache_free_expire_from_detail_once(torrent_task=torrent_task, source="detail")
             torrent_task.update(self.__get_default_yield_guard_task_state())
             self.eventmanager.send_event(etype=EventType.PluginTriggered, data={
                 "plugin_id": self.__class__.__name__,
@@ -5563,7 +5565,8 @@ class BrushFlowLowFreq(_PluginBase):
                 "seed_ratio_limit_pending_action", "seed_ratio_limit_last_action_time",
                 "seed_ratio_limit_restore_hit_records", "seed_ratio_limit_last_reason",
                 "free_expires_at", "free_expires_source", "free_expires_checked_at",
-                "free_check_cached_at", "free_check_cached_remaining"
+                "free_check_cached_at", "free_check_cached_remaining",
+                "free_expires_detail_checked_at", "free_expires_detail_check_reason"
             }:
                 merged_task[key] = value
         return merged_task
@@ -6883,6 +6886,7 @@ class BrushFlowLowFreq(_PluginBase):
         torrent_task["free_expires_checked_at"] = float(now_ts)
         torrent_task["free_check_cached_at"] = float(now_ts)
         torrent_task["free_check_cached_remaining"] = remaining
+        torrent_task.pop("free_expires_detail_check_reason", None)
         self.__clear_free_unknown_state(torrent_task)
         return remaining
 
@@ -6946,12 +6950,70 @@ class BrushFlowLowFreq(_PluginBase):
                 torrent_task=torrent_task,
                 source="list"
             )
+            if remaining is None:
+                remaining = self.__cache_free_expire_from_detail_once(
+                    torrent_task=torrent_task,
+                    source="detail"
+                )
             if remaining is not None:
                 repaired_count += 1
 
         if repaired_count:
             self.__log_summary_routine(f"刷流列表修复免费到期缓存 {repaired_count} 个任务")
         return repaired_count
+
+    def __cache_free_expire_from_detail_once(self, torrent_task: dict,
+                                             source: str = "detail",
+                                             now_ts: Optional[float] = None) -> Optional[float]:
+        if not isinstance(torrent_task, dict) or not self.__is_free_torrent(torrent_task):
+            return None
+
+        now_ts = self.__number_or_none(now_ts)
+        if now_ts is None:
+            now_ts = time.time()
+        if self.__get_cached_free_remaining_minutes(torrent_task=torrent_task, now_ts=now_ts) is not None:
+            return None
+        if self.__number_or_none(torrent_task.get("free_expires_detail_checked_at")) is not None:
+            return None
+
+        torrent_task["free_expires_detail_checked_at"] = float(now_ts)
+        page_text, error_reason = self.__get_torrent_detail_page_text(
+            site_id=torrent_task.get("site"),
+            page_url=torrent_task.get("page_url")
+        )
+        if not page_text:
+            torrent_task["free_expires_detail_check_reason"] = error_reason or "请求详情页失败"
+            return None
+
+        page_free_status = self.__parse_free_status_from_page(page_text)
+        if page_free_status is False:
+            torrent_task["free_expires_detail_check_reason"] = "详情页显示已失去免费"
+            return self.__update_free_expire_cache(
+                torrent_task=torrent_task,
+                remaining_minutes=0,
+                source=source,
+                now_ts=now_ts
+            )
+
+        remaining = self.__get_free_remaining_minutes(
+            freedate=torrent_task.get("freedate"),
+            freedate_diff=None,
+            title=torrent_task.get("title"),
+            description=page_text
+        )
+        if remaining is not None:
+            return self.__update_free_expire_cache(
+                torrent_task=torrent_task,
+                remaining_minutes=remaining,
+                source=source,
+                now_ts=now_ts
+            )
+
+        if page_free_status is None:
+            torrent_task["free_expires_detail_check_reason"] = self.__build_free_status_undetermined_reason(page_text)
+        else:
+            torrent_task["free_expires_detail_check_reason"] = "详情页仍为免费但无法解析免费剩余时间"
+        return None
 
     def __cache_free_expire_from_task_fields(self, torrent_task: dict, source: str = "task",
                                              now_ts: Optional[float] = None) -> Optional[float]:
