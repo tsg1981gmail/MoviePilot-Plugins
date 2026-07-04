@@ -281,6 +281,96 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(should_delete, reason)
         self.assertIn("缓存免费剩余时间 2", reason)
 
+    def test_cached_free_remaining_delete_reason_uses_seconds_precision(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 3,
+            "check_interval_seconds": 61,
+        })
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000
+        try:
+            torrent_task = self._free_torrent_task()
+            torrent_task["free_expires_at"] = 1000 + 179
+
+            should_delete, reason = plugin._BrushFlowLowFreq__evaluate_no_free_condition_for_delete(
+                site_name="站点1",
+                torrent_task=torrent_task,
+            )
+        finally:
+            self.module.time.time = original_time
+
+        self.assertTrue(should_delete, reason)
+        self.assertIn("缓存免费剩余时间 2分59秒", reason)
+        self.assertIn("低于阈值 3分钟", reason)
+        self.assertNotIn("3 分钟，不足 3 分钟", reason)
+
+    def test_title_description_log_text_omits_none_description(self):
+        plugin = self._new_plugin({"log_mode": "summary"})
+        self.module.logger.info_messages.clear()
+        self.module.logger.debug_messages.clear()
+
+        plugin._BrushFlowLowFreq__log_brush_conditions(
+            passed=False,
+            reason="非免费种子",
+            torrent=SimpleNamespace(title="Title Only", description=None)
+        )
+
+        combined_logs = "\n".join(self.module.logger.info_messages + self.module.logger.debug_messages)
+        self.assertIn("Title Only", combined_logs)
+        self.assertNotIn("|None", combined_logs)
+        self.assertNotIn("None", combined_logs)
+
+    def test_no_free_delete_summary_log_includes_audit_context(self):
+        plugin = self._new_plugin({
+            "delete_when_no_free": True,
+            "delete_free_remaining_minutes": 3,
+            "log_mode": "summary",
+        })
+        self.module.logger.info_messages.clear()
+        torrent_task = self._free_torrent_task()
+        torrent_task.update({
+            "site_name": "天空",
+            "title": "delete audit torrent",
+            "description": None,
+            "free_expires_at": 1000 + 60,
+        })
+        torrent_tasks = {"abcdef": torrent_task}
+        torrent_info_cache = {
+            "abcdef": {
+                "state": "downloading",
+                "downloaded": 50,
+                "total_size": 100,
+                "uploaded": 25,
+                "ratio": 0.5,
+                "seeding_time": 0,
+            }
+        }
+        delete_message_map = {}
+        original_time = self.module.time.time
+        self.module.time.time = lambda: 1000
+        try:
+            delete_hashes = plugin._BrushFlowLowFreq__delete_torrent_for_no_free(
+                torrents=[{"hash": "abcdef"}],
+                torrent_tasks=torrent_tasks,
+                delete_message_map=delete_message_map,
+                torrent_info_cache=torrent_info_cache
+            )
+        finally:
+            self.module.time.time = original_time
+
+        self.assertEqual(["abcdef"], delete_hashes)
+        combined_logs = "\n".join(self.module.logger.info_messages)
+        self.assertIn("删除类型=free_expire", combined_logs)
+        self.assertIn("状态=downloading", combined_logs)
+        self.assertIn("进度=50.0%", combined_logs)
+        self.assertNotIn("|None", combined_logs)
+
+        payload = delete_message_map["abcdef"][0]
+        self.assertIn("删除类型=free_expire", payload["reason"])
+        self.assertIn("状态=downloading", payload["reason"])
+        self.assertIn("进度=50.0%", payload["reason"])
+
     def test_no_free_delete_skips_detail_when_cached_remaining_is_safe(self):
         plugin = self._new_plugin({
             "delete_when_no_free": True,
