@@ -153,6 +153,10 @@ class BrushConfig:
         self.upload_protection_skip_when_downloading_le = self.__parse_number(
             config.get("upload_protection_skip_when_downloading_le", 0)
         ) or 0
+        self.qualified_release_enabled = config.get("qualified_release_enabled", False)
+        self.qualified_release_ratio = self.__parse_number(config.get("qualified_release_ratio"))
+        self.qualified_release_uploaded_gb = self.__parse_number(config.get("qualified_release_uploaded_gb"))
+        self.qualified_release_max_slots = self.__parse_number(config.get("qualified_release_max_slots", 1)) or 1
         self.skip_rules_downloading_threshold = self.__parse_number(config.get("skip_rules_downloading_threshold", 0)) or 0
         self.seed_ratio_speed_protect = self.__parse_number(config.get("seed_ratio_speed_protect", 0)) or 0
         self.seed_ratio_limit_download_kbs = self.__parse_number(config.get("seed_ratio_limit_download_kbs", 0)) or 0
@@ -287,6 +291,10 @@ class BrushConfig:
             "upload_protection_min_downloaded_gb",
             "upload_protection_detail_log",
             "upload_protection_skip_when_downloading_le",
+            "qualified_release_enabled",
+            "qualified_release_ratio",
+            "qualified_release_uploaded_gb",
+            "qualified_release_max_slots",
             # 当新增支持字段时，仅在此处添加字段名
         }
         try:
@@ -371,6 +379,10 @@ class BrushConfig:
     "upload_protection_min_elapsed_minutes": 10,
     "upload_protection_min_downloaded_gb": 0,
     "upload_protection_detail_log": false,
+    "qualified_release_enabled": false,
+    "qualified_release_ratio": "",
+    "qualified_release_uploaded_gb": "",
+    "qualified_release_max_slots": 1,
     "skip_rules_downloading_threshold": 0,
     "seed_ratio_speed_protect": 0,
     "seed_ratio_limit_download_kbs": 0,
@@ -532,7 +544,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.76"
+    plugin_version = "4.3.77"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -3328,6 +3340,10 @@ class BrushFlowLowFreq(_PluginBase):
             "upload_protection_min_downloaded_gb": 0,
             "upload_protection_detail_log": False,
             "upload_protection_skip_when_downloading_le": 0,
+            "qualified_release_enabled": False,
+            "qualified_release_ratio": "",
+            "qualified_release_uploaded_gb": "",
+            "qualified_release_max_slots": 1,
             "log_mode": "full",
             "active_time_range_enabled": False,
             "brush_interval_seconds": 600,
@@ -3641,6 +3657,27 @@ class BrushFlowLowFreq(_PluginBase):
                                    "达到后才交给删种流程"),
                         text_field("upload_protection_skip_when_downloading_le", "下载中任务数例外",
                                    "下载中托管任务数小于等于该值时跳过上传保护并放开限速，0=关闭"),
+                    ]
+                },
+                {
+                    "component": "VRow",
+                    "content": [section_label("全限速达标兜底放行")]
+                },
+                {
+                    "component": "VRow",
+                    "content": [
+                        switch("qualified_release_enabled", "启用兜底放行"),
+                        text_field("qualified_release_ratio", "分享率阈值",
+                                   "分享率达到后可作为兜底放行候选，空或0=关闭"),
+                        text_field("qualified_release_uploaded_gb", "上传量阈值（GB）",
+                                   "上传量达到后可作为兜底放行候选，空或0=关闭"),
+                    ]
+                },
+                {
+                    "component": "VRow",
+                    "content": [
+                        text_field("qualified_release_max_slots", "最大兜底放行数",
+                                   "所有下载中任务均被限速时最多放开几个，默认1"),
                     ]
                 }
             ]
@@ -5028,6 +5065,13 @@ class BrushFlowLowFreq(_PluginBase):
                     if failed_hashes:
                         self.__send_delete_failed_message(failed_hashes=failed_hashes, torrent_tasks=torrent_tasks)
 
+                self.__apply_qualified_fallback_release(
+                    torrents=check_torrents,
+                    torrent_tasks=torrent_tasks,
+                    torrent_info_cache=torrent_info_cache,
+                    excluded_hashes=set(need_delete_hashes)
+                )
+
             # 归档数据
             self.__auto_archive_tasks(torrent_tasks=torrent_tasks)
 
@@ -5279,6 +5323,11 @@ class BrushFlowLowFreq(_PluginBase):
                 if handled:
                     torrent_task["upload_protection_last_action_time"] = time.time()
                     torrent_task["upload_protection_pending_action"] = None
+                    if self.__is_qualified_release_enabled(brush_config) or torrent_task.get(
+                            "qualified_fallback_release_active"):
+                        torrent_task["upload_protection_last_action"] = action
+                        torrent_task["upload_protection_last_action_source"] = "upload_protection"
+                        torrent_task["qualified_fallback_release_active"] = False
                     action_count += 1
                     self.__log_summary_key(
                         f"站点：{site_name}，{reason}，已执行上传保护动作：{action}{torrent_log_part}"
@@ -5287,6 +5336,299 @@ class BrushFlowLowFreq(_PluginBase):
         if evaluated_count > 0:
             self.__log_summary_routine(f"上传保护：本轮检查已评估 {evaluated_count} 个下载中任务，已执行动作 {action_count} 个，待删除 {len(delete_hashes)} 个")
         return delete_hashes
+
+    def __is_qualified_release_enabled(self, brush_config: BrushConfig) -> bool:
+        if not brush_config or not getattr(brush_config, "qualified_release_enabled", False):
+            return False
+        ratio_threshold = self.__non_negative_float(getattr(brush_config, "qualified_release_ratio", 0), 0)
+        uploaded_threshold = self.__non_negative_float(
+            getattr(brush_config, "qualified_release_uploaded_gb", 0), 0
+        )
+        return ratio_threshold > 0 or uploaded_threshold > 0
+
+    def __qualified_release_max_slots(self, brush_config: BrushConfig) -> int:
+        return max(1, self.__positive_int(getattr(brush_config, "qualified_release_max_slots", 1), 1))
+
+    def __build_qualified_release_entries(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
+                                          torrent_info_cache: Optional[Dict[str, dict]] = None,
+                                          excluded_hashes: Optional[Set[str]] = None) -> List[dict]:
+        excluded_hashes = set(excluded_hashes or set())
+        entries = []
+        for torrent in torrents or []:
+            torrent_hash = self.__normalize_hash(self.__get_hash(torrent))
+            if not torrent_hash or torrent_hash in excluded_hashes:
+                continue
+            torrent_task = torrent_tasks.get(torrent_hash)
+            if not torrent_task or torrent_task.get("deleted"):
+                continue
+            torrent_info = None
+            if torrent_info_cache is not None:
+                torrent_info = torrent_info_cache.get(torrent_hash)
+            if torrent_info is None:
+                torrent_info = self.__get_torrent_info(torrent)
+                if torrent_info_cache is not None:
+                    torrent_info_cache[torrent_hash] = torrent_info
+            if not self.__is_upload_protection_applicable_torrent(torrent_info=torrent_info):
+                continue
+            site_name = torrent_task.get("site_name", "")
+            brush_config = self.__get_brush_config(sitename=site_name)
+            entries.append({
+                "hash": torrent_hash,
+                "task": torrent_task,
+                "info": torrent_info,
+                "site_name": site_name,
+                "config": brush_config,
+            })
+        return entries
+
+    def __qualified_release_effective_download_limit(self, torrent_task: dict, torrent_info: dict) -> Optional[float]:
+        task_limit = self.__number_or_none((torrent_task or {}).get("download_limit"))
+        if task_limit is not None:
+            return task_limit
+        return self.__number_or_none((torrent_info or {}).get("download_limit"))
+
+    def __is_qualified_release_limited_entry(self, entry: dict) -> bool:
+        torrent_task = entry.get("task") or {}
+        if torrent_task.get("qualified_fallback_release_active"):
+            return False
+        pending_action = str(torrent_task.get("upload_protection_pending_action") or "").strip().lower()
+        if pending_action in {"limit", "strict_limit"}:
+            return True
+        stage = str(torrent_task.get("upload_protection_stage") or "").strip().lower()
+        if stage in {"limited", "strict_limited"}:
+            return True
+        download_limit = self.__qualified_release_effective_download_limit(
+            torrent_task=torrent_task,
+            torrent_info=entry.get("info") or {}
+        )
+        return download_limit is not None and download_limit > 0
+
+    def __is_qualified_release_candidate(self, entry: dict) -> bool:
+        torrent_task = entry.get("task") or {}
+        brush_config = entry.get("config")
+        if not self.__is_qualified_release_enabled(brush_config):
+            return False
+        if torrent_task.get("qualified_fallback_release_active"):
+            return False
+        if not self.__is_qualified_release_limited_entry(entry):
+            return False
+
+        torrent_info = entry.get("info") or {}
+        ratio = self.__number_or_none(torrent_info.get("ratio"))
+        if ratio is None:
+            ratio = self.__number_or_none(torrent_task.get("ratio"))
+        uploaded = self.__number_or_none(torrent_info.get("uploaded"))
+        if uploaded is None:
+            uploaded = self.__number_or_none(torrent_task.get("uploaded"))
+
+        ratio_threshold = self.__non_negative_float(getattr(brush_config, "qualified_release_ratio", 0), 0)
+        uploaded_threshold_bytes = (
+                self.__non_negative_float(getattr(brush_config, "qualified_release_uploaded_gb", 0), 0)
+                * 1024 ** 3
+        )
+        ratio_matched = ratio_threshold > 0 and ratio is not None and ratio >= ratio_threshold
+        uploaded_matched = uploaded_threshold_bytes > 0 and uploaded is not None and uploaded >= uploaded_threshold_bytes
+        return ratio_matched or uploaded_matched
+
+    def __is_normal_upload_release_entry(self, entry: dict) -> bool:
+        torrent_task = entry.get("task") or {}
+        if torrent_task.get("qualified_fallback_release_active"):
+            return False
+        if str(torrent_task.get("upload_protection_last_action") or "").strip().lower() != "release_limit":
+            return False
+        if str(torrent_task.get("upload_protection_last_action_source") or "").strip() != "upload_protection":
+            return False
+        if self.__is_qualified_release_limited_entry(entry):
+            return False
+        return True
+
+    def __qualified_release_interval_meets_low_threshold(self, entry: dict) -> bool:
+        torrent_task = entry.get("task") or {}
+        brush_config = entry.get("config")
+        low_kbs = self.__positive_float(getattr(brush_config, "upload_protection_low_upspeed_kbs", 150), 150)
+        interval_valid = bool(torrent_task.get("last_check_interval_upspeed_valid"))
+        interval_upspeed = self.__number_or_none(torrent_task.get("last_check_interval_upspeed"))
+        if not interval_valid or interval_upspeed is None:
+            interval_upspeed = self.__number_or_none((entry.get("info") or {}).get("upspeed"))
+        return interval_upspeed is not None and interval_upspeed >= low_kbs * 1024
+
+    def __apply_qualified_download_limit(self, torrent_hash: str, download_limit: int, brush_config: BrushConfig,
+                                         torrent_task: dict, site_name: str, reason: str) -> bool:
+        if not torrent_hash:
+            return False
+        download_limit = max(0, int(download_limit))
+        if getattr(brush_config, "upload_protection_rehearsal", False):
+            logger.info(
+                f"站点：{site_name}，全限速达标兜底放行演练模式：hash={torrent_hash}，"
+                f"目标限速={self.__format_speed_kbs(download_limit)}，原因：{reason}"
+            )
+            return False
+        downloader = self.downloader
+        if not downloader:
+            return False
+        try:
+            if getattr(downloader, "qbc", None) and hasattr(downloader.qbc, "torrents_set_download_limit"):
+                downloader.qbc.torrents_set_download_limit(
+                    limit=download_limit,
+                    torrent_hashes=[torrent_hash]
+                )
+            elif hasattr(downloader, "change_torrent"):
+                downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)
+            else:
+                return False
+            if torrent_task is not None:
+                torrent_task["download_limit"] = download_limit
+            logger.debug(
+                f"全限速达标兜底放行限速动作成功：站点={site_name}，hash={torrent_hash}，"
+                f"目标限速={self.__format_speed_kbs(download_limit)}，原因={reason}"
+            )
+            return True
+        except Exception as err:
+            logger.error(
+                f"全限速达标兜底放行限速动作失败：站点={site_name}，hash={torrent_hash}，"
+                f"目标限速={self.__format_speed_kbs(download_limit)}，原因={reason}，错误：{err}"
+            )
+            return False
+
+    def __release_qualified_fallback_entry(self, entry: dict) -> bool:
+        torrent_hash = entry.get("hash")
+        torrent_task = entry.get("task") or {}
+        torrent_info = entry.get("info") or {}
+        brush_config = entry.get("config")
+        site_name = entry.get("site_name", "")
+        previous_limit = self.__qualified_release_effective_download_limit(
+            torrent_task=torrent_task,
+            torrent_info=torrent_info
+        )
+        if previous_limit is None or previous_limit <= 0:
+            previous_limit = int(self.__positive_float(
+                getattr(brush_config, "upload_protection_download_limit_kbs", 512), 512
+            ) * 1024)
+        reason = "全限速达标兜底放行：所有下载中托管任务均已限速，历史分享率或上传量达到设置，临时完全放开下载限速"
+        handled = self.__apply_qualified_download_limit(
+            torrent_hash=torrent_hash,
+            download_limit=0,
+            brush_config=brush_config,
+            torrent_task=torrent_task,
+            site_name=site_name,
+            reason=reason
+        )
+        if not handled:
+            return False
+        now = time.time()
+        torrent_task["qualified_fallback_release_active"] = True
+        torrent_task["qualified_fallback_release_started_at"] = now
+        torrent_task["qualified_fallback_release_previous_download_limit"] = int(previous_limit)
+        torrent_task["qualified_fallback_release_last_reason"] = reason
+        torrent_task["upload_protection_last_action"] = "release_limit"
+        torrent_task["upload_protection_last_action_source"] = "qualified_fallback_release"
+        torrent_log_part = self.__format_upload_protection_torrent_part(
+            torrent_task=torrent_task,
+            torrent_info=torrent_info,
+            torrent_hash=torrent_hash
+        )
+        self.__log_summary_key(f"站点：{site_name}，{reason}，已执行兜底放行动作：release_limit{torrent_log_part}")
+        return True
+
+    def __restore_qualified_fallback_entry(self, entry: dict, reason: str) -> bool:
+        torrent_hash = entry.get("hash")
+        torrent_task = entry.get("task") or {}
+        brush_config = entry.get("config")
+        site_name = entry.get("site_name", "")
+        restore_limit = self.__number_or_none(torrent_task.get("qualified_fallback_release_previous_download_limit"))
+        if restore_limit is None or restore_limit <= 0:
+            restore_limit = int(self.__positive_float(
+                getattr(brush_config, "upload_protection_download_limit_kbs", 512), 512
+            ) * 1024)
+        handled = self.__apply_qualified_download_limit(
+            torrent_hash=torrent_hash,
+            download_limit=int(restore_limit),
+            brush_config=brush_config,
+            torrent_task=torrent_task,
+            site_name=site_name,
+            reason=reason
+        )
+        if not handled:
+            return False
+        torrent_task["qualified_fallback_release_active"] = False
+        torrent_task["qualified_fallback_release_relimited_at"] = time.time()
+        torrent_task["qualified_fallback_release_last_reason"] = reason
+        torrent_task["upload_protection_last_action"] = "limit"
+        torrent_task["upload_protection_last_action_source"] = "qualified_fallback_release"
+        torrent_log_part = self.__format_upload_protection_torrent_part(
+            torrent_task=torrent_task,
+            torrent_info=entry.get("info") or {},
+            torrent_hash=torrent_hash
+        )
+        self.__log_summary_key(f"站点：{site_name}，{reason}，已执行兜底放行动作：limit{torrent_log_part}")
+        return True
+
+    def __apply_qualified_fallback_release(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
+                                           torrent_info_cache: Optional[Dict[str, dict]] = None,
+                                           excluded_hashes: Optional[Set[str]] = None) -> List[str]:
+        """
+        在所有下载中托管任务均被限速时，临时放开历史分享率/上传量达标的任务。
+        一旦出现上传保护正常达标放开的任务，低于低速阈值的兜底放行任务会立即让位。
+        """
+        entries = self.__build_qualified_release_entries(
+            torrents=torrents,
+            torrent_tasks=torrent_tasks,
+            torrent_info_cache=torrent_info_cache,
+            excluded_hashes=excluded_hashes
+        )
+        if not entries:
+            return []
+
+        changed_hashes = []
+        active_fallback_entries = [
+            entry for entry in entries
+            if (entry.get("task") or {}).get("qualified_fallback_release_active")
+        ]
+        normal_release_exists = any(self.__is_normal_upload_release_entry(entry) for entry in entries)
+
+        for entry in list(active_fallback_entries):
+            brush_config = entry.get("config")
+            torrent_task = entry.get("task") or {}
+            if not self.__is_qualified_release_enabled(brush_config):
+                reason = "全限速达标兜底放行：配置已关闭，恢复下载限速"
+            elif normal_release_exists and not self.__qualified_release_interval_meets_low_threshold(entry):
+                low_kbs = self.__positive_float(
+                    getattr(brush_config, "upload_protection_low_upspeed_kbs", 150), 150
+                )
+                interval_upspeed = self.__number_or_none(torrent_task.get("last_check_interval_upspeed"))
+                interval_text = "未知" if interval_upspeed is None else f"{interval_upspeed / 1024:.1f} KB/s"
+                reason = (
+                    f"全限速达标兜底放行：已有上传达标完全放开任务，当前任务上一轮检查间上传 "
+                    f"{interval_text} 未达到低速上传阈值 {low_kbs:.1f} KB/s，恢复下载限速"
+                )
+            else:
+                continue
+            if self.__restore_qualified_fallback_entry(entry=entry, reason=reason):
+                changed_hashes.append(entry.get("hash"))
+
+        active_fallback_count = sum(
+            1 for entry in entries
+            if (entry.get("task") or {}).get("qualified_fallback_release_active")
+        )
+        if normal_release_exists:
+            return changed_hashes
+
+        enabled_configs = [entry.get("config") for entry in entries if self.__is_qualified_release_enabled(entry.get("config"))]
+        if not enabled_configs:
+            return changed_hashes
+        max_slots = max(self.__qualified_release_max_slots(config) for config in enabled_configs)
+        if active_fallback_count >= max_slots:
+            return changed_hashes
+        if not all(self.__is_qualified_release_limited_entry(entry) for entry in entries):
+            return changed_hashes
+
+        remaining_slots = max_slots - active_fallback_count
+        candidates = [entry for entry in entries if self.__is_qualified_release_candidate(entry)]
+        for entry in candidates[:remaining_slots]:
+            if self.__release_qualified_fallback_entry(entry=entry):
+                changed_hashes.append(entry.get("hash"))
+
+        return changed_hashes
 
     def __log_yield_guard_detail_if_enabled(self, site_name: str, brush_config: BrushConfig, torrent_hash: str,
                                             torrent_info: dict, torrent_task: dict, should_delete: bool,
@@ -8427,6 +8769,9 @@ class BrushFlowLowFreq(_PluginBase):
             "upload_protection_min_elapsed_minutes": "上传保护最小观察时间",
             "upload_protection_min_downloaded_gb": "上传保护删种最小下载量",
             "upload_protection_skip_when_downloading_le": "上传保护下载中任务数例外",
+            "qualified_release_ratio": "全限速兜底放行分享率阈值",
+            "qualified_release_uploaded_gb": "全限速兜底放行上传量阈值",
+            "qualified_release_max_slots": "全限速兜底放行最大数量",
             "seed_time": "做种时间",
             "hr_seed_time": "H&R做种时间",
             "seed_size": "上传量",
@@ -8677,6 +9022,10 @@ class BrushFlowLowFreq(_PluginBase):
             "upload_protection_min_downloaded_gb": brush_config.upload_protection_min_downloaded_gb,
             "upload_protection_detail_log": brush_config.upload_protection_detail_log,
             "upload_protection_skip_when_downloading_le": brush_config.upload_protection_skip_when_downloading_le,
+            "qualified_release_enabled": brush_config.qualified_release_enabled,
+            "qualified_release_ratio": brush_config.qualified_release_ratio,
+            "qualified_release_uploaded_gb": brush_config.qualified_release_uploaded_gb,
+            "qualified_release_max_slots": brush_config.qualified_release_max_slots,
             "seed_size": brush_config.seed_size,
             "download_time": brush_config.download_time,
             "seed_avgspeed": brush_config.seed_avgspeed,
@@ -9122,6 +9471,10 @@ class BrushFlowLowFreq(_PluginBase):
                     limit=download_limit,
                     torrent_hashes=[torrent_hash]
                 )
+                if torrent_task is not None and (
+                        self.__is_qualified_release_enabled(brush_config)
+                        or torrent_task.get("qualified_fallback_release_active")):
+                    torrent_task["download_limit"] = download_limit
                 success_message = (
                     f"上传保护执行 qB 动作成功，站点：{site_name}，hash={torrent_hash}，"
                     f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}{torrent_log_part}，原因={reason}"
@@ -9133,6 +9486,10 @@ class BrushFlowLowFreq(_PluginBase):
                 return True
             if hasattr(downloader, "change_torrent"):
                 downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)
+                if torrent_task is not None and (
+                        self.__is_qualified_release_enabled(brush_config)
+                        or torrent_task.get("qualified_fallback_release_active")):
+                    torrent_task["download_limit"] = download_limit
                 success_message = (
                     f"上传保护执行下载器动作成功，站点：{site_name}，hash={torrent_hash}，"
                     f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}{torrent_log_part}，原因={reason}"

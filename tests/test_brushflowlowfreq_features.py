@@ -6411,6 +6411,288 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         ))
         self.assertEqual(512 * 1024, downloader.qbc.calls[-1]["limit"])
 
+    def test_qualified_release_default_disabled_does_not_release_all_limited_pool(self):
+        class FakeQbc:
+            def __init__(self):
+                self.calls = []
+
+            def torrents_set_download_limit(self, **kwargs):
+                self.calls.append(kwargs)
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "upload_protection_download_limit_kbs": 512,
+        }, downloader=downloader)
+        torrents = [{"hash": "aaa", "name": "A"}, {"hash": "bbb", "name": "B"}]
+        torrent_tasks = {
+            "aaa": {"site_name": "天空", "ratio": 2.0, "uploaded": 5 * 1024 ** 3},
+            "bbb": {"site_name": "天空", "ratio": 1.5, "uploaded": 2 * 1024 ** 3},
+        }
+        torrent_info_cache = {
+            "aaa": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 2.0, "uploaded": 5 * 1024 ** 3, "download_limit": 512 * 1024},
+            "bbb": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 1.5, "uploaded": 2 * 1024 ** 3, "download_limit": 512 * 1024},
+        }
+
+        changed = plugin._BrushFlowLowFreq__apply_qualified_fallback_release(
+            torrents=torrents,
+            torrent_tasks=torrent_tasks,
+            torrent_info_cache=torrent_info_cache,
+        )
+
+        self.assertEqual([], changed)
+        self.assertEqual([], downloader.qbc.calls)
+        self.assertFalse(torrent_tasks["aaa"].get("qualified_fallback_release_active"))
+
+    def test_qualified_release_opens_history_qualified_task_when_all_downloading_limited(self):
+        class FakeQbc:
+            def __init__(self):
+                self.calls = []
+
+            def torrents_set_download_limit(self, **kwargs):
+                self.calls.append(kwargs)
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "upload_protection_download_limit_kbs": 512,
+            "upload_protection_low_upspeed_kbs": 150,
+            "qualified_release_enabled": True,
+            "qualified_release_ratio": 1.0,
+            "qualified_release_max_slots": 1,
+        }, downloader=downloader)
+        torrents = [{"hash": "aaa", "name": "A"}, {"hash": "bbb", "name": "B"}]
+        torrent_tasks = {
+            "aaa": {"site_name": "天空", "last_check_interval_upspeed": 0,
+                    "last_check_interval_upspeed_valid": True},
+            "bbb": {"site_name": "天空", "last_check_interval_upspeed": 0,
+                    "last_check_interval_upspeed_valid": True},
+        }
+        torrent_info_cache = {
+            "aaa": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 1.25, "uploaded": 3 * 1024 ** 3, "download_limit": 512 * 1024},
+            "bbb": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 0.2, "uploaded": 256 * 1024 ** 2, "download_limit": 512 * 1024},
+        }
+
+        changed = plugin._BrushFlowLowFreq__apply_qualified_fallback_release(
+            torrents=torrents,
+            torrent_tasks=torrent_tasks,
+            torrent_info_cache=torrent_info_cache,
+        )
+
+        self.assertEqual(["aaa"], changed)
+        self.assertEqual([{"limit": 0, "torrent_hashes": ["aaa"]}], downloader.qbc.calls)
+        self.assertTrue(torrent_tasks["aaa"].get("qualified_fallback_release_active"))
+        self.assertEqual(512 * 1024, torrent_tasks["aaa"].get("qualified_fallback_release_previous_download_limit"))
+
+    def test_qualified_release_can_use_uploaded_gb_threshold_when_ratio_threshold_disabled(self):
+        class FakeQbc:
+            def __init__(self):
+                self.calls = []
+
+            def torrents_set_download_limit(self, **kwargs):
+                self.calls.append(kwargs)
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "upload_protection_download_limit_kbs": 512,
+            "qualified_release_enabled": True,
+            "qualified_release_ratio": 0,
+            "qualified_release_uploaded_gb": 2,
+            "qualified_release_max_slots": 1,
+        }, downloader=downloader)
+        torrents = [{"hash": "aaa", "name": "A"}, {"hash": "bbb", "name": "B"}]
+        torrent_tasks = {
+            "aaa": {"site_name": "天空"},
+            "bbb": {"site_name": "天空"},
+        }
+        torrent_info_cache = {
+            "aaa": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 0.1, "uploaded": 3 * 1024 ** 3, "download_limit": 512 * 1024},
+            "bbb": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 2.0, "uploaded": 1 * 1024 ** 3, "download_limit": 512 * 1024},
+        }
+
+        changed = plugin._BrushFlowLowFreq__apply_qualified_fallback_release(
+            torrents=torrents,
+            torrent_tasks=torrent_tasks,
+            torrent_info_cache=torrent_info_cache,
+        )
+
+        self.assertEqual(["aaa"], changed)
+        self.assertEqual([{"limit": 0, "torrent_hashes": ["aaa"]}], downloader.qbc.calls)
+        self.assertTrue(torrent_tasks["aaa"].get("qualified_fallback_release_active"))
+        self.assertFalse(torrent_tasks["bbb"].get("qualified_fallback_release_active"))
+
+    def test_qualified_release_keeps_fallback_when_no_normal_release_even_if_interval_low(self):
+        class FakeQbc:
+            def __init__(self):
+                self.calls = []
+
+            def torrents_set_download_limit(self, **kwargs):
+                self.calls.append(kwargs)
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "upload_protection_download_limit_kbs": 512,
+            "upload_protection_low_upspeed_kbs": 150,
+            "qualified_release_enabled": True,
+            "qualified_release_ratio": 1.0,
+            "qualified_release_max_slots": 1,
+        }, downloader=downloader)
+        torrents = [{"hash": "aaa", "name": "A"}, {"hash": "bbb", "name": "B"}]
+        torrent_tasks = {
+            "aaa": {"site_name": "天空", "qualified_fallback_release_active": True,
+                    "qualified_fallback_release_previous_download_limit": 512 * 1024,
+                    "last_check_interval_upspeed": 10 * 1024,
+                    "last_check_interval_upspeed_valid": True},
+            "bbb": {"site_name": "天空", "last_check_interval_upspeed": 0,
+                    "last_check_interval_upspeed_valid": True},
+        }
+        torrent_info_cache = {
+            "aaa": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 1.25, "uploaded": 3 * 1024 ** 3, "download_limit": 0},
+            "bbb": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 0.2, "uploaded": 256 * 1024 ** 2, "download_limit": 512 * 1024},
+        }
+
+        changed = plugin._BrushFlowLowFreq__apply_qualified_fallback_release(
+            torrents=torrents,
+            torrent_tasks=torrent_tasks,
+            torrent_info_cache=torrent_info_cache,
+        )
+
+        self.assertEqual([], changed)
+        self.assertEqual([], downloader.qbc.calls)
+        self.assertTrue(torrent_tasks["aaa"].get("qualified_fallback_release_active"))
+
+    def test_qualified_release_relimits_fallback_when_normal_release_exists_and_interval_low(self):
+        class FakeQbc:
+            def __init__(self):
+                self.calls = []
+
+            def torrents_set_download_limit(self, **kwargs):
+                self.calls.append(kwargs)
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "upload_protection_download_limit_kbs": 512,
+            "upload_protection_low_upspeed_kbs": 150,
+            "qualified_release_enabled": True,
+            "qualified_release_ratio": 1.0,
+            "qualified_release_max_slots": 1,
+        }, downloader=downloader)
+        torrents = [{"hash": "aaa", "name": "A"}, {"hash": "bbb", "name": "B"}]
+        torrent_tasks = {
+            "aaa": {"site_name": "天空", "qualified_fallback_release_active": True,
+                    "qualified_fallback_release_previous_download_limit": 512 * 1024,
+                    "last_check_interval_upspeed": 10 * 1024,
+                    "last_check_interval_upspeed_valid": True},
+            "bbb": {"site_name": "天空", "upload_protection_last_action": "release_limit",
+                    "upload_protection_last_action_source": "upload_protection"},
+        }
+        torrent_info_cache = {
+            "aaa": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 1.25, "uploaded": 3 * 1024 ** 3, "download_limit": 0},
+            "bbb": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 0.1, "uploaded": 128 * 1024 ** 2, "download_limit": 0},
+        }
+
+        changed = plugin._BrushFlowLowFreq__apply_qualified_fallback_release(
+            torrents=torrents,
+            torrent_tasks=torrent_tasks,
+            torrent_info_cache=torrent_info_cache,
+        )
+
+        self.assertEqual(["aaa"], changed)
+        self.assertEqual([{"limit": 512 * 1024, "torrent_hashes": ["aaa"]}], downloader.qbc.calls)
+        self.assertFalse(torrent_tasks["aaa"].get("qualified_fallback_release_active"))
+
+    def test_qualified_release_keeps_fallback_when_normal_release_exists_and_interval_meets_threshold(self):
+        class FakeQbc:
+            def __init__(self):
+                self.calls = []
+
+            def torrents_set_download_limit(self, **kwargs):
+                self.calls.append(kwargs)
+
+        class FakeDownloader:
+            def __init__(self):
+                self.qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+        downloader = FakeDownloader()
+        plugin = self._new_qb_plugin({
+            "upload_protection_download_limit_kbs": 512,
+            "upload_protection_low_upspeed_kbs": 150,
+            "qualified_release_enabled": True,
+            "qualified_release_ratio": 1.0,
+            "qualified_release_max_slots": 1,
+        }, downloader=downloader)
+        torrents = [{"hash": "aaa", "name": "A"}, {"hash": "bbb", "name": "B"}]
+        torrent_tasks = {
+            "aaa": {"site_name": "天空", "qualified_fallback_release_active": True,
+                    "qualified_fallback_release_previous_download_limit": 512 * 1024,
+                    "last_check_interval_upspeed": 180 * 1024,
+                    "last_check_interval_upspeed_valid": True},
+            "bbb": {"site_name": "天空", "upload_protection_last_action": "release_limit",
+                    "upload_protection_last_action_source": "upload_protection"},
+        }
+        torrent_info_cache = {
+            "aaa": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 1.25, "uploaded": 3 * 1024 ** 3, "download_limit": 0},
+            "bbb": {"downloaded": 100, "total_size": 1000, "seeding_time": 0,
+                    "ratio": 0.1, "uploaded": 128 * 1024 ** 2, "download_limit": 0},
+        }
+
+        changed = plugin._BrushFlowLowFreq__apply_qualified_fallback_release(
+            torrents=torrents,
+            torrent_tasks=torrent_tasks,
+            torrent_info_cache=torrent_info_cache,
+        )
+
+        self.assertEqual([], changed)
+        self.assertEqual([], downloader.qbc.calls)
+        self.assertTrue(torrent_tasks["aaa"].get("qualified_fallback_release_active"))
+
     def test_check_applies_upload_protection_to_downloading_managed_torrents(self):
         class FakeQbc:
             def __init__(self):
