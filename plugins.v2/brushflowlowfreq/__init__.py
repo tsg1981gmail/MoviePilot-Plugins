@@ -565,7 +565,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.79"
+    plugin_version = "4.3.80"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -8649,7 +8649,7 @@ class BrushFlowLowFreq(_PluginBase):
         changed = False
         for stat_month, derived_record in derived_statistic.items():
             current_record = monthly_statistic.get(stat_month)
-            if not isinstance(current_record, dict):
+            if current_record != derived_record:
                 monthly_statistic[stat_month] = derived_record
                 changed = True
         if changed:
@@ -8851,9 +8851,9 @@ class BrushFlowLowFreq(_PluginBase):
             }
         ]
 
-    def __build_transfer_period_tabs(self, label: str, model: str, periods: List[str],
-                                     records_by_period: Dict[str, List[dict]], value_prefix: str,
-                                     empty_text: str, previous_text: str, next_text: str) -> List[dict]:
+    def __build_transfer_period_panels(self, label: str, periods: List[str],
+                                       records_by_period: Dict[str, List[dict]],
+                                       empty_text: str) -> List[dict]:
         period_values = periods or []
         if not period_values:
             return self.__build_transfer_stat_table([], empty_text)
@@ -8862,67 +8862,30 @@ class BrushFlowLowFreq(_PluginBase):
             {
                 'component': 'div',
                 'props': {
-                    'class': 'd-flex flex-wrap align-center ga-2 mb-3'
+                    'class': 'text-caption text-medium-emphasis mb-2'
                 },
-                'content': [
-                    {
-                        'component': 'VBtn',
-                        'props': {
-                            'variant': 'text',
-                            'density': 'comfortable',
-                            'size': 'small'
-                        },
-                        'text': previous_text
-                    },
-                    {
-                        'component': 'div',
-                        'props': {
-                            'class': 'text-caption text-medium-emphasis'
-                        },
-                        'text': label
-                    },
-                    {
-                        'component': 'VTabs',
-                        'props': {
-                            'model': model,
-                            'density': 'compact',
-                            'show-arrows': True
-                        },
-                        'content': [
-                            {
-                                'component': 'VTab',
-                                'props': {
-                                    'value': f"{value_prefix}-{period}"
-                                },
-                                'text': period
-                            } for period in period_values
-                        ]
-                    },
-                    {
-                        'component': 'VBtn',
-                        'props': {
-                            'variant': 'text',
-                            'density': 'comfortable',
-                            'size': 'small'
-                        },
-                        'text': next_text
-                    }
-                ]
+                'text': f"按{label}查看"
             },
             {
-                'component': 'VWindow',
+                'component': 'VExpansionPanels',
                 'props': {
-                    'model': model
+                    'variant': 'accordion'
                 },
                 'content': [
                     {
-                        'component': 'VWindowItem',
-                        'props': {
-                            'value': f"{value_prefix}-{period}"
-                        },
-                        'content': self.__build_transfer_stat_table(
-                            records_by_period.get(period, []), empty_text
-                        )
+                        'component': 'VExpansionPanel',
+                        'content': [
+                            {
+                                'component': 'VExpansionPanelTitle',
+                                'text': f"{label}：{period}"
+                            },
+                            {
+                                'component': 'VExpansionPanelText',
+                                'content': self.__build_transfer_stat_table(
+                                    records_by_period.get(period, []), empty_text
+                                )
+                            }
+                        ]
                     } for period in period_values
                 ]
             }
@@ -8972,25 +8935,17 @@ class BrushFlowLowFreq(_PluginBase):
             if record_year in monthly_records_by_year:
                 monthly_records_by_year[record_year].append(record)
 
-        daily_content = self.__build_transfer_period_tabs(
-            label="选择月份",
-            model="daily_transfer_month_tabs",
+        daily_content = self.__build_transfer_period_panels(
+            label="月份",
             periods=month_items,
             records_by_period=daily_records_by_month,
-            value_prefix="daily",
-            empty_text="暂无每日数据",
-            previous_text="上一月",
-            next_text="下一月"
+            empty_text="暂无每日数据"
         )
-        monthly_content = self.__build_transfer_period_tabs(
-            label="选择年份",
-            model="monthly_transfer_year_tabs",
+        monthly_content = self.__build_transfer_period_panels(
+            label="年份",
             periods=year_items,
             records_by_period=monthly_records_by_year,
-            value_prefix="monthly",
-            empty_text="暂无本月数据",
-            previous_text="上一年",
-            next_text="下一年"
+            empty_text="暂无本月数据"
         )
 
         return [

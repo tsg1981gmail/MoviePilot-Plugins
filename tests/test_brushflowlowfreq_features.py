@@ -7785,9 +7785,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIn("2026-06", page_text)
         self.assertIn("123", page_text)
         self.assertIn("456", page_text)
-        self.assertIn("789", page_text)
-        self.assertIn("987", page_text)
         dashboard_text = page_text.split("免费到期缓存看板")[0]
+        self.assertNotIn("789", dashboard_text)
+        self.assertNotIn("987", dashboard_text)
         self.assertEqual(2, dashboard_text.count('"日期"'))
         self.assertEqual(2, dashboard_text.count('"上传量"'))
         self.assertEqual(2, dashboard_text.count('"下载量"'))
@@ -7827,7 +7827,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(3, monthly["task_count"])
         self.assertEqual(20, monthly["updated_at"])
 
-    def test_get_page_daily_dashboard_keeps_each_month_in_separate_window(self):
+    def test_get_page_daily_dashboard_keeps_each_month_in_separate_panel(self):
         plugin = self._new_plugin({})
         self._attach_memory_store(plugin, {
             "torrents": {},
@@ -7851,29 +7851,82 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         })
 
         page = plugin.get_page()
+        page_text = json.dumps(page, ensure_ascii=False)
 
-        def find_window_item(node, value):
+        def collect_text(node):
             if isinstance(node, dict):
-                if node.get("component") == "VWindowItem" and (node.get("props") or {}).get("value") == value:
-                    return node
+                parts = []
+                if "text" in node:
+                    parts.append(str(node.get("text")))
+                if "html" in node:
+                    parts.append(str(node.get("html")))
                 for child in node.get("content") or []:
-                    found = find_window_item(child, value)
+                    parts.append(collect_text(child))
+                return "\n".join(part for part in parts if part)
+            if isinstance(node, list):
+                return "\n".join(collect_text(child) for child in node)
+            return ""
+
+        def find_panel(node, title):
+            if isinstance(node, dict):
+                if node.get("component") == "VExpansionPanel":
+                    for child in node.get("content") or []:
+                        if isinstance(child, dict) and child.get("component") == "VExpansionPanelTitle":
+                            if title in collect_text(child):
+                                return node
+                for child in node.get("content") or []:
+                    found = find_panel(child, title)
                     if found:
                         return found
             elif isinstance(node, list):
                 for child in node:
-                    found = find_window_item(child, value)
+                    found = find_panel(child, title)
                     if found:
                         return found
             return None
 
-        july_text = json.dumps(find_window_item(page, "daily-2026-07"), ensure_ascii=False)
-        june_text = json.dumps(find_window_item(page, "daily-2026-06"), ensure_ascii=False)
+        july_text = collect_text(find_panel(page, "月份：2026-07"))
+        june_text = collect_text(find_panel(page, "月份：2026-06"))
 
         self.assertIn("2026-07-01", july_text)
         self.assertNotIn("2026-06-30", july_text)
         self.assertIn("2026-06-30", june_text)
         self.assertNotIn("2026-07-01", june_text)
+        self.assertNotIn("上一月", page_text)
+        self.assertNotIn("下一月", page_text)
+
+    def test_get_page_rebuilds_incorrect_monthly_dashboard_from_daily_statistic(self):
+        plugin = self._new_plugin({})
+        store = self._attach_memory_store(plugin, {
+            "torrents": {},
+            "daily_statistic": {
+                "2026-07-06": {
+                    "date": "2026-07-06",
+                    "uploaded": 300,
+                    "downloaded": 400,
+                    "task_count": 2,
+                    "updated_at": 20,
+                },
+            },
+            "monthly_statistic": {
+                "2026-07": {
+                    "date": "2026-07",
+                    "uploaded": 9999,
+                    "downloaded": 8888,
+                    "task_count": 99,
+                    "updated_at": 1,
+                },
+            },
+        })
+
+        page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
+
+        monthly = store["monthly_statistic"]["2026-07"]
+        self.assertEqual(300, monthly["uploaded"])
+        self.assertEqual(400, monthly["downloaded"])
+        self.assertEqual(2, monthly["task_count"])
+        self.assertIn("本月上传量：300", page_text)
+        self.assertIn("本月下载量：400", page_text)
 
     def test_get_page_shows_data_dashboard_empty_state(self):
         plugin = self._new_plugin({})
