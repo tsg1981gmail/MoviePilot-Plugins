@@ -371,6 +371,35 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIn("状态=downloading", payload["reason"])
         self.assertIn("进度=50.0%", payload["reason"])
 
+    def test_qb_torrent_info_includes_state_for_delete_audit(self):
+        plugin = self._new_qb_plugin()
+        torrent_info = plugin._BrushFlowLowFreq__get_torrent_info({
+            "hash": "abcdef",
+            "name": "state torrent",
+            "state": "stalledDL",
+            "added_on": 100,
+            "completion_on": 0,
+            "last_activity": 100,
+            "ratio": 0.1,
+            "uploaded": 50,
+            "downloaded": 100,
+            "total_size": 1000,
+            "dlspeed": 0,
+            "upspeed": 0,
+            "dl_limit": 1024,
+            "tags": "刷流",
+            "tracker": "tracker",
+        })
+
+        audit = plugin._BrushFlowLowFreq__build_delete_audit_text(
+            torrent_hash="abcdef",
+            torrent_info=torrent_info,
+            delete_type="upload_protection_no_value",
+        )
+
+        self.assertEqual("stalledDL", torrent_info.get("state"))
+        self.assertIn("状态=stalledDL", audit)
+
     def test_no_free_delete_skips_detail_when_cached_remaining_is_safe(self):
         plugin = self._new_plugin({
             "delete_when_no_free": True,
@@ -1245,6 +1274,68 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual([], calls)
         self.assertEqual("released", torrent_task.get("upload_protection_stage"))
 
+    def test_qualified_fallback_skips_hash_with_upload_action_in_same_cycle(self):
+        calls = []
+
+        class FakeQbc:
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
+                calls.append((limit, torrent_hashes))
+
+        plugin = self._new_qb_plugin(
+            {
+                "upload_protection_enabled": True,
+                "upload_protection_download_limit_kbs": 300,
+                "qualified_release_enabled": True,
+                "qualified_release_ratio": 0.5,
+                "qualified_release_uploaded_gb": "",
+                "qualified_release_max_slots": 1,
+            },
+            downloader=SimpleNamespace(qbc=FakeQbc(), is_inactive=lambda: False)
+        )
+        torrent = {
+            "hash": "hash1",
+            "name": "same cycle torrent",
+            "state": "downloading",
+            "downloaded": 50,
+            "uploaded": 50,
+            "total_size": 100,
+            "ratio": 1.0,
+            "dl_limit": 300 * 1024,
+            "added_on": 1,
+            "completion_on": 0,
+            "last_activity": 1,
+            "dlspeed": 0,
+            "upspeed": 0,
+        }
+        torrent_tasks = {
+            "hash1": {
+                "site_name": "天空",
+                "title": "same cycle torrent",
+                "deleted": False,
+                "download_limit": 300 * 1024,
+                "upload_protection_pending_action": "limit",
+            }
+        }
+        action_hashes = set()
+
+        plugin._BrushFlowLowFreq__apply_upload_protection_actions(
+            torrents=[torrent],
+            torrent_tasks=torrent_tasks,
+            torrent_info_cache={},
+            action_hashes=action_hashes,
+        )
+        changed_hashes = plugin._BrushFlowLowFreq__apply_qualified_fallback_release(
+            torrents=[torrent],
+            torrent_tasks=torrent_tasks,
+            torrent_info_cache={},
+            excluded_hashes=action_hashes,
+        )
+
+        self.assertEqual({"hash1"}, action_hashes)
+        self.assertEqual([(300 * 1024, ["hash1"])], calls)
+        self.assertEqual([], changed_hashes)
+        self.assertFalse(torrent_tasks["hash1"].get("qualified_fallback_release_active"))
+
     def test_concise_upload_protection_action_log_includes_torrent_title(self):
         calls = []
 
@@ -1288,6 +1379,69 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             any("已执行上传保护动作：limit" in msg and "种子：动作种子" in msg for msg in new_info_logs),
             new_info_logs
         )
+
+    def test_upload_protection_no_value_uses_relaxed_checks_for_history_contribution(self):
+        plugin = self._new_qb_plugin({
+            "upload_protection_enabled": True,
+            "upload_protection_no_upload_kbs": 30,
+            "upload_protection_no_upload_checks": 30,
+            "upload_protection_min_elapsed_minutes": 0,
+            "upload_protection_no_value_relax_ratio": 0.5,
+            "upload_protection_no_value_relax_uploaded_gb": "",
+            "upload_protection_no_value_relax_progress_percent": 20,
+            "upload_protection_no_value_relax_percent": 50,
+        })
+        torrent_task = {
+            "site_name": "天空",
+            "title": "history good torrent",
+            "last_check_interval_upspeed": 0,
+            "last_check_interval_upspeed_valid": True,
+            "upload_protection_no_upload_streak": 29,
+            "upload_protection_stage": "strict_limited",
+            "first_downloaded_time": 1,
+            "first_uploaded_time": 1,
+        }
+        torrent_info = {
+            "downloaded": 40,
+            "total_size": 100,
+            "uploaded": 20,
+            "ratio": 0.5,
+            "dlspeed": 0,
+            "upspeed": 0,
+        }
+
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_upload_protection(
+            site_name="天空",
+            brush_config=plugin._brush_config,
+            torrent_info=torrent_info,
+            torrent_task=torrent_task,
+            no_upload_kbs=30,
+            low_kbs=100,
+            good_kbs=200,
+            min_elapsed=0,
+            min_downloaded_bytes=0,
+        )
+
+        self.assertFalse(should_delete, reason)
+        self.assertEqual(30, torrent_task.get("upload_protection_no_upload_streak"))
+        self.assertNotEqual("delete", torrent_task.get("upload_protection_pending_action"))
+
+        torrent_task["upload_protection_no_upload_streak"] = 44
+        should_delete, reason = plugin._BrushFlowLowFreq__evaluate_upload_protection(
+            site_name="天空",
+            brush_config=plugin._brush_config,
+            torrent_info=torrent_info,
+            torrent_task=torrent_task,
+            no_upload_kbs=30,
+            low_kbs=100,
+            good_kbs=200,
+            min_elapsed=0,
+            min_downloaded_bytes=0,
+        )
+
+        self.assertTrue(should_delete, reason)
+        self.assertIn("45/45", reason)
+        self.assertIn("放宽", reason)
 
     def test_summary_log_mode_does_not_change_task_decision_output(self):
         full_plugin = self._new_plugin({
@@ -7425,6 +7579,11 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(900, daily["downloaded"])
         self.assertEqual(1, daily["task_count"])
 
+        monthly = store["monthly_statistic"]["2026-06"]
+        self.assertEqual(700, monthly["uploaded"])
+        self.assertEqual(900, monthly["downloaded"])
+        self.assertEqual(1, monthly["task_count"])
+
     def test_daily_transfer_statistics_aggregates_multiple_tasks(self):
         plugin = self._new_plugin({})
         store = self._attach_memory_store(plugin)
@@ -7448,6 +7607,11 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(1100, daily["uploaded"])
         self.assertEqual(900, daily["downloaded"])
         self.assertEqual(2, daily["task_count"])
+
+        monthly = store["monthly_statistic"]["2026-06"]
+        self.assertEqual(1100, monthly["uploaded"])
+        self.assertEqual(900, monthly["downloaded"])
+        self.assertEqual(2, monthly["task_count"])
 
     def test_daily_transfer_statistics_refreshes_baseline_on_counter_reset(self):
         plugin = self._new_plugin({})
@@ -7512,6 +7676,39 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(1, daily["task_count"])
         self.assertEqual("2026-06-23", tasks["hash1"]["daily_stat_last_date"])
 
+        monthly = store["monthly_statistic"]["2026-06"]
+        self.assertEqual(300, monthly["uploaded"])
+        self.assertEqual(400, monthly["downloaded"])
+        self.assertEqual(1, monthly["task_count"])
+
+    def test_daily_transfer_statistics_creates_month_record_after_month_change(self):
+        plugin = self._new_plugin({})
+        store = self._attach_memory_store(plugin)
+        tasks = {
+            "hash1": {
+                "uploaded": 1000,
+                "downloaded": 2000,
+            }
+        }
+        plugin._BrushFlowLowFreq__update_daily_transfer_statistics(
+            torrent_tasks=tasks,
+            now=datetime(2026, 6, 30, 23, 59, 0),
+        )
+
+        tasks["hash1"]["uploaded"] = 1300
+        tasks["hash1"]["downloaded"] = 2400
+        plugin._BrushFlowLowFreq__update_daily_transfer_statistics(
+            torrent_tasks=tasks,
+            now=datetime(2026, 7, 1, 0, 1, 0),
+        )
+
+        self.assertNotIn("2026-06", store["monthly_statistic"])
+        monthly = store["monthly_statistic"]["2026-07"]
+        self.assertEqual(300, monthly["uploaded"])
+        self.assertEqual(400, monthly["downloaded"])
+        self.assertEqual(1, monthly["task_count"])
+        self.assertEqual("2026-07", tasks["hash1"]["monthly_stat_counted_month"])
+
     def test_clear_tasks_clears_daily_statistic(self):
         plugin = self._new_plugin({})
         store = self._attach_memory_store(plugin, {
@@ -7523,14 +7720,24 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     "task_count": 1,
                     "updated_at": 1,
                 }
-            }
+            },
+            "monthly_statistic": {
+                "2026-06": {
+                    "date": "2026-06",
+                    "uploaded": 100,
+                    "downloaded": 200,
+                    "task_count": 1,
+                    "updated_at": 1,
+                }
+            },
         })
 
         plugin._BrushFlowLowFreq__clear_tasks()
 
         self.assertEqual({}, store["daily_statistic"])
+        self.assertEqual({}, store["monthly_statistic"])
 
-    def test_get_page_includes_daily_transfer_history(self):
+    def test_get_page_includes_data_dashboard_daily_and_monthly_history(self):
         plugin = self._new_plugin({})
         self._attach_memory_store(plugin, {
             "torrents": {
@@ -7555,19 +7762,39 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     "task_count": 1,
                     "updated_at": 1782067200,
                 }
+            },
+            "monthly_statistic": {
+                "2026-06": {
+                    "date": "2026-06",
+                    "uploaded": 789,
+                    "downloaded": 987,
+                    "task_count": 1,
+                    "updated_at": 1782067200,
+                }
             }
         })
 
         page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
 
-        self.assertIn("每日流量统计", page_text)
+        self.assertIn("数据看板", page_text)
         self.assertIn("今日上传量", page_text)
         self.assertIn("今日下载量", page_text)
+        self.assertIn("本月上传量", page_text)
+        self.assertIn("本月下载量", page_text)
         self.assertIn("2026-06-22", page_text)
+        self.assertIn("2026-06", page_text)
         self.assertIn("123", page_text)
         self.assertIn("456", page_text)
+        self.assertIn("789", page_text)
+        self.assertIn("987", page_text)
+        dashboard_text = page_text.split("免费到期缓存看板")[0]
+        self.assertEqual(2, dashboard_text.count('"日期"'))
+        self.assertEqual(2, dashboard_text.count('"上传量"'))
+        self.assertEqual(2, dashboard_text.count('"下载量"'))
+        self.assertEqual(2, dashboard_text.count('"参与任务数"'))
+        self.assertEqual(2, dashboard_text.count('"更新时间"'))
 
-    def test_get_page_shows_daily_transfer_empty_state(self):
+    def test_get_page_shows_data_dashboard_empty_state(self):
         plugin = self._new_plugin({})
         self._attach_memory_store(plugin, {
             "torrents": {
@@ -7584,13 +7811,15 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     "time": 1,
                 }
             },
-            "daily_statistic": {}
+            "daily_statistic": {},
+            "monthly_statistic": {},
         })
 
         page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
 
-        self.assertIn("每日流量统计", page_text)
-        self.assertIn("暂无每日流量统计", page_text)
+        self.assertIn("数据看板", page_text)
+        self.assertIn("暂无每日数据", page_text)
+        self.assertIn("暂无本月数据", page_text)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ import hashlib
 import html
 import json
 import logging
+import math
 import random
 import re
 import threading
@@ -153,6 +154,18 @@ class BrushConfig:
         self.upload_protection_skip_when_downloading_le = self.__parse_number(
             config.get("upload_protection_skip_when_downloading_le", 0)
         ) or 0
+        self.upload_protection_no_value_relax_ratio = self.__parse_number(
+            config.get("upload_protection_no_value_relax_ratio", 0)
+        ) or 0
+        self.upload_protection_no_value_relax_uploaded_gb = self.__parse_number(
+            config.get("upload_protection_no_value_relax_uploaded_gb", 0)
+        ) or 0
+        self.upload_protection_no_value_relax_progress_percent = self.__parse_number(
+            config.get("upload_protection_no_value_relax_progress_percent", 0)
+        ) or 0
+        self.upload_protection_no_value_relax_percent = self.__parse_number(
+            config.get("upload_protection_no_value_relax_percent", 0)
+        ) or 0
         self.qualified_release_enabled = config.get("qualified_release_enabled", False)
         self.qualified_release_ratio = self.__parse_number(config.get("qualified_release_ratio"))
         self.qualified_release_uploaded_gb = self.__parse_number(config.get("qualified_release_uploaded_gb"))
@@ -291,6 +304,10 @@ class BrushConfig:
             "upload_protection_min_downloaded_gb",
             "upload_protection_detail_log",
             "upload_protection_skip_when_downloading_le",
+            "upload_protection_no_value_relax_ratio",
+            "upload_protection_no_value_relax_uploaded_gb",
+            "upload_protection_no_value_relax_progress_percent",
+            "upload_protection_no_value_relax_percent",
             "qualified_release_enabled",
             "qualified_release_ratio",
             "qualified_release_uploaded_gb",
@@ -379,6 +396,10 @@ class BrushConfig:
     "upload_protection_min_elapsed_minutes": 10,
     "upload_protection_min_downloaded_gb": 0,
     "upload_protection_detail_log": false,
+    "upload_protection_no_value_relax_ratio": 0,
+    "upload_protection_no_value_relax_uploaded_gb": 0,
+    "upload_protection_no_value_relax_progress_percent": 0,
+    "upload_protection_no_value_relax_percent": 0,
     "qualified_release_enabled": false,
     "qualified_release_ratio": "",
     "qualified_release_uploaded_gb": "",
@@ -3340,6 +3361,10 @@ class BrushFlowLowFreq(_PluginBase):
             "upload_protection_min_downloaded_gb": 0,
             "upload_protection_detail_log": False,
             "upload_protection_skip_when_downloading_le": 0,
+            "upload_protection_no_value_relax_ratio": 0,
+            "upload_protection_no_value_relax_uploaded_gb": 0,
+            "upload_protection_no_value_relax_progress_percent": 0,
+            "upload_protection_no_value_relax_percent": 0,
             "qualified_release_enabled": False,
             "qualified_release_ratio": "",
             "qualified_release_uploaded_gb": "",
@@ -3657,6 +3682,28 @@ class BrushFlowLowFreq(_PluginBase):
                                    "达到后才交给删种流程"),
                         text_field("upload_protection_skip_when_downloading_le", "下载中任务数例外",
                                    "下载中托管任务数小于等于该值时跳过上传保护并放开限速，0=关闭"),
+                    ]
+                },
+                {
+                    "component": "VRow",
+                    "content": [section_label("历史贡献删种放宽")]
+                },
+                {
+                    "component": "VRow",
+                    "content": [
+                        text_field("upload_protection_no_value_relax_ratio", "历史贡献分享率阈值",
+                                   "分享率达到后可放宽无上传价值删除次数，0=关闭"),
+                        text_field("upload_protection_no_value_relax_uploaded_gb", "历史贡献上传量阈值（GB）",
+                                   "上传量达到后可放宽无上传价值删除次数，0=关闭"),
+                        text_field("upload_protection_no_value_relax_progress_percent", "放宽所需下载进度（%）",
+                                   "下载进度达到后才允许放宽，0=不限制"),
+                    ]
+                },
+                {
+                    "component": "VRow",
+                    "content": [
+                        text_field("upload_protection_no_value_relax_percent", "无上传价值删除次数放宽（%）",
+                                   "如：50，连续次数从30放宽到45，0=关闭"),
                     ]
                 },
                 {
@@ -4973,12 +5020,14 @@ class BrushFlowLowFreq(_PluginBase):
                     torrent_info_cache=live_info_cache
                 )
 
+                upload_protection_action_hashes = set()
                 upload_protection_delete_hashes = self.__apply_upload_protection_actions(
                     torrents=check_torrents,
                     torrent_tasks=torrent_tasks,
                     downloading_count=downloading_count,
                     delete_message_map=delete_message_map,
-                    torrent_info_cache=torrent_info_cache
+                    torrent_info_cache=torrent_info_cache,
+                    action_hashes=upload_protection_action_hashes
                 )
                 need_delete_hashes.extend(upload_protection_delete_hashes)
 
@@ -5069,7 +5118,7 @@ class BrushFlowLowFreq(_PluginBase):
                     torrents=check_torrents,
                     torrent_tasks=torrent_tasks,
                     torrent_info_cache=torrent_info_cache,
-                    excluded_hashes=set(need_delete_hashes)
+                    excluded_hashes=set(need_delete_hashes) | upload_protection_action_hashes
                 )
 
             # 归档数据
@@ -5192,7 +5241,8 @@ class BrushFlowLowFreq(_PluginBase):
     def __apply_upload_protection_actions(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                           delete_message_map: Optional[Dict[str, List[dict]]] = None,
                                           downloading_count: int = 0,
-                                          torrent_info_cache: Optional[Dict[str, dict]] = None) -> List[str]:
+                                          torrent_info_cache: Optional[Dict[str, dict]] = None,
+                                          action_hashes: Optional[Set[str]] = None) -> List[str]:
         """
         执行新上传保护限速动作，并返回无上传价值待删 hash。
         """
@@ -5321,6 +5371,8 @@ class BrushFlowLowFreq(_PluginBase):
                     site_name=site_name
                 )
                 if handled:
+                    if action_hashes is not None:
+                        action_hashes.add(torrent_hash)
                     torrent_task["upload_protection_last_action_time"] = time.time()
                     torrent_task["upload_protection_pending_action"] = None
                     if self.__is_qualified_release_enabled(brush_config) or torrent_task.get(
@@ -6452,6 +6504,52 @@ class BrushFlowLowFreq(_PluginBase):
         torrent_task["upload_protection_evaluated_in_check"] = False
         torrent_task["upload_protection_last_reason"] = reason
 
+    def __get_upload_protection_effective_no_upload_checks(self, brush_config: BrushConfig,
+                                                           torrent_info: dict,
+                                                           base_checks: int) -> Tuple[int, bool]:
+        """
+        根据历史贡献配置，计算无上传价值删种的实际连续次数阈值。
+        """
+        base_checks = max(1, self.__positive_int(base_checks, 1))
+        relax_percent = self.__non_negative_float(
+            getattr(brush_config, "upload_protection_no_value_relax_percent", 0), 0
+        )
+        if relax_percent <= 0:
+            return base_checks, False
+
+        ratio_threshold = self.__non_negative_float(
+            getattr(brush_config, "upload_protection_no_value_relax_ratio", 0), 0
+        )
+        uploaded_threshold_gb = self.__non_negative_float(
+            getattr(brush_config, "upload_protection_no_value_relax_uploaded_gb", 0), 0
+        )
+        if ratio_threshold <= 0 and uploaded_threshold_gb <= 0:
+            return base_checks, False
+
+        torrent_info = torrent_info or {}
+        progress_threshold = self.__non_negative_float(
+            getattr(brush_config, "upload_protection_no_value_relax_progress_percent", 0), 0
+        )
+        downloaded = self.__number_or_none(torrent_info.get("downloaded")) or 0
+        total_size = self.__number_or_none(torrent_info.get("total_size")) or 0
+        if progress_threshold > 0:
+            if total_size <= 0:
+                return base_checks, False
+            progress_percent = downloaded / total_size * 100
+            if progress_percent < progress_threshold:
+                return base_checks, False
+
+        ratio = self.__number_or_none(torrent_info.get("ratio"))
+        uploaded = self.__number_or_none(torrent_info.get("uploaded"))
+        ratio_matched = ratio_threshold > 0 and ratio is not None and ratio >= ratio_threshold
+        uploaded_threshold_bytes = uploaded_threshold_gb * 1024 ** 3
+        uploaded_matched = uploaded_threshold_bytes > 0 and uploaded is not None and uploaded >= uploaded_threshold_bytes
+        if not (ratio_matched or uploaded_matched):
+            return base_checks, False
+
+        relaxed_checks = int(math.ceil(base_checks * (1 + relax_percent / 100)))
+        return max(base_checks, relaxed_checks), relaxed_checks > base_checks
+
     def __evaluate_upload_protection(self, site_name: str, brush_config: BrushConfig,
                                      torrent_info: dict, torrent_task: dict,
                                      no_upload_kbs: float = 5.0, low_kbs: float = 150.0,
@@ -6528,6 +6626,13 @@ class BrushFlowLowFreq(_PluginBase):
                 return finish(False, reason)
 
         no_upload_checks = max(1, self.__positive_int(brush_config.upload_protection_no_upload_checks, 6))
+        effective_no_upload_checks, no_upload_checks_relaxed = (
+            self.__get_upload_protection_effective_no_upload_checks(
+                brush_config=brush_config,
+                torrent_info=torrent_info,
+                base_checks=no_upload_checks
+            )
+        )
 
         if no_upload_kbs > 0 and interval_upspeed <= no_upload_kbs * 1024:
             torrent_task["upload_protection_no_upload_streak"] = (
@@ -6556,9 +6661,12 @@ class BrushFlowLowFreq(_PluginBase):
             brush_config.upload_protection_min_downloaded_gb, 0
         ) * 1024 ** 3
         downloaded = self.__number_or_none(torrent_info.get("downloaded")) or 0
-        if no_upload_kbs > 0 and no_upload_streak >= no_upload_checks and downloaded >= min_downloaded_bytes:
+        if no_upload_kbs > 0 and no_upload_streak >= effective_no_upload_checks and downloaded >= min_downloaded_bytes:
+            relax_text = ""
+            if no_upload_checks_relaxed:
+                relax_text = f"，历史贡献达标且进度达标，删除次数由 {no_upload_checks} 放宽至 {effective_no_upload_checks}"
             reason = (f"上传保护：连续检查间上传低于无上传价值阈值 {no_upload_kbs:.1f} KB/s，"
-                      f"连续 {no_upload_streak}/{no_upload_checks} 次，删除无上传价值种子")
+                      f"连续 {no_upload_streak}/{effective_no_upload_checks} 次{relax_text}，删除无上传价值种子")
             torrent_task["upload_protection_pending_action"] = "delete"
             return finish(True, reason, "delete")
 
@@ -8479,6 +8587,13 @@ class BrushFlowLowFreq(_PluginBase):
         daily_statistic = self.get_data("daily_statistic") or {}
         return daily_statistic if isinstance(daily_statistic, dict) else {}
 
+    def __get_monthly_statistic_info(self) -> Dict[str, dict]:
+        """
+        获取每月上传/下载统计数据。
+        """
+        monthly_statistic = self.get_data("monthly_statistic") or {}
+        return monthly_statistic if isinstance(monthly_statistic, dict) else {}
+
     def __update_daily_transfer_statistics(self, torrent_tasks: Dict[str, dict],
                                            now: Optional[datetime] = None) -> None:
         """
@@ -8489,6 +8604,8 @@ class BrushFlowLowFreq(_PluginBase):
 
         daily_statistic = self.__get_daily_statistic_info()
         stat_date = self.__get_daily_stat_date(now=now)
+        stat_month = stat_date[:7]
+        monthly_statistic = self.__get_monthly_statistic_info()
         updated_at = self.__get_daily_stat_timestamp(now=now)
 
         for task_hash, task in torrent_tasks.items():
@@ -8546,7 +8663,33 @@ class BrushFlowLowFreq(_PluginBase):
             daily_record["updated_at"] = updated_at
             daily_statistic[stat_date] = daily_record
 
+            monthly_record = monthly_statistic.get(stat_month)
+            if not isinstance(monthly_record, dict):
+                monthly_record = {
+                    "date": stat_month,
+                    "uploaded": 0,
+                    "downloaded": 0,
+                    "task_count": 0,
+                    "updated_at": updated_at,
+                }
+
+            monthly_record["date"] = stat_month
+            monthly_record["uploaded"] = int(
+                (self.__number_or_none(monthly_record.get("uploaded")) or 0) + upload_delta
+            )
+            monthly_record["downloaded"] = int(
+                (self.__number_or_none(monthly_record.get("downloaded")) or 0) + download_delta
+            )
+            if task.get("monthly_stat_counted_month") != stat_month:
+                monthly_record["task_count"] = int(
+                    (self.__number_or_none(monthly_record.get("task_count")) or 0) + 1
+                )
+                task["monthly_stat_counted_month"] = stat_month
+            monthly_record["updated_at"] = updated_at
+            monthly_statistic[stat_month] = monthly_record
+
         self.save_data("daily_statistic", daily_statistic)
+        self.save_data("monthly_statistic", monthly_statistic)
         self.save_data("torrents", torrent_tasks)
 
     @staticmethod
@@ -8562,96 +8705,168 @@ class BrushFlowLowFreq(_PluginBase):
         except (TypeError, ValueError):
             return "N/A"
 
+    def __build_transfer_stat_table(self, records: List[dict], empty_text: str) -> List[dict]:
+        """
+        组装上传/下载统计表格。列保持固定，避免看板升级后破坏已有阅读习惯。
+        """
+        if not records:
+            return [{
+                'component': 'div',
+                'props': {
+                    'class': 'text-center text-disabled py-4'
+                },
+                'text': empty_text
+            }]
+
+        rows = [
+            {
+                'component': 'tr',
+                'props': {
+                    'class': 'text-sm'
+                },
+                'content': [
+                    {
+                        'component': 'td',
+                        'props': {
+                            'class': 'text-no-wrap'
+                        },
+                        'text': record.get("date") or ""
+                    },
+                    {
+                        'component': 'td',
+                        'text': StringUtils.str_filesize(record.get("uploaded") or 0)
+                    },
+                    {
+                        'component': 'td',
+                        'text': StringUtils.str_filesize(record.get("downloaded") or 0)
+                    },
+                    {
+                        'component': 'td',
+                        'text': record.get("task_count") or 0
+                    },
+                    {
+                        'component': 'td',
+                        'props': {
+                            'class': 'text-no-wrap'
+                        },
+                        'text': self.__format_daily_stat_updated_at(record.get("updated_at"))
+                    }
+                ]
+            } for record in records
+        ]
+
+        return [
+            {
+                'component': 'VTable',
+                'props': {
+                    'hover': True,
+                    'density': 'compact'
+                },
+                'content': [
+                    {
+                        'component': 'thead',
+                        'props': {
+                            'class': 'text-no-wrap'
+                        },
+                        'content': [
+                            {
+                                'component': 'tr',
+                                'content': [
+                                    {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '日期'},
+                                    {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '上传量'},
+                                    {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '下载量'},
+                                    {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '参与任务数'},
+                                    {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '更新时间'}
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'tbody',
+                        'content': rows
+                    }
+                ]
+            }
+        ]
+
+    @staticmethod
+    def __build_transfer_period_controls(label: str, items: List[str], value: str,
+                                         previous_text: str, next_text: str) -> dict:
+        return {
+            'component': 'div',
+            'props': {
+                'class': 'd-flex flex-wrap align-center ga-2 mb-3'
+            },
+            'content': [
+                {
+                    'component': 'VBtn',
+                    'props': {
+                        'variant': 'text',
+                        'density': 'comfortable',
+                        'size': 'small'
+                    },
+                    'text': previous_text
+                },
+                {
+                    'component': 'VSelect',
+                    'props': {
+                        'label': label,
+                        'model': value,
+                        'items': items,
+                        'density': 'compact',
+                        'hide-details': True,
+                        'style': 'max-width: 180px'
+                    }
+                },
+                {
+                    'component': 'VBtn',
+                    'props': {
+                        'variant': 'text',
+                        'density': 'comfortable',
+                        'size': 'small'
+                    },
+                    'text': next_text
+                }
+            ]
+        }
+
     def __get_daily_transfer_elements(self) -> List[dict]:
         """
-        组装每日上传/下载统计页面元素。
+        组装上传/下载数据看板页面元素。
         """
         daily_statistic = self.__get_daily_statistic_info()
+        monthly_statistic = self.__get_monthly_statistic_info()
         stat_date = self.__get_daily_stat_date()
+        stat_month = stat_date[:7]
+
         today_record = daily_statistic.get(stat_date) if isinstance(daily_statistic.get(stat_date), dict) else {}
+        month_record = monthly_statistic.get(stat_month) if isinstance(monthly_statistic.get(stat_month), dict) else {}
         today_uploaded = StringUtils.str_filesize((today_record or {}).get("uploaded") or 0)
         today_downloaded = StringUtils.str_filesize((today_record or {}).get("downloaded") or 0)
+        month_uploaded = StringUtils.str_filesize((month_record or {}).get("uploaded") or 0)
+        month_downloaded = StringUtils.str_filesize((month_record or {}).get("downloaded") or 0)
 
-        history_records = [
+        daily_records = [
             value for key, value in sorted(daily_statistic.items(), key=lambda item: str(item[0]), reverse=True)
             if isinstance(value, dict)
-        ][:30]
+        ]
+        monthly_records = [
+            value for key, value in sorted(monthly_statistic.items(), key=lambda item: str(item[0]), reverse=True)
+            if isinstance(value, dict)
+        ]
+        month_items = sorted({str((record.get("date") or ""))[:7] for record in daily_records
+                              if str(record.get("date") or "")[:7]}, reverse=True) or [stat_month]
+        year_items = sorted({str((record.get("date") or ""))[:4] for record in monthly_records
+                             if str(record.get("date") or "")[:4]}, reverse=True) or [stat_month[:4]]
 
-        if history_records:
-            history_rows = [
-                {
-                    'component': 'tr',
-                    'props': {
-                        'class': 'text-sm'
-                    },
-                    'content': [
-                        {
-                            'component': 'td',
-                            'props': {
-                                'class': 'text-no-wrap'
-                            },
-                            'text': record.get("date") or ""
-                        },
-                        {
-                            'component': 'td',
-                            'text': StringUtils.str_filesize(record.get("uploaded") or 0)
-                        },
-                        {
-                            'component': 'td',
-                            'text': StringUtils.str_filesize(record.get("downloaded") or 0)
-                        },
-                        {
-                            'component': 'td',
-                            'text': record.get("task_count") or 0
-                        },
-                        {
-                            'component': 'td',
-                            'props': {
-                                'class': 'text-no-wrap'
-                            },
-                            'text': self.__format_daily_stat_updated_at(record.get("updated_at"))
-                        }
-                    ]
-                } for record in history_records
-            ]
-            history_content = [
-                {
-                    'component': 'VTable',
-                    'props': {
-                        'hover': True,
-                        'density': 'compact'
-                    },
-                    'content': [
-                        {
-                            'component': 'thead',
-                            'props': {
-                                'class': 'text-no-wrap'
-                            },
-                            'content': [
-                                {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '日期'},
-                                {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '上传量'},
-                                {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '下载量'},
-                                {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '参与任务数'},
-                                {'component': 'th', 'props': {'class': 'text-start ps-4'}, 'text': '更新时间'}
-                            ]
-                        },
-                        {
-                            'component': 'tbody',
-                            'content': history_rows
-                        }
-                    ]
-                }
-            ]
-        else:
-            history_content = [
-                {
-                    'component': 'div',
-                    'props': {
-                        'class': 'text-center text-disabled py-4'
-                    },
-                    'text': '暂无每日流量统计'
-                }
-            ]
+        daily_content = [
+            self.__build_transfer_period_controls("选择月份", month_items, month_items[0], "上一月", "下一月"),
+            *self.__build_transfer_stat_table(daily_records[:90], "暂无每日数据")
+        ]
+        monthly_content = [
+            self.__build_transfer_period_controls("选择年份", year_items, year_items[0], "上一年", "下一年"),
+            *self.__build_transfer_stat_table(monthly_records[:60], "暂无本月数据")
+        ]
 
         return [
             {
@@ -8674,55 +8889,77 @@ class BrushFlowLowFreq(_PluginBase):
                                         'props': {
                                             'class': 'text-subtitle-1 font-weight-medium mb-3'
                                         },
-                                        'text': '每日流量统计'
+                                        'text': '数据看板'
                                     },
                                     {
-                                        'component': 'div',
+                                        'component': 'VExpansionPanels',
                                         'props': {
-                                            'class': 'd-flex flex-wrap ga-6 mb-3'
+                                            'variant': 'accordion'
                                         },
                                         'content': [
                                             {
-                                                'component': 'div',
+                                                'component': 'VExpansionPanel',
                                                 'content': [
                                                     {
-                                                        'component': 'div',
-                                                        'props': {
-                                                            'class': 'text-caption'
-                                                        },
-                                                        'text': '今日上传量'
+                                                        'component': 'VExpansionPanelTitle',
+                                                        'content': [
+                                                            {
+                                                                'component': 'div',
+                                                                'props': {
+                                                                    'class': 'd-flex flex-wrap ga-6'
+                                                                },
+                                                                'content': [
+                                                                    {
+                                                                        'component': 'div',
+                                                                        'text': f"今日上传量：{today_uploaded}"
+                                                                    },
+                                                                    {
+                                                                        'component': 'div',
+                                                                        'text': f"今日下载量：{today_downloaded}"
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
                                                     },
                                                     {
-                                                        'component': 'div',
-                                                        'props': {
-                                                            'class': 'text-h6'
-                                                        },
-                                                        'text': today_uploaded
+                                                        'component': 'VExpansionPanelText',
+                                                        'content': daily_content
                                                     }
                                                 ]
                                             },
                                             {
-                                                'component': 'div',
+                                                'component': 'VExpansionPanel',
                                                 'content': [
                                                     {
-                                                        'component': 'div',
-                                                        'props': {
-                                                            'class': 'text-caption'
-                                                        },
-                                                        'text': '今日下载量'
+                                                        'component': 'VExpansionPanelTitle',
+                                                        'content': [
+                                                            {
+                                                                'component': 'div',
+                                                                'props': {
+                                                                    'class': 'd-flex flex-wrap ga-6'
+                                                                },
+                                                                'content': [
+                                                                    {
+                                                                        'component': 'div',
+                                                                        'text': f"本月上传量：{month_uploaded}"
+                                                                    },
+                                                                    {
+                                                                        'component': 'div',
+                                                                        'text': f"本月下载量：{month_downloaded}"
+                                                                    }
+                                                                ]
+                                                            }
+                                                        ]
                                                     },
                                                     {
-                                                        'component': 'div',
-                                                        'props': {
-                                                            'class': 'text-h6'
-                                                        },
-                                                        'text': today_downloaded
+                                                        'component': 'VExpansionPanelText',
+                                                        'content': monthly_content
                                                     }
                                                 ]
                                             }
                                         ]
                                     }
-                                ] + history_content
+                                ]
                             }
                         ]
                     }
@@ -8769,6 +9006,10 @@ class BrushFlowLowFreq(_PluginBase):
             "upload_protection_min_elapsed_minutes": "上传保护最小观察时间",
             "upload_protection_min_downloaded_gb": "上传保护删种最小下载量",
             "upload_protection_skip_when_downloading_le": "上传保护下载中任务数例外",
+            "upload_protection_no_value_relax_ratio": "历史贡献删种放宽分享率阈值",
+            "upload_protection_no_value_relax_uploaded_gb": "历史贡献删种放宽上传量阈值",
+            "upload_protection_no_value_relax_progress_percent": "历史贡献删种放宽进度阈值",
+            "upload_protection_no_value_relax_percent": "无上传价值删除次数放宽百分比",
             "qualified_release_ratio": "全限速兜底放行分享率阈值",
             "qualified_release_uploaded_gb": "全限速兜底放行上传量阈值",
             "qualified_release_max_slots": "全限速兜底放行最大数量",
@@ -9022,6 +9263,10 @@ class BrushFlowLowFreq(_PluginBase):
             "upload_protection_min_downloaded_gb": brush_config.upload_protection_min_downloaded_gb,
             "upload_protection_detail_log": brush_config.upload_protection_detail_log,
             "upload_protection_skip_when_downloading_le": brush_config.upload_protection_skip_when_downloading_le,
+            "upload_protection_no_value_relax_ratio": brush_config.upload_protection_no_value_relax_ratio,
+            "upload_protection_no_value_relax_uploaded_gb": brush_config.upload_protection_no_value_relax_uploaded_gb,
+            "upload_protection_no_value_relax_progress_percent": brush_config.upload_protection_no_value_relax_progress_percent,
+            "upload_protection_no_value_relax_percent": brush_config.upload_protection_no_value_relax_percent,
             "qualified_release_enabled": brush_config.qualified_release_enabled,
             "qualified_release_ratio": brush_config.qualified_release_ratio,
             "qualified_release_uploaded_gb": brush_config.qualified_release_uploaded_gb,
@@ -9726,6 +9971,7 @@ class BrushFlowLowFreq(_PluginBase):
             tracker = torrent.get("tracker")
             completion_on = torrent.get("completion_on") or 0
             download_limit = torrent.get("dl_limit")
+            state = torrent.get("state")
         # TR
         else:
             # ID
@@ -9780,10 +10026,12 @@ class BrushFlowLowFreq(_PluginBase):
             tracker = torrent.get("tracker")
             completion_on = int(torrent.date_done.timestamp()) if torrent.date_done else 0
             download_limit = None
+            state = getattr(torrent, "status", None) or getattr(torrent, "state", None)
 
         return {
             "hash": torrent_id,
             "title": torrent_title,
+            "state": state,
             "seeding_time": seeding_time,
             "completion_on": completion_on,
             "ratio": ratio,
@@ -10564,6 +10812,7 @@ class BrushFlowLowFreq(_PluginBase):
         self.save_data("unmanaged", {})
         self.save_data("statistic", {})
         self.save_data("daily_statistic", {})
+        self.save_data("monthly_statistic", {})
 
     def __get_statistic_info(self) -> Dict[str, int]:
         """
