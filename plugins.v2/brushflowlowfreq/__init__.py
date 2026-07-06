@@ -565,7 +565,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.78"
+    plugin_version = "4.3.79"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -8594,6 +8594,68 @@ class BrushFlowLowFreq(_PluginBase):
         monthly_statistic = self.get_data("monthly_statistic") or {}
         return monthly_statistic if isinstance(monthly_statistic, dict) else {}
 
+    def __build_monthly_statistic_from_daily(self, daily_statistic: Dict[str, dict]) -> Dict[str, dict]:
+        """
+        从已有每日统计汇总月统计，用于版本升级后的数据回填。
+        """
+        monthly_statistic: Dict[str, dict] = {}
+        if not isinstance(daily_statistic, dict):
+            return monthly_statistic
+
+        for stat_key, record in daily_statistic.items():
+            if not isinstance(record, dict):
+                continue
+            stat_date = str(record.get("date") or stat_key or "")
+            if len(stat_date) < 7:
+                continue
+            stat_month = stat_date[:7]
+            monthly_record = monthly_statistic.get(stat_month)
+            if not isinstance(monthly_record, dict):
+                monthly_record = {
+                    "date": stat_month,
+                    "uploaded": 0,
+                    "downloaded": 0,
+                    "task_count": 0,
+                    "updated_at": 0,
+                }
+
+            monthly_record["uploaded"] = int(
+                (self.__number_or_none(monthly_record.get("uploaded")) or 0)
+                + (self.__number_or_none(record.get("uploaded")) or 0)
+            )
+            monthly_record["downloaded"] = int(
+                (self.__number_or_none(monthly_record.get("downloaded")) or 0)
+                + (self.__number_or_none(record.get("downloaded")) or 0)
+            )
+            monthly_record["task_count"] = int(
+                (self.__number_or_none(monthly_record.get("task_count")) or 0)
+                + (self.__number_or_none(record.get("task_count")) or 0)
+            )
+            monthly_record["updated_at"] = max(
+                self.__number_or_none(monthly_record.get("updated_at")) or 0,
+                self.__number_or_none(record.get("updated_at")) or 0
+            )
+            monthly_statistic[stat_month] = monthly_record
+
+        return monthly_statistic
+
+    def __ensure_monthly_statistic_from_daily(self, daily_statistic: Dict[str, dict],
+                                              monthly_statistic: Dict[str, dict]) -> Dict[str, dict]:
+        """
+        确保月统计至少覆盖已有日统计，修复升级后本月看板为空的问题。
+        """
+        monthly_statistic = monthly_statistic if isinstance(monthly_statistic, dict) else {}
+        derived_statistic = self.__build_monthly_statistic_from_daily(daily_statistic=daily_statistic)
+        changed = False
+        for stat_month, derived_record in derived_statistic.items():
+            current_record = monthly_statistic.get(stat_month)
+            if not isinstance(current_record, dict):
+                monthly_statistic[stat_month] = derived_record
+                changed = True
+        if changed:
+            self.save_data("monthly_statistic", monthly_statistic)
+        return monthly_statistic
+
     def __update_daily_transfer_statistics(self, torrent_tasks: Dict[str, dict],
                                            now: Optional[datetime] = None) -> None:
         """
@@ -8789,53 +8851,92 @@ class BrushFlowLowFreq(_PluginBase):
             }
         ]
 
-    @staticmethod
-    def __build_transfer_period_controls(label: str, items: List[str], value: str,
-                                         previous_text: str, next_text: str) -> dict:
-        return {
-            'component': 'div',
-            'props': {
-                'class': 'd-flex flex-wrap align-center ga-2 mb-3'
-            },
-            'content': [
-                {
-                    'component': 'VBtn',
-                    'props': {
-                        'variant': 'text',
-                        'density': 'comfortable',
-                        'size': 'small'
-                    },
-                    'text': previous_text
+    def __build_transfer_period_tabs(self, label: str, model: str, periods: List[str],
+                                     records_by_period: Dict[str, List[dict]], value_prefix: str,
+                                     empty_text: str, previous_text: str, next_text: str) -> List[dict]:
+        period_values = periods or []
+        if not period_values:
+            return self.__build_transfer_stat_table([], empty_text)
+
+        return [
+            {
+                'component': 'div',
+                'props': {
+                    'class': 'd-flex flex-wrap align-center ga-2 mb-3'
                 },
-                {
-                    'component': 'VSelect',
-                    'props': {
-                        'label': label,
-                        'model': value,
-                        'items': items,
-                        'density': 'compact',
-                        'hide-details': True,
-                        'style': 'max-width: 180px'
+                'content': [
+                    {
+                        'component': 'VBtn',
+                        'props': {
+                            'variant': 'text',
+                            'density': 'comfortable',
+                            'size': 'small'
+                        },
+                        'text': previous_text
+                    },
+                    {
+                        'component': 'div',
+                        'props': {
+                            'class': 'text-caption text-medium-emphasis'
+                        },
+                        'text': label
+                    },
+                    {
+                        'component': 'VTabs',
+                        'props': {
+                            'model': model,
+                            'density': 'compact',
+                            'show-arrows': True
+                        },
+                        'content': [
+                            {
+                                'component': 'VTab',
+                                'props': {
+                                    'value': f"{value_prefix}-{period}"
+                                },
+                                'text': period
+                            } for period in period_values
+                        ]
+                    },
+                    {
+                        'component': 'VBtn',
+                        'props': {
+                            'variant': 'text',
+                            'density': 'comfortable',
+                            'size': 'small'
+                        },
+                        'text': next_text
                     }
+                ]
+            },
+            {
+                'component': 'VWindow',
+                'props': {
+                    'model': model
                 },
-                {
-                    'component': 'VBtn',
-                    'props': {
-                        'variant': 'text',
-                        'density': 'comfortable',
-                        'size': 'small'
-                    },
-                    'text': next_text
-                }
-            ]
-        }
+                'content': [
+                    {
+                        'component': 'VWindowItem',
+                        'props': {
+                            'value': f"{value_prefix}-{period}"
+                        },
+                        'content': self.__build_transfer_stat_table(
+                            records_by_period.get(period, []), empty_text
+                        )
+                    } for period in period_values
+                ]
+            }
+        ]
 
     def __get_daily_transfer_elements(self) -> List[dict]:
         """
         组装上传/下载数据看板页面元素。
         """
         daily_statistic = self.__get_daily_statistic_info()
-        monthly_statistic = self.__get_monthly_statistic_info()
+        monthly_statistic = self.__ensure_monthly_statistic_from_daily(
+            daily_statistic=daily_statistic,
+            monthly_statistic=self.__get_monthly_statistic_info()
+        )
         stat_date = self.__get_daily_stat_date()
         stat_month = stat_date[:7]
 
@@ -8859,14 +8960,38 @@ class BrushFlowLowFreq(_PluginBase):
         year_items = sorted({str((record.get("date") or ""))[:4] for record in monthly_records
                              if str(record.get("date") or "")[:4]}, reverse=True) or [stat_month[:4]]
 
-        daily_content = [
-            self.__build_transfer_period_controls("选择月份", month_items, month_items[0], "上一月", "下一月"),
-            *self.__build_transfer_stat_table(daily_records[:90], "暂无每日数据")
-        ]
-        monthly_content = [
-            self.__build_transfer_period_controls("选择年份", year_items, year_items[0], "上一年", "下一年"),
-            *self.__build_transfer_stat_table(monthly_records[:60], "暂无本月数据")
-        ]
+        daily_records_by_month: Dict[str, List[dict]] = {month: [] for month in month_items}
+        for record in daily_records:
+            record_month = str(record.get("date") or "")[:7]
+            if record_month in daily_records_by_month:
+                daily_records_by_month[record_month].append(record)
+
+        monthly_records_by_year: Dict[str, List[dict]] = {year: [] for year in year_items}
+        for record in monthly_records:
+            record_year = str(record.get("date") or "")[:4]
+            if record_year in monthly_records_by_year:
+                monthly_records_by_year[record_year].append(record)
+
+        daily_content = self.__build_transfer_period_tabs(
+            label="选择月份",
+            model="daily_transfer_month_tabs",
+            periods=month_items,
+            records_by_period=daily_records_by_month,
+            value_prefix="daily",
+            empty_text="暂无每日数据",
+            previous_text="上一月",
+            next_text="下一月"
+        )
+        monthly_content = self.__build_transfer_period_tabs(
+            label="选择年份",
+            model="monthly_transfer_year_tabs",
+            periods=year_items,
+            records_by_period=monthly_records_by_year,
+            value_prefix="monthly",
+            empty_text="暂无本月数据",
+            previous_text="上一年",
+            next_text="下一年"
+        )
 
         return [
             {
