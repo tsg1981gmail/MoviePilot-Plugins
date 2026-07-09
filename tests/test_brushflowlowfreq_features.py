@@ -7998,9 +7998,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "daily_statistic": {},
             "monthly_statistic": {},
         })
-        result = self._run_async(
-            plugin._BrushFlowLowFreq__api_summary(None)
-        )
+        result = plugin._BrushFlowLowFreq__api_summary()
         self.assertEqual(result["today"]["uploaded"], 0)
         self.assertEqual(result["today"]["downloaded"], 0)
         self.assertEqual(result["month"]["uploaded"], 0)
@@ -8026,9 +8024,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 month: {"date": month, "uploaded": 50000, "downloaded": 20000, "task_count": 100},
             },
         })
-        result = self._run_async(
-            plugin._BrushFlowLowFreq__api_summary(None)
-        )
+        result = plugin._BrushFlowLowFreq__api_summary()
         self.assertEqual(result["today"]["uploaded"], 1000)
         self.assertEqual(result["today"]["downloaded"], 500)
         self.assertEqual(result["month"]["uploaded"], 50000)
@@ -8038,9 +8034,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         """daily_compare API 无数据时返回 0"""
         plugin = self._new_plugin({"enabled": False})
         self._attach_memory_store(plugin, {"daily_statistic": {}})
-        result = self._run_async(
-            plugin._BrushFlowLowFreq__api_daily_compare(None)
-        )
+        result = plugin._BrushFlowLowFreq__api_daily_compare()
         self.assertEqual(result["today"]["uploaded"], 0)
         self.assertEqual(result["yesterday"]["uploaded"], 0)
 
@@ -8062,9 +8056,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 yesterday: {"uploaded": 2000, "downloaded": 800},
             },
         })
-        result = self._run_async(
-            plugin._BrushFlowLowFreq__api_daily_compare(None)
-        )
+        result = plugin._BrushFlowLowFreq__api_daily_compare()
         self.assertEqual(result["today"]["uploaded"], 3000)
         self.assertEqual(result["today"]["downloaded"], 1000)
         self.assertEqual(result["yesterday"]["uploaded"], 2000)
@@ -8074,9 +8066,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         """tasks API 无任务时返回空列表"""
         plugin = self._new_plugin({"enabled": False})
         self._attach_memory_store(plugin, {"torrents": {}})
-        result = self._run_async(
-            plugin._BrushFlowLowFreq__api_tasks(None)
-        )
+        result = plugin._BrushFlowLowFreq__api_tasks()
         self.assertEqual(result["tasks"], [])
 
     def test_api_tasks_filters_deleted_and_returns_active(self):
@@ -8107,9 +8097,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 },
             },
         })
-        result = self._run_async(
-            plugin._BrushFlowLowFreq__api_tasks(None)
-        )
+        result = plugin._BrushFlowLowFreq__api_tasks()
         self.assertEqual(len(result["tasks"]), 1)
         self.assertIn("TestMovie", result["tasks"][0]["name"])
         self.assertEqual(result["tasks"][0]["site"], "站点A")
@@ -8133,9 +8121,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 },
             },
         })
-        result = self._run_async(
-            plugin._BrushFlowLowFreq__api_tasks(None)
-        )
+        result = plugin._BrushFlowLowFreq__api_tasks()
         name = result["tasks"][0]["name"]
         self.assertLessEqual(len(name), 15)  # 12 + "..."
         self.assertTrue(name.endswith("..."))
@@ -8162,9 +8148,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 },
             },
         })
-        result = self._run_async(
-            plugin._BrushFlowLowFreq__api_tasks(None)
-        )
+        result = plugin._BrushFlowLowFreq__api_tasks()
         uploads = [t["uploaded"] for t in result["tasks"]]
         self.assertEqual(uploads, sorted(uploads, reverse=True))
 
@@ -8172,9 +8156,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         """trend API 无数据时返回 25 个零值数据点"""
         plugin = self._new_plugin({"enabled": False})
         self._attach_memory_store(plugin, {"hourly_statistic": {}})
-        result = self._run_async(
-            plugin._BrushFlowLowFreq__api_trend(None)
-        )
+        result = plugin._BrushFlowLowFreq__api_trend()
         self.assertEqual(len(result["points"]), 25)  # 24h + current
         for p in result["points"]:
             self.assertEqual(p["uploaded"], 0)
@@ -8201,9 +8183,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 },
             },
         })
-        result = self._run_async(
-            plugin._BrushFlowLowFreq__api_trend(None)
-        )
+        result = plugin._BrushFlowLowFreq__api_trend()
         # 找到当前小时的数据点（time格式: "YYYY-MM-DDTHH:00:00"）
         expected_time_prefix = f"{current_hour[:10]}T{current_hour[11:13]}:"
         current_points = [p for p in result["points"] if p["time"].startswith(expected_time_prefix)]
