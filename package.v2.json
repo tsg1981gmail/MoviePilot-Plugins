@@ -3,11 +3,12 @@
     "name": "shualiu",
     "description": "自动托管刷流，将会提高对应站点的访问频率。（基于官方插件BrushFlow二次开发）",
     "labels": "站点,刷流,仪表板",
-    "version": "4.3.84",
+    "version": "4.3.85",
     "icon": "brush.jpg",
     "author": "jxxghp,InfinityPacer",
     "level": 2,
     "history": {
+      "v4.3.85": "优化/tasks端点：仅返回正在上传的任务（检查间上传速度>0），按上传速度降序排列，默认5条，支持limit/offset分页",
       "v4.3.84": "修复自定义API端点：移除async和request参数，改为同步方法避免FastAPI参数解析冲突",
       "v4.3.83": "修复自定义API认证：移除auth显式配置使用默认apikey校验，支持?apikey=参数访问",
       "v4.3.82": "修复自定义API端点认证：设置auth=None允许匿名访问，匹配?token=参数校验",

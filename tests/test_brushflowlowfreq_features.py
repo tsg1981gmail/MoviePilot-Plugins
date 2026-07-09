@@ -8068,9 +8068,10 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self._attach_memory_store(plugin, {"torrents": {}})
         result = plugin._BrushFlowLowFreq__api_tasks()
         self.assertEqual(result["tasks"], [])
+        self.assertEqual(result["total"], 0)
 
     def test_api_tasks_filters_deleted_and_returns_active(self):
-        """tasks API 过滤已删除任务，仅返回活跃任务"""
+        """tasks API 过滤已删除任务，仅返回活跃且有上传速度的任务"""
         plugin = self._new_plugin({"enabled": False})
         self._attach_memory_store(plugin, {
             "torrents": {
@@ -8084,6 +8085,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     "ratio": 1.2,
                     "deleted": False,
                     "time": 1000000000.0,
+                    "last_check_interval_upspeed": 8000000,
+                    "avg_upspeed": 5000000,
                 },
                 "hash2": {
                     "title": "DeletedMovie",
@@ -8094,15 +8097,32 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     "ratio": 0,
                     "deleted": True,
                     "time": 1000000000.0,
+                    "last_check_interval_upspeed": 10000000,
+                    "avg_upspeed": 10000000,
+                },
+                "hash3": {
+                    "title": "NoUploadSpeed",
+                    "site_name": "站点C",
+                    "size": 10000000000,
+                    "uploaded": 5000000000,
+                    "downloaded": 5000000000,
+                    "ratio": 1.0,
+                    "deleted": False,
+                    "time": 1000000000.0,
+                    "last_check_interval_upspeed": 0,
+                    "avg_upspeed": 0,
                 },
             },
         })
         result = plugin._BrushFlowLowFreq__api_tasks()
+        # hash2 已删除, hash3 无上传速度 → 只有 hash1
         self.assertEqual(len(result["tasks"]), 1)
+        self.assertEqual(result["total"], 1)
         self.assertIn("TestMovie", result["tasks"][0]["name"])
         self.assertEqual(result["tasks"][0]["site"], "站点A")
         self.assertEqual(result["tasks"][0]["size"], 50000000000)
         self.assertEqual(result["tasks"][0]["progress"], 0.7)  # 35G/50G
+        self.assertEqual(result["tasks"][0]["avg_upspeed"], 8000000)  # 使用检查间速度
 
     def test_api_tasks_truncates_name_to_12_chars(self):
         """tasks API 种子名超过12个字符时截断并加..."""
@@ -8118,6 +8138,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                     "ratio": 1.0,
                     "deleted": False,
                     "time": 1000000000.0,
+                    "last_check_interval_upspeed": 1000000,
                 },
             },
         })
@@ -8126,31 +8147,35 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertLessEqual(len(name), 15)  # 12 + "..."
         self.assertTrue(name.endswith("..."))
 
-    def test_api_tasks_sorted_by_uploaded_desc(self):
-        """tasks API 按上传量降序排列"""
+    def test_api_tasks_sorted_by_upspeed_desc(self):
+        """tasks API 按上传速度降序排列"""
         plugin = self._new_plugin({"enabled": False})
         self._attach_memory_store(plugin, {
             "torrents": {
                 "h1": {
-                    "title": "Small", "site_name": "S", "size": 10000000,
+                    "title": "Slow", "site_name": "S", "size": 10000000,
                     "uploaded": 1000, "downloaded": 1000, "ratio": 0.1,
                     "deleted": False, "time": 1000000000.0,
+                    "last_check_interval_upspeed": 100000,
                 },
                 "h2": {
-                    "title": "Large", "site_name": "L", "size": 10000000,
+                    "title": "Fastest", "site_name": "L", "size": 10000000,
                     "uploaded": 999999, "downloaded": 1000, "ratio": 0.5,
                     "deleted": False, "time": 1000000000.0,
+                    "last_check_interval_upspeed": 5000000,
                 },
                 "h3": {
                     "title": "Medium", "site_name": "M", "size": 10000000,
                     "uploaded": 50000, "downloaded": 1000, "ratio": 0.3,
                     "deleted": False, "time": 1000000000.0,
+                    "last_check_interval_upspeed": 1000000,
                 },
             },
         })
-        result = plugin._BrushFlowLowFreq__api_tasks()
-        uploads = [t["uploaded"] for t in result["tasks"]]
-        self.assertEqual(uploads, sorted(uploads, reverse=True))
+        result = plugin._BrushFlowLowFreq__api_tasks(limit=10)
+        speeds = [t["avg_upspeed"] for t in result["tasks"]]
+        self.assertEqual(speeds, sorted(speeds, reverse=True))
+        self.assertEqual(result["total"], 3)
 
     def test_api_trend_no_data_returns_empty_zero_points(self):
         """trend API 无数据时返回 25 个零值数据点"""
@@ -8192,6 +8217,60 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         point = current_points[0]
         self.assertEqual(point["uploaded"], 5000)
         self.assertEqual(point["downloaded"], 2000)
+
+    def test_api_tasks_pagination_limit_and_offset(self):
+        """tasks API 支持分页 limit 和 offset"""
+        plugin = self._new_plugin({"enabled": False})
+        tasks_data = {}
+        for i in range(10):
+            tasks_data[f"h{i}"] = {
+                "title": f"Task{i:03d}",
+                "site_name": f"站点{i}",
+                "size": 10000000000,
+                "uploaded": 5000000000,
+                "downloaded": 5000000000,
+                "ratio": 1.0,
+                "deleted": False,
+                "time": 1000000000.0,
+                "last_check_interval_upspeed": (10 - i) * 100000,  # descending
+            }
+        self._attach_memory_store(plugin, {"torrents": tasks_data})
+        
+        # 第一页：前5条
+        page1 = plugin._BrushFlowLowFreq__api_tasks(limit=5, offset=0)
+        self.assertEqual(len(page1["tasks"]), 5)
+        self.assertEqual(page1["total"], 10)
+        
+        # 第二页：后5条
+        page2 = plugin._BrushFlowLowFreq__api_tasks(limit=5, offset=5)
+        self.assertEqual(len(page2["tasks"]), 5)
+        self.assertEqual(page2["total"], 10)
+        
+        # 确认无重叠
+        p1_names = {t["name"] for t in page1["tasks"]}
+        p2_names = {t["name"] for t in page2["tasks"]}
+        self.assertTrue(p1_names.isdisjoint(p2_names))
+
+    def test_api_tasks_default_limit_is_5(self):
+        """tasks API 默认 limit=5"""
+        plugin = self._new_plugin({"enabled": False})
+        tasks_data = {}
+        for i in range(20):
+            tasks_data[f"h{i}"] = {
+                "title": f"Task{i:03d}",
+                "site_name": f"站点{i}",
+                "size": 10000000000,
+                "uploaded": 5000000000,
+                "downloaded": 5000000000,
+                "ratio": 1.0,
+                "deleted": False,
+                "time": 1000000000.0,
+                "last_check_interval_upspeed": (20 - i) * 100000,
+            }
+        self._attach_memory_store(plugin, {"torrents": tasks_data})
+        result = plugin._BrushFlowLowFreq__api_tasks()
+        self.assertEqual(len(result["tasks"]), 5)
+        self.assertEqual(result["total"], 20)
 
     # ── Hourly Statistics ──────────────────────────────────────────
 
