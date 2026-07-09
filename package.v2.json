@@ -3,11 +3,12 @@
     "name": "shualiu",
     "description": "自动托管刷流，将会提高对应站点的访问频率。（基于官方插件BrushFlow二次开发）",
     "labels": "站点,刷流,仪表板",
-    "version": "4.3.82",
+    "version": "4.3.83",
     "icon": "brush.jpg",
     "author": "jxxghp,InfinityPacer",
     "level": 2,
     "history": {
+      "v4.3.83": "修复自定义API认证：移除auth显式配置使用默认apikey校验，支持?apikey=参数访问",
       "v4.3.82": "修复自定义API端点认证：设置auth=None允许匿名访问，匹配?token=参数校验",
       "v4.3.81": "新增自定义API端点：/summary（本日/本月汇总）、/daily_compare（今昨对比）、/tasks（活跃任务列表）、/trend（24h趋势），支持外部程序通过REST API获取刷流数据",
       "v4.3.80": "修复数据看板交互和本月统计：移除无效上一月/下一月按钮，改为按月份/年份展开查看，并用每日统计纠正本月汇总数据",
