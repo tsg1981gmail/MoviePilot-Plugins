@@ -7976,9 +7976,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         """get_api 返回 4 个端点定义"""
         plugin = self._new_plugin({"enabled": False})
         api_list = plugin.get_api()
-        self.assertEqual(len(api_list), 4)
+        self.assertEqual(len(api_list), 5)
         paths = {ep["path"] for ep in api_list}
-        self.assertSetEqual(paths, {"/summary", "/daily_compare", "/tasks", "/trend"})
+        self.assertSetEqual(paths, {"/summary", "/daily_compare", "/tasks", "/trend", "/qb_tasks"})
         for ep in api_list:
             self.assertIn("endpoint", ep)
             self.assertIn("methods", ep)
