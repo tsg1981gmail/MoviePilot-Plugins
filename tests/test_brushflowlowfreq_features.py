@@ -7956,5 +7956,433 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIn("暂无本月数据", page_text)
 
 
+    # ── get_api / custom API endpoints ──────────────────────────────
+
+    @staticmethod
+    def _run_async(coro):
+        """兼容 Python 3.10+ 的 async 执行辅助"""
+        import asyncio
+        try:
+            return asyncio.run(coro)
+        except RuntimeError:
+            # 已有运行的 event loop
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+    def test_get_api_returns_four_endpoints(self):
+        """get_api 返回 4 个端点定义"""
+        plugin = self._new_plugin({"enabled": False})
+        api_list = plugin.get_api()
+        self.assertEqual(len(api_list), 4)
+        paths = {ep["path"] for ep in api_list}
+        self.assertSetEqual(paths, {"/summary", "/daily_compare", "/tasks", "/trend"})
+        for ep in api_list:
+            self.assertIn("endpoint", ep)
+            self.assertIn("methods", ep)
+            self.assertIn("GET", ep["methods"])
+
+    def test_get_api_endpoints_have_callable_handlers(self):
+        """所有 API 处理器都是可调用的"""
+        plugin = self._new_plugin({"enabled": False})
+        for ep in plugin.get_api():
+            self.assertTrue(callable(ep["endpoint"]),
+                            f"{ep['path']} 处理器不可调用")
+
+    def test_api_summary_no_data_returns_zeros(self):
+        """summary API 无历史数据时返回 0"""
+        plugin = self._new_plugin({"enabled": False})
+        self._attach_memory_store(plugin, {
+            "daily_statistic": {},
+            "monthly_statistic": {},
+        })
+        result = self._run_async(
+            plugin._BrushFlowLowFreq__api_summary(None)
+        )
+        self.assertEqual(result["today"]["uploaded"], 0)
+        self.assertEqual(result["today"]["downloaded"], 0)
+        self.assertEqual(result["month"]["uploaded"], 0)
+        self.assertEqual(result["month"]["downloaded"], 0)
+
+    def test_api_summary_returns_today_and_month_data(self):
+        """summary API 返回正确的本日/本月数据"""
+        plugin = self._new_plugin({"enabled": False})
+        try:
+            from datetime import datetime as _dt
+            import pytz as _pytz
+            now = _dt.now(tz=_pytz.timezone("Asia/Shanghai"))
+        except Exception:
+            now = __import__("datetime").datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        month = now.strftime("%Y-%m")
+
+        self._attach_memory_store(plugin, {
+            "daily_statistic": {
+                today: {"date": today, "uploaded": 1000, "downloaded": 500, "task_count": 5},
+            },
+            "monthly_statistic": {
+                month: {"date": month, "uploaded": 50000, "downloaded": 20000, "task_count": 100},
+            },
+        })
+        result = self._run_async(
+            plugin._BrushFlowLowFreq__api_summary(None)
+        )
+        self.assertEqual(result["today"]["uploaded"], 1000)
+        self.assertEqual(result["today"]["downloaded"], 500)
+        self.assertEqual(result["month"]["uploaded"], 50000)
+        self.assertEqual(result["month"]["downloaded"], 20000)
+
+    def test_api_daily_compare_no_data_returns_zeros(self):
+        """daily_compare API 无数据时返回 0"""
+        plugin = self._new_plugin({"enabled": False})
+        self._attach_memory_store(plugin, {"daily_statistic": {}})
+        result = self._run_async(
+            plugin._BrushFlowLowFreq__api_daily_compare(None)
+        )
+        self.assertEqual(result["today"]["uploaded"], 0)
+        self.assertEqual(result["yesterday"]["uploaded"], 0)
+
+    def test_api_daily_compare_returns_today_vs_yesterday(self):
+        """daily_compare API 返回本日与昨日对比"""
+        plugin = self._new_plugin({"enabled": False})
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            import pytz as _pytz
+            now = _dt.now(tz=_pytz.timezone("Asia/Shanghai"))
+        except Exception:
+            now = __import__("datetime").datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        yesterday = (now - __import__("datetime").timedelta(days=1)).strftime("%Y-%m-%d")
+
+        self._attach_memory_store(plugin, {
+            "daily_statistic": {
+                today: {"uploaded": 3000, "downloaded": 1000},
+                yesterday: {"uploaded": 2000, "downloaded": 800},
+            },
+        })
+        result = self._run_async(
+            plugin._BrushFlowLowFreq__api_daily_compare(None)
+        )
+        self.assertEqual(result["today"]["uploaded"], 3000)
+        self.assertEqual(result["today"]["downloaded"], 1000)
+        self.assertEqual(result["yesterday"]["uploaded"], 2000)
+        self.assertEqual(result["yesterday"]["downloaded"], 800)
+
+    def test_api_tasks_empty_returns_empty_list(self):
+        """tasks API 无任务时返回空列表"""
+        plugin = self._new_plugin({"enabled": False})
+        self._attach_memory_store(plugin, {"torrents": {}})
+        result = self._run_async(
+            plugin._BrushFlowLowFreq__api_tasks(None)
+        )
+        self.assertEqual(result["tasks"], [])
+
+    def test_api_tasks_filters_deleted_and_returns_active(self):
+        """tasks API 过滤已删除任务，仅返回活跃任务"""
+        plugin = self._new_plugin({"enabled": False})
+        self._attach_memory_store(plugin, {
+            "torrents": {
+                "hash1": {
+                    "title": "TestMovie2026",
+                    "site_name": "站点A",
+                    "size": 50000000000,
+                    "total_size": 50000000000,
+                    "uploaded": 42000000000,
+                    "downloaded": 35000000000,
+                    "ratio": 1.2,
+                    "deleted": False,
+                    "time": 1000000000.0,
+                },
+                "hash2": {
+                    "title": "DeletedMovie",
+                    "site_name": "站点B",
+                    "size": 10000000000,
+                    "uploaded": 0,
+                    "downloaded": 0,
+                    "ratio": 0,
+                    "deleted": True,
+                    "time": 1000000000.0,
+                },
+            },
+        })
+        result = self._run_async(
+            plugin._BrushFlowLowFreq__api_tasks(None)
+        )
+        self.assertEqual(len(result["tasks"]), 1)
+        self.assertIn("TestMovie", result["tasks"][0]["name"])
+        self.assertEqual(result["tasks"][0]["site"], "站点A")
+        self.assertEqual(result["tasks"][0]["size"], 50000000000)
+        self.assertEqual(result["tasks"][0]["progress"], 0.7)  # 35G/50G
+
+    def test_api_tasks_truncates_name_to_12_chars(self):
+        """tasks API 种子名超过12个字符时截断并加..."""
+        plugin = self._new_plugin({"enabled": False})
+        self._attach_memory_store(plugin, {
+            "torrents": {
+                "hash1": {
+                    "title": "VeryLongMovieTitle2026BluRay",
+                    "site_name": "站点",
+                    "size": 10000000000,
+                    "uploaded": 5000000000,
+                    "downloaded": 5000000000,
+                    "ratio": 1.0,
+                    "deleted": False,
+                    "time": 1000000000.0,
+                },
+            },
+        })
+        result = self._run_async(
+            plugin._BrushFlowLowFreq__api_tasks(None)
+        )
+        name = result["tasks"][0]["name"]
+        self.assertLessEqual(len(name), 15)  # 12 + "..."
+        self.assertTrue(name.endswith("..."))
+
+    def test_api_tasks_sorted_by_uploaded_desc(self):
+        """tasks API 按上传量降序排列"""
+        plugin = self._new_plugin({"enabled": False})
+        self._attach_memory_store(plugin, {
+            "torrents": {
+                "h1": {
+                    "title": "Small", "site_name": "S", "size": 10000000,
+                    "uploaded": 1000, "downloaded": 1000, "ratio": 0.1,
+                    "deleted": False, "time": 1000000000.0,
+                },
+                "h2": {
+                    "title": "Large", "site_name": "L", "size": 10000000,
+                    "uploaded": 999999, "downloaded": 1000, "ratio": 0.5,
+                    "deleted": False, "time": 1000000000.0,
+                },
+                "h3": {
+                    "title": "Medium", "site_name": "M", "size": 10000000,
+                    "uploaded": 50000, "downloaded": 1000, "ratio": 0.3,
+                    "deleted": False, "time": 1000000000.0,
+                },
+            },
+        })
+        result = self._run_async(
+            plugin._BrushFlowLowFreq__api_tasks(None)
+        )
+        uploads = [t["uploaded"] for t in result["tasks"]]
+        self.assertEqual(uploads, sorted(uploads, reverse=True))
+
+    def test_api_trend_no_data_returns_empty_zero_points(self):
+        """trend API 无数据时返回 25 个零值数据点"""
+        plugin = self._new_plugin({"enabled": False})
+        self._attach_memory_store(plugin, {"hourly_statistic": {}})
+        result = self._run_async(
+            plugin._BrushFlowLowFreq__api_trend(None)
+        )
+        self.assertEqual(len(result["points"]), 25)  # 24h + current
+        for p in result["points"]:
+            self.assertEqual(p["uploaded"], 0)
+            self.assertEqual(p["downloaded"], 0)
+
+    def test_api_trend_returns_stored_hourly_data(self):
+        """trend API 返回已存储的小时数据"""
+        plugin = self._new_plugin({"enabled": False})
+        try:
+            from datetime import datetime as _dt, timedelta as _td
+            import pytz as _pytz
+            now = _dt.now(tz=_pytz.timezone("Asia/Shanghai"))
+        except Exception:
+            now = __import__("datetime").datetime.now()
+
+        current_hour = now.strftime("%Y-%m-%d-%H")
+        self._attach_memory_store(plugin, {
+            "hourly_statistic": {
+                current_hour: {
+                    "date": current_hour,
+                    "uploaded": 5000,
+                    "downloaded": 2000,
+                    "updated_at": int(now.timestamp()),
+                },
+            },
+        })
+        result = self._run_async(
+            plugin._BrushFlowLowFreq__api_trend(None)
+        )
+        # 找到当前小时的数据点（time格式: "YYYY-MM-DDTHH:00:00"）
+        expected_time_prefix = f"{current_hour[:10]}T{current_hour[11:13]}:"
+        current_points = [p for p in result["points"] if p["time"].startswith(expected_time_prefix)]
+        self.assertGreaterEqual(len(current_points), 1,
+                               f"expect time prefix {expected_time_prefix}, got {[p['time'] for p in result['points']]}")
+        point = current_points[0]
+        self.assertEqual(point["uploaded"], 5000)
+        self.assertEqual(point["downloaded"], 2000)
+
+    # ── Hourly Statistics ──────────────────────────────────────────
+
+    def test_hourly_statistics_updates_baseline_on_first_pass(self):
+        """首次运行时设置每小时基线标记，不累计增量"""
+        plugin = self._new_plugin({"enabled": False})
+        store = self._attach_memory_store(plugin, {})
+
+        torrent_tasks = {
+            "hash1": {
+                "title": "test", "uploaded": 10000, "downloaded": 5000,
+                "deleted": False,
+                # 无 hourly_last_* 标记
+            },
+        }
+        plugin._BrushFlowLowFreq__update_hourly_statistics(torrent_tasks)
+
+        self.assertIn("hourly_statistic", store)
+        task = store["torrents"]["hash1"]
+        self.assertEqual(task["hourly_last_uploaded"], 10000)
+        self.assertEqual(task["hourly_last_downloaded"], 5000)
+
+    def test_hourly_statistics_accumulates_deltas(self):
+        """第二次运行时计算增量并累计到当前小时"""
+        plugin = self._new_plugin({"enabled": False})
+        now = __import__("datetime").datetime.now()
+        stat_hour = now.strftime("%Y-%m-%d-%H")
+        store = self._attach_memory_store(plugin, {})
+
+        torrent_tasks = {
+            "hash1": {
+                "title": "test",
+                "uploaded": 20000, "downloaded": 10000,
+                "deleted": False,
+                "hourly_last_uploaded": 10000,
+                "hourly_last_downloaded": 5000,
+                "hourly_last_hour": stat_hour,
+            },
+        }
+        plugin._BrushFlowLowFreq__update_hourly_statistics(
+            torrent_tasks, now=now
+        )
+
+        hour_record = store["hourly_statistic"].get(stat_hour)
+        self.assertIsNotNone(hour_record)
+        self.assertEqual(hour_record["uploaded"], 10000)
+        self.assertEqual(hour_record["downloaded"], 5000)
+
+    def test_hourly_statistics_ignores_negative_deltas(self):
+        """跳过异常的负增量（种子数据可能被重置）"""
+        plugin = self._new_plugin({"enabled": False})
+        now = __import__("datetime").datetime.now()
+        stat_hour = now.strftime("%Y-%m-%d-%H")
+        self._attach_memory_store(plugin, {})
+
+        torrent_tasks = {
+            "hash1": {
+                "title": "test",
+                "uploaded": 5000,  # 比之前少（异常）
+                "downloaded": 2000,
+                "deleted": False,
+                "hourly_last_uploaded": 10000,
+                "hourly_last_downloaded": 5000,
+                "hourly_last_hour": stat_hour,
+            },
+        }
+        plugin._BrushFlowLowFreq__update_hourly_statistics(
+            torrent_tasks, now=now
+        )
+
+        # 负增量被跳过，但仍然更新了基线
+        task = torrent_tasks["hash1"]
+        self.assertEqual(task["hourly_last_uploaded"], 5000)
+
+    def test_hourly_statistics_prunes_stale_data(self):
+        """清理超过48小时的旧数据"""
+        plugin = self._new_plugin({"enabled": False})
+        now = __import__("datetime").datetime.now()
+        stat_hour = now.strftime("%Y-%m-%d-%H")
+        old_ts = int(now.timestamp()) - 49 * 3600  # 49小时前
+
+        old_key = (now - __import__("datetime").timedelta(hours=49)).strftime("%Y-%m-%d-%H")
+        store = self._attach_memory_store(plugin, {
+            "hourly_statistic": {
+                old_key: {
+                    "date": old_key,
+                    "uploaded": 9999,
+                    "downloaded": 8888,
+                    "updated_at": old_ts,
+                },
+                stat_hour: {
+                    "date": stat_hour,
+                    "uploaded": 1000,
+                    "downloaded": 500,
+                    "updated_at": int(now.timestamp()),
+                },
+            },
+        })
+
+        torrent_tasks = {
+            "hash1": {
+                "title": "test",
+                "uploaded": 2000, "downloaded": 1000,
+                "deleted": False,
+                "hourly_last_uploaded": 1000,
+                "hourly_last_downloaded": 500,
+                "hourly_last_hour": stat_hour,
+            },
+        }
+        plugin._BrushFlowLowFreq__update_hourly_statistics(
+            torrent_tasks, now=now
+        )
+
+        hourly = store["hourly_statistic"]
+        self.assertNotIn(old_key, hourly)  # 旧数据被清理
+        self.assertIn(stat_hour, hourly)  # 当前数据保留
+
+    def test_hourly_statistics_handles_empty_tasks(self):
+        """空任务字典不会引发异常"""
+        plugin = self._new_plugin({"enabled": False})
+        self._attach_memory_store(plugin, {})
+        # 不应抛出异常
+        plugin._BrushFlowLowFreq__update_hourly_statistics({})
+        plugin._BrushFlowLowFreq__update_hourly_statistics(None)
+
+    def test_hourly_statistics_persists_independent_of_daily(self):
+        """小时统计与日统计使用独立的基线标记，互不影响"""
+        plugin = self._new_plugin({"enabled": False})
+        now = __import__("datetime").datetime.now()
+        stat_hour = now.strftime("%Y-%m-%d-%H")
+        store = self._attach_memory_store(plugin, {})
+
+        task = {
+            "title": "test",
+            "uploaded": 20000,
+            "downloaded": 10000,
+            "deleted": False,
+            # 日统计基线
+            "daily_stat_last_uploaded": 10000,
+            "daily_stat_last_downloaded": 5000,
+            "daily_stat_last_date": now.strftime("%Y-%m-%d"),
+            # 小时统计基线（独立）
+            "hourly_last_uploaded": 15000,
+            "hourly_last_downloaded": 7000,
+            "hourly_last_hour": stat_hour,
+        }
+        torrent_tasks = {"hash1": task}
+        plugin._BrushFlowLowFreq__update_hourly_statistics(
+            torrent_tasks, now=now
+        )
+
+        # 小时统计使用自己的基线计算增量（20000-15000=5000, 10000-7000=3000）
+        hour_record = store["hourly_statistic"].get(stat_hour)
+        self.assertIsNotNone(hour_record)
+        self.assertEqual(hour_record["uploaded"], 5000)
+        self.assertEqual(hour_record["downloaded"], 3000)
+
+        # 日统计基线不受影响
+        self.assertEqual(task["daily_stat_last_uploaded"], 10000)
+        self.assertEqual(task["daily_stat_last_downloaded"], 5000)
+
+    def test_get_api_unchanged_after_multiple_calls(self):
+        """get_api 多次调用返回一致结果"""
+        plugin = self._new_plugin({"enabled": False})
+        api1 = plugin.get_api()
+        api2 = plugin.get_api()
+        self.assertEqual(len(api1), len(api2))
+        for i, ep in enumerate(api1):
+            self.assertEqual(ep["path"], api2[i]["path"])
+            self.assertEqual(ep["methods"], api2[i]["methods"])
+
+
 if __name__ == "__main__":
     unittest.main()
