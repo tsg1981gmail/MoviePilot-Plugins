@@ -565,7 +565,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.87"
+    plugin_version = "4.3.88"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -1155,32 +1155,38 @@ class BrushFlowLowFreq(_PluginBase):
         """
         组装汇总元素
         """
-        # 统计数据
-        statistic_info = self.__get_statistic_info()
-        # 总上传量
-        total_uploaded = StringUtils.str_filesize(statistic_info.get("uploaded") or 0)
-        # 总下载量
-        total_downloaded = StringUtils.str_filesize(statistic_info.get("downloaded") or 0)
-        # 下载种子数
-        total_count = statistic_info.get("count") or 0
-        # 删除种子数
-        total_deleted = statistic_info.get("deleted") or 0
-        # 待归档种子数
-        total_unarchived = statistic_info.get("unarchived") or 0
-        # 活跃种子数
-        total_active = statistic_info.get("active") or 0
-        # 活跃上传量
-        total_active_uploaded = StringUtils.str_filesize(statistic_info.get("active_uploaded") or 0)
-        # 活跃下载量
-        total_active_downloaded = StringUtils.str_filesize(statistic_info.get("active_downloaded") or 0)
+        try:
+            now = datetime.now(tz=pytz.timezone(settings.TZ))
+        except Exception:
+            now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        month = now.strftime("%Y-%m")
+
+        daily = self.__get_daily_statistic_info()
+        monthly = self.__get_monthly_statistic_info()
+
+        today_record = daily.get(today, {})
+        yesterday_record = daily.get(yesterday, {})
+        month_record = monthly.get(month, {})
+
+        today_uploaded = StringUtils.str_filesize(
+            today_record.get("uploaded", 0) if isinstance(today_record, dict) else 0
+        )
+        yesterday_uploaded = StringUtils.str_filesize(
+            yesterday_record.get("uploaded", 0) if isinstance(yesterday_record, dict) else 0
+        )
+        month_uploaded = StringUtils.str_filesize(
+            month_record.get("uploaded", 0) if isinstance(month_record, dict) else 0
+        )
 
         return [
-            # 总上传量
+            # 本日上传量
             {
                 'component': 'VCol',
                 'props': {
                     'cols': 12,
-                    'md': 3,
+                    'md': 4,
                     'sm': 6
                 },
                 'content': [
@@ -1220,7 +1226,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                 'props': {
                                                     'class': 'text-caption'
                                                 },
-                                                'text': '总上传量 / 活跃'
+                                                'text': '本日上传量'
                                             },
                                             {
                                                 'component': 'div',
@@ -1233,7 +1239,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                         'props': {
                                                             'class': 'text-h6'
                                                         },
-                                                        'text': f"{total_uploaded} / {total_active_uploaded}"
+                                                        'text': today_uploaded
                                                     }
                                                 ]
                                             }
@@ -1245,12 +1251,12 @@ class BrushFlowLowFreq(_PluginBase):
                     },
                 ]
             },
-            # 总下载量
+            # 昨日上传量
             {
                 'component': 'VCol',
                 'props': {
                     'cols': 12,
-                    'md': 3,
+                    'md': 4,
                     'sm': 6
                 },
                 'content': [
@@ -1277,7 +1283,7 @@ class BrushFlowLowFreq(_PluginBase):
                                             {
                                                 'component': 'VImg',
                                                 'props': {
-                                                    'src': '/plugin_icon/download.png'
+                                                    'src': '/plugin_icon/upload.png'
                                                 }
                                             }
                                         ]
@@ -1290,7 +1296,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                 'props': {
                                                     'class': 'text-caption'
                                                 },
-                                                'text': '总下载量 / 活跃'
+                                                'text': '昨日上传量'
                                             },
                                             {
                                                 'component': 'div',
@@ -1303,7 +1309,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                         'props': {
                                                             'class': 'text-h6'
                                                         },
-                                                        'text': f"{total_downloaded} / {total_active_downloaded}"
+                                                        'text': yesterday_uploaded
                                                     }
                                                 ]
                                             }
@@ -1315,12 +1321,12 @@ class BrushFlowLowFreq(_PluginBase):
                     },
                 ]
             },
-            # 下载种子数
+            # 本月上传量
             {
                 'component': 'VCol',
                 'props': {
                     'cols': 12,
-                    'md': 3,
+                    'md': 4,
                     'sm': 6
                 },
                 'content': [
@@ -1347,7 +1353,7 @@ class BrushFlowLowFreq(_PluginBase):
                                             {
                                                 'component': 'VImg',
                                                 'props': {
-                                                    'src': '/plugin_icon/seed.png'
+                                                    'src': '/plugin_icon/upload.png'
                                                 }
                                             }
                                         ]
@@ -1360,7 +1366,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                 'props': {
                                                     'class': 'text-caption'
                                                 },
-                                                'text': '下载种子数 / 活跃'
+                                                'text': '本月上传量'
                                             },
                                             {
                                                 'component': 'div',
@@ -1373,7 +1379,7 @@ class BrushFlowLowFreq(_PluginBase):
                                                         'props': {
                                                             'class': 'text-h6'
                                                         },
-                                                        'text': f"{total_count} / {total_active}"
+                                                        'text': month_uploaded
                                                     }
                                                 ]
                                             }
@@ -1383,76 +1389,6 @@ class BrushFlowLowFreq(_PluginBase):
                             }
                         ]
                     },
-                ]
-            },
-            # 删除种子数
-            {
-                'component': 'VCol',
-                'props': {
-                    'cols': 12,
-                    'md': 3,
-                    'sm': 6
-                },
-                'content': [
-                    {
-                        'component': 'VCard',
-                        'props': {
-                            'variant': 'tonal',
-                        },
-                        'content': [
-                            {
-                                'component': 'VCardText',
-                                'props': {
-                                    'class': 'd-flex align-center',
-                                },
-                                'content': [
-                                    {
-                                        'component': 'VAvatar',
-                                        'props': {
-                                            'rounded': True,
-                                            'variant': 'text',
-                                            'class': 'me-3'
-                                        },
-                                        'content': [
-                                            {
-                                                'component': 'VImg',
-                                                'props': {
-                                                    'src': '/plugin_icon/delete.png'
-                                                }
-                                            }
-                                        ]
-                                    },
-                                    {
-                                        'component': 'div',
-                                        'content': [
-                                            {
-                                                'component': 'span',
-                                                'props': {
-                                                    'class': 'text-caption'
-                                                },
-                                                'text': '删除种子数 / 待归档'
-                                            },
-                                            {
-                                                'component': 'div',
-                                                'props': {
-                                                    'class': 'd-flex align-center flex-wrap'
-                                                },
-                                                'content': [
-                                                    {
-                                                        'component': 'span',
-                                                        'props': {
-                                                            'class': 'text-h6'
-                                                        },
-                                                        'text': f"{total_deleted} / {total_unarchived}"
-                                                    }
-                                                ]
-                                            }
-                                        ]
-                                    }
-                                ]
-                            }
-                        ]
-                    }
                 ]
             },
         ]
