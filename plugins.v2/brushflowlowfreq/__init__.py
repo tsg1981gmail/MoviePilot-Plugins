@@ -565,7 +565,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.88"
+    plugin_version = "4.3.89"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -5468,6 +5468,11 @@ class BrushFlowLowFreq(_PluginBase):
 
             skip_threshold = self.__non_negative_int(
                 getattr(brush_config, "upload_protection_skip_when_downloading_le", 0), 0
+            )
+            logger.info(
+                f"[DEBUG小池例外] torrent={torrent_task.get('title', '')[:40]}，"
+                f"skip_threshold={skip_threshold}，downloading_count={downloading_count}，"
+                f"check={skip_threshold > 0 and downloading_count <= skip_threshold}"
             )
             if skip_threshold > 0 and downloading_count <= skip_threshold:
                 self.__release_upload_protection_for_small_pool(
