@@ -8442,6 +8442,136 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             self.assertEqual(ep["path"], api2[i]["path"])
             self.assertEqual(ep["methods"], api2[i]["methods"])
 
+    def test_multi_downloader_profile_parsing_and_routing(self):
+        """多下载器配置只从可视化字段解析，并按大小路由到对应下载器"""
+        module = self.module
+        qb_prefix = module.BrushConfig.downloader_profile_key("QB-1")
+        tr_prefix = module.BrushConfig.downloader_profile_key("TR-1")
+        config = {
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+            f"{qb_prefix}_enabled": True,
+            f"{qb_prefix}_size_min_gb": "0",
+            f"{qb_prefix}_size_max_gb": "20",
+            f"{qb_prefix}_maxdlcount": "3",
+            f"{tr_prefix}_enabled": True,
+            f"{tr_prefix}_size_min_gb": "20",
+            f"{tr_prefix}_maxdlcount": "4",
+            f"{tr_prefix}_dl_speed": "2048",
+        }
+        plugin = self._new_plugin(config)
+
+        class Cfg:
+            name = ""
+
+        qb_cfg = Cfg()
+        qb_cfg.name = "QB-1"
+        tr_cfg = Cfg()
+        tr_cfg.name = "TR-1"
+        plugin.downloader_helper = SimpleNamespace(
+            get_configs=lambda: {"QB-1": qb_cfg, "TR-1": tr_cfg}
+        )
+
+        self.assertEqual(
+            plugin._BrushFlowLowFreq__resolve_downloader_for_size(10 * 1024 ** 3),
+            "QB-1",
+        )
+        self.assertEqual(
+            plugin._BrushFlowLowFreq__resolve_downloader_for_size(20 * 1024 ** 3),
+            "TR-1",
+        )
+        self.assertEqual(
+            plugin._BrushFlowLowFreq__resolve_downloader_for_size(200 * 1024 ** 3),
+            "TR-1",
+        )
+        self.assertEqual(plugin._brush_config.downloader_profiles["QB-1"]["maxdlcount"], 3)
+        self.assertEqual(plugin._brush_config.downloader_profiles["TR-1"]["dl_speed"], 2048)
+
+    def test_multi_downloader_disabled_keeps_original_downloader(self):
+        """默认关闭时，即使配置了大小规则也不改变原下载器"""
+        module = self.module
+        prefix = module.BrushConfig.downloader_profile_key("TR-1")
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": False,
+            f"{prefix}_enabled": True,
+            f"{prefix}_size_min_gb": "0",
+        })
+
+        class Cfg:
+            name = ""
+
+        cfg = Cfg()
+        cfg.name = "TR-1"
+        plugin.downloader_helper = SimpleNamespace(get_configs=lambda: {"TR-1": cfg})
+        self.assertEqual(
+            plugin._BrushFlowLowFreq__resolve_downloader_for_size(50 * 1024 ** 3),
+            "QB-1",
+        )
+
+    def test_multi_downloader_form_is_visual(self):
+        """下载器分配页使用可视化控件，不新增JSON编辑器"""
+        plugin = self.module.BrushFlowLowFreq()
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+
+        class Cfg:
+            name = ""
+
+        qb_cfg = Cfg()
+        qb_cfg.name = "QB-1"
+        tr_cfg = Cfg()
+        tr_cfg.name = "TR-1"
+        plugin.downloader_helper = SimpleNamespace(get_configs=lambda: {"QB-1": qb_cfg, "TR-1": tr_cfg})
+        form, defaults = plugin.get_form()
+        form_text = str(form)
+        self.assertIn("下载器分配", form_text)
+        self.assertIn("启用该下载器参与大小分配", form_text)
+        self.assertTrue(any(key.startswith("dlcfg_") and key.endswith("_enabled") for key in defaults))
+        self.assertFalse(defaults["multi_downloader_enabled"])
+
+    def test_multi_downloader_check_groups_tasks_by_downloader(self):
+        """多下载器检查按任务记录的下载器名称分组，旧任务归默认下载器"""
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+            "notify": False,
+        })
+        store = self._attach_memory_store(plugin, {
+            "torrents": {
+                "hash1": {"deleted": False, "downloader": "QB-1"},
+                "hash2": {"deleted": False, "downloader": "TR-1"},
+                "hash3": {"deleted": False},
+            }
+        })
+        calls = []
+        plugin.check = lambda **kwargs: calls.append((
+            kwargs.get("downloader_name"),
+            set(kwargs.get("group_hashes") or []),
+        ))
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin._BrushFlowLowFreq__configured_downloader_names = lambda: ["QB-1", "TR-1"]
+
+        class FakeDownloader:
+            def is_inactive(self):
+                return False
+
+        class FakeHelper:
+            def get_service(self, name):
+                return SimpleNamespace(name=name, instance=FakeDownloader())
+
+            def is_downloader(self, name, service=None):
+                return name == "qbittorrent"
+
+        plugin.downloader_helper = FakeHelper()
+        plugin._BrushFlowLowFreq__check_multi_downloaders()
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][0], "QB-1")
+        self.assertEqual(calls[0][1], {"hash1", "hash3"})
+        self.assertEqual(calls[1][0], "TR-1")
+        self.assertEqual(calls[1][1], {"hash2"})
+        self.assertIsNone(plugin._active_downloader_name)
+
 
 if __name__ == "__main__":
     unittest.main()

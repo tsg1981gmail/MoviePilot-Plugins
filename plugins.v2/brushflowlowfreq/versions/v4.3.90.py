@@ -44,20 +44,6 @@ class BrushConfig:
     刷流配置
     """
 
-    DOWNLOADER_PROFILE_FIELDS = (
-        "enabled",
-        "size_min_gb",
-        "size_max_gb",
-        "maxdlcount",
-        "maxupspeed",
-        "maxdlspeed",
-        "disksize",
-        "up_speed",
-        "dl_speed",
-        "save_path",
-        "qb_category",
-    )
-
     def __init__(self, config: dict, process_site_config=True):
         self.enabled = config.get("enabled", False)
         self.notify = config.get("notify", True)
@@ -252,13 +238,6 @@ class BrushConfig:
         self.yield_guard_rehearsal = config.get("yield_guard_rehearsal", True)
         self.yield_guard_detail_log = config.get("yield_guard_detail_log", False)
         self.log_mode = self.__normalize_log_mode(config.get("log_mode", "full"))
-        self.multi_downloader_enabled = bool(config.get("multi_downloader_enabled", False))
-        self.downloader_profiles = self.__parse_downloader_profiles(config)
-        self._downloader_profile_raw = {
-            key: config.get(key)
-            for key in (config or {})
-            if key.startswith("dlcfg_") or key == "multi_downloader_enabled"
-        }
 
         self.brush_tag = "刷流"
         # 站点独立配置
@@ -272,54 +251,6 @@ class BrushConfig:
                 self.__initialize_site_config()
             elif not self.site_config:
                 self.site_config = self.get_demo_site_config()
-
-    @staticmethod
-    def downloader_profile_key(name: str) -> str:
-        """生成下载器分组控件使用的内部扁平字段前缀。"""
-        if not name:
-            return ""
-        encoded = base64.urlsafe_b64encode(str(name).encode("utf-8")).decode("ascii").rstrip("=")
-        return f"dlcfg_{encoded}"
-
-    @classmethod
-    def downloader_profile_name_from_key(cls, config_key: str) -> Optional[str]:
-        """从内部扁平字段前缀还原下载器名称。"""
-        prefix = "dlcfg_"
-        if not str(config_key or "").startswith(prefix):
-            return None
-        encoded = str(config_key)[len(prefix):].split("_", 1)[0]
-        if not encoded:
-            return None
-        try:
-            padding = "=" * (-len(encoded) % 4)
-            return base64.urlsafe_b64decode((encoded + padding).encode("ascii")).decode("utf-8")
-        except Exception:
-            return None
-
-    @classmethod
-    def __parse_downloader_profiles(cls, config: Optional[dict]) -> Dict[str, dict]:
-        profiles: Dict[str, dict] = {}
-        prefix = "dlcfg_"
-        for config_key, value in (config or {}).items():
-            name = cls.downloader_profile_name_from_key(config_key)
-            if not name or not str(config_key).startswith(prefix):
-                continue
-            encoded, separator, field = str(config_key)[len(prefix):].partition("_")
-            if not separator or not encoded or not field:
-                continue
-            if field not in cls.DOWNLOADER_PROFILE_FIELDS:
-                continue
-            profile = profiles.setdefault(name, {})
-            if field == "enabled":
-                profile[field] = bool(value)
-            elif field in {"save_path", "qb_category"}:
-                profile[field] = "" if value in (None, "") else str(value)
-            else:
-                try:
-                    profile[field] = "" if value in (None, "") else cls.__parse_number(value)
-                except Exception:
-                    profile[field] = "" if value in (None, "") else value
-        return profiles
 
     def __initialize_site_config(self):
         if not self.site_config:
@@ -634,7 +565,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.91"
+    plugin_version = "4.3.90"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -658,8 +589,6 @@ class BrushFlowLowFreq(_PluginBase):
     _task_brush_enable = False
     # 下载器类型缓存
     _is_qb = False
-    # 多下载器模式下当前正在操作的下载器名称（仅在锁内使用）
-    _active_downloader_name = None
     # 订阅缓存信息
     _subscribe_infos = None
     # Brush定时
@@ -780,7 +709,6 @@ class BrushFlowLowFreq(_PluginBase):
         self.downloader_helper = DownloaderHelper()
         self._task_brush_enable = False
         self._is_qb = False
-        self._active_downloader_name = None
 
         if not config:
             logger.info("站点刷流任务出错，无法获取插件配置")
@@ -909,8 +837,7 @@ class BrushFlowLowFreq(_PluginBase):
         服务信息
         """
         brush_config = self.__get_brush_config()
-        downloader_name = self._active_downloader_name or brush_config.downloader
-        service = self.downloader_helper.get_service(name=downloader_name)
+        service = self.downloader_helper.get_service(name=brush_config.downloader)
         if not service:
             self.__log_and_notify_error("站点刷流任务出错，获取下载器实例失败，请检查配置")
             return None
@@ -928,90 +855,6 @@ class BrushFlowLowFreq(_PluginBase):
         下载器实例
         """
         return self.service_info.instance if self.service_info else None
-
-    def __configured_downloader_names(self) -> List[str]:
-        try:
-            configs = getattr(self.downloader_helper, "get_configs", lambda: {})().values() or []
-            return [str(config.name) for config in configs if getattr(config, "name", None)]
-        except Exception:
-            return []
-
-    def __get_downloader_profile(self, name: str) -> Dict[str, Any]:
-        if not name:
-            return {}
-        brush_config = getattr(self, "_brush_config", None)
-        profiles = getattr(brush_config, "downloader_profiles", None) or {}
-        return profiles.get(str(name), {}) or {}
-
-    def __resolve_downloader_for_size(self, torrent_size: Any) -> Optional[str]:
-        """按大小规则解析目标下载器，规则为空或未启用时回退默认下载器。"""
-        brush_config = self.__get_brush_config()
-        default_name = brush_config.downloader
-        if not brush_config.multi_downloader_enabled:
-            return default_name
-        try:
-            size_gb = float(torrent_size or 0) / 1024 ** 3
-        except (TypeError, ValueError):
-            return default_name
-
-        for name in self.__configured_downloader_names():
-            profile = self.__get_downloader_profile(name)
-            if not profile.get("enabled"):
-                continue
-            min_gb = profile.get("size_min_gb")
-            max_gb = profile.get("size_max_gb")
-            if min_gb in (None, "") and max_gb in (None, ""):
-                continue
-            try:
-                if min_gb not in (None, "") and size_gb < float(min_gb):
-                    continue
-                if max_gb not in (None, "") and size_gb >= float(max_gb):
-                    continue
-            except (TypeError, ValueError):
-                continue
-            return name
-        return default_name
-
-    def __build_downloader_profile_config(self, name: str, sitename: str = None) -> Optional[BrushConfig]:
-        """生成带下载器独立参数的有效刷流配置，空白项沿用原默认下载器配置。"""
-        if not name:
-            return None
-        base_config = self.__get_brush_config(sitename=sitename)
-        if not base_config:
-            return None
-        profile = self.__get_downloader_profile(name)
-        config_data = {
-            key: value
-            for key, value in vars(base_config).items()
-            if key not in {
-                "group_site_configs",
-                "site_config",
-                "downloader_profiles",
-                "_downloader_profile_raw",
-            }
-        }
-        for field in BrushConfig.DOWNLOADER_PROFILE_FIELDS:
-            value = profile.get(field)
-            if value not in (None, ""):
-                config_data[field] = value
-        config_data["downloader"] = name
-        try:
-            return BrushConfig(config=config_data, process_site_config=False)
-        except Exception as err:
-            logger.error(f"生成下载器 {name} 的有效配置失败：{err}")
-            return None
-
-    def __get_downloader_seeding_size(self, downloader_name: str) -> float:
-        default_name = self.__get_brush_config().downloader
-        torrent_tasks = self.get_data("torrents") or {}
-        total_size = 0
-        for task in torrent_tasks.values():
-            if not isinstance(task, dict) or task.get("deleted"):
-                continue
-            if (task.get("downloader") or default_name) != downloader_name:
-                continue
-            total_size += float(task.get("total_size") or task.get("size") or 0)
-        return total_size
 
     def get_state(self) -> bool:
         brush_config = self.__get_brush_config()
@@ -1147,7 +990,6 @@ class BrushFlowLowFreq(_PluginBase):
             tasks.append({
                 "name": title,
                 "site": task.get("site_name", ""),
-                "downloader": task.get("downloader", ""),
                 "size": size,
                 "avg_upspeed": int(current_upspeed),
                 "uploaded": uploaded,
@@ -1198,7 +1040,6 @@ class BrushFlowLowFreq(_PluginBase):
 
             item = {
                 "name": title,
-                "downloader": self._active_downloader_name or "",
                 "size": total_size,
                 "progress": progress,
                 "dlspeed": dlspeed,
@@ -3387,7 +3228,6 @@ class BrushFlowLowFreq(_PluginBase):
                                                                 'label': '切换插件版本',
                                                                 'items': [
                                                                     {'title': '当前版本（最新）', 'value': 'current'},
-                                                                    {'title': 'v4.3.90（多下载器功能前）', 'value': 'v4.3.90'},
                                                                     {'title': 'v4.3.55（完整版-含收益保护）', 'value': 'v4.3.55'},
                                                                 ],
                                                                 'hint': '选择版本并保存后自动切换，重启 MP 生效'
@@ -3672,7 +3512,6 @@ class BrushFlowLowFreq(_PluginBase):
             "enable_site_config": False,
             "site_config": BrushConfig.get_demo_site_config()
         }
-        self.__prepare_multi_downloader_form(form=form, defaults=defaults)
         self.__prepare_upload_protection_form(form=form, defaults=defaults)
         return form, defaults
 
@@ -3759,154 +3598,6 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_relax_download_limit_kbs",
             "yield_guard_half_open_download_limit_kbs",
             "yield_guard_promising_pubtime_minutes",
-        }
-
-    def __prepare_multi_downloader_form(self, form: List[dict], defaults: Dict[str, Any]) -> None:
-        """插入可视化的多下载器大小分配标签页，不暴露JSON配置。"""
-        defaults["multi_downloader_enabled"] = False
-        configs = list(getattr(self.downloader_helper, "get_configs", lambda: {})().values() or [])
-        for config in configs:
-            name = getattr(config, "name", None)
-            if not name:
-                continue
-            prefix = BrushConfig.downloader_profile_key(str(name))
-            defaults[f"{prefix}_enabled"] = False
-            for field in BrushConfig.DOWNLOADER_PROFILE_FIELDS:
-                if field == "enabled":
-                    continue
-                defaults[f"{prefix}_{field}"] = ""
-
-        if not configs:
-            return
-
-        form_content = (form[0].get("content") or []) if form else []
-        tabs = self.__find_component(form_content, "VTabs")
-        window = self.__find_component(form_content, "VWindow")
-        if not tabs or not window:
-            return
-
-        tab_content = tabs.setdefault("content", [])
-        if not any(tab.get("props", {}).get("value") == "downloader_tab" for tab in tab_content):
-            insert_index = self.__find_tab_insert_index(tab_content, before_value="download_tab")
-            tab_content.insert(insert_index, {
-                "component": "VTab",
-                "props": {"value": "downloader_tab"},
-                "text": "下载器分配"
-            })
-
-        window_content = window.setdefault("content", [])
-        if not any(item.get("props", {}).get("value") == "downloader_tab" for item in window_content):
-            insert_index = self.__find_tab_insert_index(window_content, before_value="download_tab")
-            window_content.insert(insert_index, self.__build_multi_downloader_tab(configs=configs))
-
-    def __build_multi_downloader_tab(self, configs: list) -> dict:
-        def section_label(text: str) -> dict:
-            return {
-                "component": "VCol",
-                "props": {"cols": 12},
-                "content": [{
-                    "component": "div",
-                    "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"},
-                    "text": text
-                }]
-            }
-
-        def switch(model: str, label: str) -> dict:
-            return {
-                "component": "VCol",
-                "props": {"cols": 12, "md": 4},
-                "content": [{
-                    "component": "VSwitch",
-                    "props": {"model": model, "label": label}
-                }]
-            }
-
-        def number_field(model: str, label: str, placeholder: str = "") -> dict:
-            return {
-                "component": "VCol",
-                "props": {"cols": 12, "md": 3},
-                "content": [{
-                    "component": "VTextField",
-                    "props": {
-                        "model": model,
-                        "label": label,
-                        "placeholder": placeholder,
-                        "type": "number",
-                        "min": "0"
-                    }
-                }]
-            }
-
-        def text_field(model: str, label: str, placeholder: str = "") -> dict:
-            return {
-                "component": "VCol",
-                "props": {"cols": 12, "md": 6},
-                "content": [{
-                    "component": "VTextField",
-                    "props": {
-                        "model": model,
-                        "label": label,
-                        "placeholder": placeholder
-                    }
-                }]
-            }
-
-        content = []
-        for config in configs:
-            name = str(getattr(config, "name", "") or "")
-            if not name:
-                continue
-            prefix = BrushConfig.downloader_profile_key(name)
-            content.extend([
-                {
-                    "component": "VRow",
-                    "props": {"style": {"margin-top": "8px"}},
-                    "content": [section_label(f"下载器：{name}")]
-                },
-                {
-                    "component": "VRow",
-                    "content": [
-                        switch(f"{prefix}_enabled", "启用该下载器参与大小分配"),
-                        number_field(f"{prefix}_size_min_gb", "最小大小（GB）", "留空不限制下限"),
-                        number_field(f"{prefix}_size_max_gb", "最大大小（GB）", "留空不限制上限"),
-                    ]
-                },
-                {
-                    "component": "VRow",
-                    "content": [
-                        number_field(f"{prefix}_maxdlcount", "最大同时下载数", "留空沿用默认；0不限制"),
-                        number_field(f"{prefix}_maxupspeed", "总上传带宽上限（KB/s）", "留空沿用默认；0不限制"),
-                        number_field(f"{prefix}_maxdlspeed", "总下载带宽上限（KB/s）", "留空沿用默认；0不限制"),
-                    ]
-                },
-                {
-                    "component": "VRow",
-                    "content": [
-                        number_field(f"{prefix}_disksize", "保种体积（GB）", "留空沿用默认；0不限制"),
-                        number_field(f"{prefix}_up_speed", "单任务上传限速（KB/s）", "留空沿用默认；0不限制"),
-                        number_field(f"{prefix}_dl_speed", "单任务下载限速（KB/s）", "留空沿用默认；0不限制"),
-                    ]
-                },
-                {
-                    "component": "VRow",
-                    "content": [
-                        text_field(f"{prefix}_save_path", "保存目录", "留空使用默认下载器设置"),
-                        text_field(f"{prefix}_qb_category", "种子分类", "仅qBittorrent，需提前创建"),
-                    ]
-                },
-            ])
-
-        content.insert(0, {
-            "component": "VRow",
-            "content": [
-                section_label("按大小分配下载器"),
-                switch("multi_downloader_enabled", "启用多下载器大小分配")
-            ]
-        })
-        return {
-            "component": "VWindowItem",
-            "props": {"value": "downloader_tab"},
-            "content": content
         }
 
     def __prepare_upload_protection_form(self, form: List[dict], defaults: Dict[str, Any]) -> None:
@@ -4643,48 +4334,6 @@ class BrushFlowLowFreq(_PluginBase):
 
     # region Brush
 
-    def __brush_multi(self) -> None:
-        """多下载器模式：同一轮刷流按种子大小派发到不同下载器。"""
-        if not self.__check_and_resolve_plugin_conflict():
-            return
-        brush_config = self.__get_brush_config()
-        if not brush_config.brushsites or not brush_config.downloader:
-            return
-        if not self.__is_current_time_in_range():
-            self.__log_status("当前不在指定的刷流时间区间内，刷流操作将暂时暂停")
-            return
-
-        with lock:
-            self.__log_status("开始执行多下载器刷流任务 ...")
-            torrent_tasks: Dict[str, dict] = self.get_data("torrents") or {}
-            self.__normalize_task_hash_keys(torrent_tasks)
-            statistic_info = self.__get_statistic_info()
-
-            site_infos = []
-            for siteid in brush_config.brushsites:
-                siteinfo = self.site_oper.get(siteid)
-                if siteinfo:
-                    site_infos.append(siteinfo)
-            if not brush_config.brush_sequential:
-                random.shuffle(site_infos)
-
-            self.__log_status(f"即将针对站点 {', '.join(site.name for site in site_infos)} 开始多下载器刷流")
-            subscribe_titles = self.__get_subscribe_titles()
-
-            for site in site_infos:
-                if not self.__brush_site_torrents(siteid=site.id, torrent_tasks=torrent_tasks,
-                                                  statistic_info=statistic_info,
-                                                  subscribe_titles=subscribe_titles,
-                                                  multi=True):
-                    self.__log_status(f"站点 {site.name} 刷流中途结束，停止后续刷流")
-                    break
-                else:
-                    self.__log_status(f"站点 {site.name} 刷流完成")
-
-            self.save_data("torrents", torrent_tasks)
-            self.save_data("statistic", statistic_info)
-            self.__log_status("多下载器刷流任务执行完成")
-
     def brush(self):
         """
         定时刷流，添加下载任务
@@ -4693,10 +4342,6 @@ class BrushFlowLowFreq(_PluginBase):
             return
 
         brush_config = self.__get_brush_config()
-
-        if brush_config.multi_downloader_enabled:
-            self.__brush_multi()
-            return
 
         if not brush_config.brushsites or not brush_config.downloader or not self.downloader:
             return
@@ -4762,7 +4407,7 @@ class BrushFlowLowFreq(_PluginBase):
             self.__log_status("刷流任务执行完成")
 
     def __brush_site_torrents(self, siteid, torrent_tasks: Dict[str, dict], statistic_info: Dict[str, int],
-                              subscribe_titles: Set[str], multi: bool = False) -> bool:
+                              subscribe_titles: Set[str]) -> bool:
         """
         针对站点进行刷流
         """
@@ -4818,50 +4463,23 @@ class BrushFlowLowFreq(_PluginBase):
 
         # 过滤种子
         for torrent in torrents:
-            downloader_name = None
-            if multi:
-                downloader_name = self.__resolve_downloader_for_size(torrent.size)
-                profile_config = self.__build_downloader_profile_config(
-                    name=downloader_name,
-                    sitename=siteinfo.name
-                )
-                if not profile_config:
-                    continue
-                previous_name = self._active_downloader_name
-                self._active_downloader_name = downloader_name
-                try:
-                    if not self.downloader:
-                        continue
-                    add_pre_passed, add_pre_reason = self.__evaluate_downloader_add_preconditions(
-                        profile_config=profile_config,
-                        downloader_name=downloader_name,
-                        add_torrent_size=torrent.size
-                    )
-                    self.__log_brush_conditions(passed=add_pre_passed, reason=add_pre_reason, torrent=torrent)
-                    if not add_pre_passed:
-                        continue
-                finally:
-                    self._active_downloader_name = previous_name
-            else:
-                # 判断能否通过刷流前置条件
-                pre_condition_passed, reason = self.__evaluate_pre_conditions_for_brush(
-                    sitename=siteinfo.name,
-                    include_network_conditions=False
-                )
-                self.__log_brush_conditions(passed=pre_condition_passed, reason=reason)
-                if not pre_condition_passed:
-                    return False
-
-                # 判断能否通过保种体积刷流条件
-                size_condition_passed, reason = self.__evaluate_size_condition_for_brush(
-                    torrents_size=torrents_size,
-                    add_torrent_size=torrent.size
-                )
-                self.__log_brush_conditions(passed=size_condition_passed, reason=reason, torrent=torrent)
-                if not size_condition_passed:
-                    continue
+            # 判断能否通过刷流前置条件
+            pre_condition_passed, reason = self.__evaluate_pre_conditions_for_brush(
+                sitename=siteinfo.name,
+                include_network_conditions=False
+            )
+            self.__log_brush_conditions(passed=pre_condition_passed, reason=reason)
+            if not pre_condition_passed:
+                return False
 
             logger.debug(f"种子详情：{torrent}")
+
+            # 判断能否通过保种体积刷流条件
+            size_condition_passed, reason = self.__evaluate_size_condition_for_brush(torrents_size=torrents_size,
+                                                                                     add_torrent_size=torrent.size)
+            self.__log_brush_conditions(passed=size_condition_passed, reason=reason, torrent=torrent)
+            if not size_condition_passed:
+                continue
 
             # 判断能否通过刷流条件
             condition_passed, reason = self.__evaluate_conditions_for_brush(torrent=torrent,
@@ -4871,15 +4489,7 @@ class BrushFlowLowFreq(_PluginBase):
                 continue
 
             # 添加下载任务
-            if multi and downloader_name:
-                previous_name = self._active_downloader_name
-                self._active_downloader_name = downloader_name
-                try:
-                    hash_string = self.__download(torrent=torrent, brush_config=profile_config)
-                finally:
-                    self._active_downloader_name = previous_name
-            else:
-                hash_string = self.__download(torrent=torrent)
+            hash_string = self.__download(torrent=torrent)
             if not hash_string:
                 logger.warning(f"{torrent.title} 添加刷流任务失败！")
                 continue
@@ -4940,8 +4550,6 @@ class BrushFlowLowFreq(_PluginBase):
                 "deleted": False,
                 "time": time.time()
             }
-            if multi and downloader_name:
-                torrent_task["downloader"] = downloader_name
             cached_remaining = self.__cache_free_expire_from_task_fields(torrent_task=torrent_task, source="list")
             if cached_remaining is None:
                 self.__cache_free_expire_from_detail_once(torrent_task=torrent_task, source="detail")
@@ -4951,7 +4559,7 @@ class BrushFlowLowFreq(_PluginBase):
                 "event_name": "brushflow_download_added",
                 "hash": hash_string,
                 "data": torrent_task,
-                "downloader": downloader_name or self.service_info.name
+                "downloader": self.service_info.name
             })
             torrent_tasks[hash_string] = torrent_task
 
@@ -5048,47 +4656,6 @@ class BrushFlowLowFreq(_PluginBase):
                 reason = message(config_value)
                 return False, reason
 
-        return True, None
-
-    def __evaluate_downloader_add_preconditions(self, profile_config: BrushConfig,
-                                                downloader_name: str,
-                                                add_torrent_size: float = 0.0) -> Tuple[bool, Optional[str]]:
-        """多下载器模式下按目标下载器独立额度判断是否允许新增任务。"""
-        maxdlcount = getattr(profile_config, "maxdlcount", None)
-        if maxdlcount:
-            current_count = self.__get_downloading_count()
-            if current_count >= int(maxdlcount):
-                return False, (
-                    f"下载器 {downloader_name} 当前同时下载任务数 {current_count} "
-                    f"已达到最大值 {int(maxdlcount)}，暂时停止新增任务"
-                )
-
-        maxupspeed = getattr(profile_config, "maxupspeed", None)
-        maxdlspeed = getattr(profile_config, "maxdlspeed", None)
-        if maxupspeed or maxdlspeed:
-            avg_upload_speed, avg_download_speed = self.__get_average_bandwidth(sample_count=1, interval=0)
-            if maxupspeed and avg_upload_speed is not None and avg_upload_speed >= float(maxupspeed) * 1024:
-                return False, (
-                    f"下载器 {downloader_name} 当前总上传带宽 "
-                    f"{StringUtils.str_filesize(avg_upload_speed)}，"
-                    f"已达到独立上限 {maxupspeed} KB/s，暂时停止新增任务"
-                )
-            if maxdlspeed and avg_download_speed is not None and avg_download_speed >= float(maxdlspeed) * 1024:
-                return False, (
-                    f"下载器 {downloader_name} 当前总下载带宽 "
-                    f"{StringUtils.str_filesize(avg_download_speed)}，"
-                    f"已达到独立上限 {maxdlspeed} KB/s，暂时停止新增任务"
-                )
-
-        disksize = getattr(profile_config, "disksize", None)
-        if disksize:
-            current_size = self.__get_downloader_seeding_size(downloader_name)
-            if current_size + float(add_torrent_size or 0) > float(disksize) * 1024 ** 3:
-                return False, (
-                    f"下载器 {downloader_name} 预计做种体积 "
-                    f"{self.__bytes_to_gb(current_size + float(add_torrent_size or 0)):.1f} GB，"
-                    f"超过独立保种体积 {disksize} GB，暂时停止新增任务"
-                )
         return True, None
 
     def __evaluate_yield_guard_brush_pre_condition(self, brush_config: BrushConfig,
@@ -5518,48 +5085,7 @@ class BrushFlowLowFreq(_PluginBase):
 
     # region Check
 
-    def __check_multi_downloaders(self) -> None:
-        """按任务所属下载器分组执行检查，保持原单下载器代码路径不变。"""
-        if not self.__check_and_resolve_plugin_conflict():
-            return
-        brush_config = self.__get_brush_config()
-        default_name = brush_config.downloader
-        if not default_name:
-            return
-        with lock:
-            torrent_tasks: Dict[str, dict] = self.get_data("torrents") or {}
-            self.__normalize_task_hash_keys(torrent_tasks)
-            groups: Dict[str, list] = {}
-            for torrent_hash, task in torrent_tasks.items():
-                if not isinstance(task, dict) or task.get("deleted"):
-                    continue
-                downloader_name = task.get("downloader") or default_name
-                if not downloader_name:
-                    continue
-                groups.setdefault(str(downloader_name), []).append(torrent_hash)
-
-            configured_names = self.__configured_downloader_names()
-            enabled_profile_names = [
-                name for name in configured_names
-                if self.__get_downloader_profile(name).get("enabled")
-            ]
-            if not enabled_profile_names and not groups:
-                self.__log_status("没有需要检查的多下载器刷流任务")
-                return
-
-            check_names = list(dict.fromkeys(enabled_profile_names + list(groups.keys())))
-            for downloader_name in check_names:
-                torrent_hashes = groups.get(downloader_name, [])
-                previous_name = self._active_downloader_name
-                self._active_downloader_name = str(downloader_name)
-                try:
-                    if not self.downloader:
-                        continue
-                    self.check(downloader_name=str(downloader_name), group_hashes=set(torrent_hashes))
-                finally:
-                    self._active_downloader_name = previous_name
-
-    def check(self, downloader_name: str = None, group_hashes: Optional[Set[str]] = None):
+    def check(self):
         """
         定时检查，删除下载任务
         """
@@ -5568,40 +5094,17 @@ class BrushFlowLowFreq(_PluginBase):
 
         brush_config = self.__get_brush_config()
 
-        if downloader_name is None and brush_config.multi_downloader_enabled:
-            self.__check_multi_downloaders()
-            return
-        if downloader_name is None and not brush_config.multi_downloader_enabled:
-            torrent_tasks = self.get_data("torrents") or {}
-            has_secondary_tasks = any(
-                isinstance(task, dict)
-                and not task.get("deleted")
-                and task.get("downloader")
-                and task.get("downloader") != brush_config.downloader
-                for task in torrent_tasks.values()
-            )
-            if has_secondary_tasks:
-                logger.warning(
-                    "检测到仍有多下载器任务，继续按任务所属下载器分组检查，避免误删任务"
-                )
-                self.__check_multi_downloaders()
-                return
-
         if not brush_config.downloader or not self.downloader:
             return
 
         with lock:
-            self.__log_status(
-                f"开始检查刷流下载任务 ..."
-                f"{'（下载器：' + str(downloader_name) + '）' if downloader_name else ''}"
-            )
+            self.__log_status("开始检查刷流下载任务 ...")
             torrent_tasks: Dict[str, dict] = self.get_data("torrents") or {}
             torrent_info_cache: Dict[str, dict] = {}
             live_info_cache: Dict[str, dict] = {}
             active_torrent_tasks = {
                 h: t for h, t in torrent_tasks.items()
                 if isinstance(t, dict) and not t.get("deleted")
-                and (group_hashes is None or h in group_hashes)
             }
             deleted_skip = len(torrent_tasks) - len(active_torrent_tasks)
             if deleted_skip > 0:
@@ -9128,8 +8631,6 @@ class BrushFlowLowFreq(_PluginBase):
             "deleted": False,
             "time": torrent_info.get("add_on", time.time())
         }
-        if self._active_downloader_name:
-            torrent_task["downloader"] = self._active_downloader_name
         torrent_task.update(self.__get_default_yield_guard_task_state())
         torrent_task.update(self.__get_default_upload_protection_task_state())
         return torrent_task
@@ -10070,7 +9571,6 @@ class BrushFlowLowFreq(_PluginBase):
             "notify": brush_config.notify,
             "brushsites": brush_config.brushsites,
             "downloader": brush_config.downloader,
-            "multi_downloader_enabled": brush_config.multi_downloader_enabled,
             "disksize": brush_config.disksize,
             "freeleech": brush_config.freeleech,
             "hr": brush_config.hr,
@@ -10141,8 +9641,6 @@ class BrushFlowLowFreq(_PluginBase):
             "site_config": brush_config.site_config,
             "_tabs": self._tabs
         }
-        for raw_key, raw_value in (getattr(brush_config, "_downloader_profile_raw", None) or {}).items():
-            config_mapping[raw_key] = raw_value
 
         self.__log_config_snapshot(brush_config=brush_config, reason=reason or "配置写回")
 
@@ -10237,7 +9735,7 @@ class BrushFlowLowFreq(_PluginBase):
             logger.error(f"Error while resetting downloader URL for torrent: {torrent_url}. Error: {str(e)}")
             return torrent_url
 
-    def __download(self, torrent: TorrentInfo, brush_config: Optional[BrushConfig] = None) -> Optional[str]:
+    def __download(self, torrent: TorrentInfo) -> Optional[str]:
         """
         添加下载任务
         """
@@ -10245,8 +9743,7 @@ class BrushFlowLowFreq(_PluginBase):
             logger.error(f"获取下载链接失败：{torrent.title}")
             return None
 
-        if brush_config is None:
-            brush_config = self.__get_brush_config(torrent.site_name)
+        brush_config = self.__get_brush_config(torrent.site_name)
 
         # 上传限速
         up_speed = int(brush_config.up_speed) if brush_config.up_speed else None
@@ -11029,28 +10526,9 @@ class BrushFlowLowFreq(_PluginBase):
 
     def __get_downloader_info(self) -> schemas.DownloaderInfo:
         """
-        获取下载器实时信息；多下载器模式下只取当前操作下载器的数据。
+        获取下载器实时信息（所有下载器）
         """
         ret_info = schemas.DownloaderInfo()
-
-        if self._active_downloader_name:
-            service = self.service_info
-            if not service:
-                return ret_info
-            try:
-                transfer_info = service.instance.transfer_info()
-            except Exception as err:
-                logger.error(f"获取下载器 {self._active_downloader_name} 传输信息出错：{err}")
-                return ret_info
-            if transfer_info is None:
-                return ret_info
-            if self._is_qb:
-                ret_info.upload_speed = getattr(transfer_info, "up_info_speed", 0) or 0
-                ret_info.download_speed = getattr(transfer_info, "down_info_speed", 0) or 0
-            else:
-                ret_info.upload_speed = getattr(transfer_info, "uploadSpeed", 0) or 0
-                ret_info.download_speed = getattr(transfer_info, "downloadSpeed", 0) or 0
-            return ret_info
 
         downloader = self.downloader
         if not downloader:
