@@ -7963,11 +7963,13 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
     def test_get_page_rebuilds_incorrect_monthly_dashboard_from_daily_statistic(self):
         plugin = self._new_plugin({})
+        stat_month = datetime.now().strftime("%Y-%m")
+        stat_date = f"{stat_month}-06"
         store = self._attach_memory_store(plugin, {
             "torrents": {},
             "daily_statistic": {
-                "2026-07-06": {
-                    "date": "2026-07-06",
+                stat_date: {
+                    "date": stat_date,
                     "uploaded": 300,
                     "downloaded": 400,
                     "task_count": 2,
@@ -7975,8 +7977,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 },
             },
             "monthly_statistic": {
-                "2026-07": {
-                    "date": "2026-07",
+                stat_month: {
+                    "date": stat_month,
                     "uploaded": 9999,
                     "downloaded": 8888,
                     "task_count": 99,
@@ -7987,7 +7989,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
 
-        monthly = store["monthly_statistic"]["2026-07"]
+        monthly = store["monthly_statistic"][stat_month]
         self.assertEqual(300, monthly["uploaded"])
         self.assertEqual(400, monthly["downloaded"])
         self.assertEqual(2, monthly["task_count"])
