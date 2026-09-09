@@ -8922,6 +8922,29 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         status = plugin._BrushFlowLowFreq__api_diagnostic_status()
         self.assertFalse(status["enabled"])
 
+    def test_get_page_includes_diagnostic_section_and_export_links(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            plugin = self._new_plugin({"diagnostic_enabled": True})
+            self._attach_memory_store(plugin, {
+                "torrents": {},
+                "statistic": {},
+                "daily_statistic": {},
+                "monthly_statistic": {},
+            })
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            plugin._BrushFlowLowFreq__diagnostic_recorder = recorder
+            page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
+            self.assertIn("独立诊断记录", page_text)
+            self.assertNotIn("诊断记录未开启", page_text)
+            self.assertIn("/diagnostic/export?days=30", page_text)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
