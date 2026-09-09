@@ -178,7 +178,7 @@ class DiagnosticRecorder:
             now = int(time.time())
             meta = {
                 "schema_version": "1",
-                "plugin_version": "4.3.93",
+                "plugin_version": "4.3.94",
                 "created_at": str(now),
             }
             for key, value in meta.items():
@@ -1173,7 +1173,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.93"
+    plugin_version = "4.3.94"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -5107,7 +5107,8 @@ class BrushFlowLowFreq(_PluginBase):
                 {
                     'component': 'VRow',
                     'content': self.__get_total_elements() + self.__get_daily_transfer_elements()
-                               + self.__get_download_dashboard_elements(torrents) + [
+                               + self.__get_download_dashboard_elements(torrents)
+                               + self.__get_diagnostic_elements() + [
                         {
                             'component': 'VCol',
                             'props': {
@@ -5197,7 +5198,8 @@ class BrushFlowLowFreq(_PluginBase):
             {
                 'component': 'VRow',
                 'content': self.__get_total_elements() + self.__get_daily_transfer_elements()
-                           + self.__get_download_dashboard_elements(torrents) + [
+                           + self.__get_download_dashboard_elements(torrents)
+                           + self.__get_diagnostic_elements() + [
                     # 种子明细
                     {
                         'component': 'VCol',
@@ -5293,6 +5295,113 @@ class BrushFlowLowFreq(_PluginBase):
                 ]
             }
         ]
+
+    def __get_diagnostic_elements(self) -> List[dict]:
+        """插件数据页的诊断记录概览与导出入口，只读展示。"""
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return [{
+                'component': 'VCol',
+                'props': {'cols': 12},
+                'content': [{
+                    'component': 'VCard',
+                    'props': {'variant': 'tonal'},
+                    'content': [{
+                        'component': 'VCardText',
+                        'content': [{
+                            'component': 'div',
+                            'props': {'class': 'text-h6 mb-2'},
+                            'text': '独立诊断记录'
+                        }, {
+                            'component': 'div',
+                            'text': '诊断记录未开启，可在更多配置中打开“独立诊断记录”。'
+                        }]
+                    }]
+                }]
+            }]
+
+        status = self.__api_diagnostic_status()
+        summary = self.__api_diagnostic_summary(days=30)
+        counts = status.get("counts") or {}
+        candidates = summary.get("candidates") or {}
+        api_base = "/api/v1/plugin/BrushFlowLowFreq/diagnostic"
+        export_days = [1, 3, 7, 30]
+        link_rows = []
+        for days in export_days:
+            link_rows.append({
+                'component': 'VCol',
+                'props': {'cols': 12, 'md': 3, 'sm': 6},
+                'content': [{
+                    'component': 'a',
+                    'props': {
+                        'href': f"{api_base}/export?days={days}",
+                        'download': f"brushflowlowfreq_diag_{days}d.json",
+                        'target': '_blank',
+                        'style': 'text-decoration:none;font-weight:500;',
+                    },
+                    'text': f"导出最近 {days} 天"
+                }]
+            })
+
+        detail_rows = [
+            ["状态", "已开启" if status.get("enabled") else "未开启"],
+            ["保留天数", str(recorder.retention_days)],
+            ["数据库路径", recorder.db_path],
+            ["候选快照", str(counts.get("candidate_snapshots", 0))],
+            ["最近30天候选", str(candidates.get("total", 0))],
+            ["最近30天已添加", str(candidates.get("added", 0))],
+            ["最近30天被拒", str(candidates.get("rejected", 0))],
+            ["任务档案", str(counts.get("task_profiles", 0))],
+            ["任务样本", str(counts.get("task_samples", 0))],
+            ["生命周期事件", str(counts.get("task_events", 0))],
+            ["下载器快照", str(counts.get("downloader_samples", 0))],
+        ]
+
+        return [{
+            'component': 'VCol',
+            'props': {'cols': 12},
+            'content': [{
+                'component': 'VCard',
+                'props': {'variant': 'tonal'},
+                'content': [{
+                    'component': 'VCardText',
+                    'content': [
+                        {
+                            'component': 'div',
+                            'props': {'class': 'text-h6 mb-2'},
+                            'text': '独立诊断记录'
+                        },
+                        {
+                            'component': 'VTable',
+                            'props': {'density': 'compact'},
+                            'content': [
+                                {
+                                    'component': 'tbody',
+                                    'content': [
+                                        {
+                                            'component': 'tr',
+                                            'content': [
+                                                {'component': 'td', 'text': key},
+                                                {'component': 'td', 'text': value},
+                                            ]
+                                        } for key, value in detail_rows
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            'component': 'div',
+                            'props': {'class': 'text-subtitle-2 font-weight-medium mt-3 mb-1'},
+                            'text': '导出诊断数据'
+                        },
+                        {
+                            'component': 'VRow',
+                            'content': link_rows,
+                        }
+                    ]
+                }]
+            }]
+        }]
 
     def __get_download_dashboard_elements(self, torrents: Dict[str, dict]) -> List[dict]:
         torrents = torrents or {}
