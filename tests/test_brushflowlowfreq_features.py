@@ -1217,6 +1217,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             {"log_mode": "full"},
             downloader=SimpleNamespace(qbc=FakeQbc(), is_inactive=lambda: False)
         )
+        plugin._active_downloader_name = "QB-1"
         brush_config = self.module.BrushConfig({
             "log_mode": "full",
             "upload_protection_download_limit_kbs": 300,
@@ -1237,6 +1238,29 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual([(300 * 1024, ["hash1"])], calls)
         self.assertTrue(any("上传保护执行 qB 动作成功" in msg for msg in new_info_logs))
+        self.assertTrue(any("下载器 QB-1" in msg for msg in new_info_logs), new_info_logs)
+
+    def test_added_torrent_log_includes_downloader(self):
+        plugin = self._new_plugin({"downloader": "QB-1"})
+        start_info_count = len(self.module.logger.info_messages)
+        siteinfo = SimpleNamespace(name="天空")
+        torrent = SimpleNamespace(
+            size=6 * 1024 ** 3,
+            title="下载器审计种子",
+            description="description",
+        )
+
+        plugin._BrushFlowLowFreq__log_added_torrent(
+            siteinfo=siteinfo,
+            torrent=torrent,
+            downloader_name="QB-1",
+        )
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(
+            any("下载器 QB-1" in msg and "新增刷流种子下载" in msg for msg in new_info_logs),
+            new_info_logs,
+        )
 
     def test_upload_protection_small_pool_does_not_repeat_release_when_already_released(self):
         calls = []
