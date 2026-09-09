@@ -8850,6 +8850,24 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_diagnostic_retention_deletes_only_expired_rows(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            recorder.record_task_added("hash_old", {"site_name": "天空", "title": "old"})
+            recorder.record_task_sample("hash_old", time.time() - 31 * 86400, "NAS QB", {}, {})
+            recorder.record_task_added("hash_new", {"site_name": "天空", "title": "new"})
+            recorder.record_task_sample("hash_new", time.time(), "NAS QB", {}, {})
+            recorder.cleanup()
+            self.assertEqual(recorder.count_samples("hash_new"), 1)
+            self.assertEqual(recorder.count_samples("hash_old"), 0)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
