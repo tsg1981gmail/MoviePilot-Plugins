@@ -178,7 +178,7 @@ class DiagnosticRecorder:
             now = int(time.time())
             meta = {
                 "schema_version": "1",
-                "plugin_version": "4.3.94",
+                "plugin_version": "4.3.95",
                 "created_at": str(now),
             }
             for key, value in meta.items():
@@ -1173,7 +1173,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.94"
+    plugin_version = "4.3.95"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -5325,6 +5325,8 @@ class BrushFlowLowFreq(_PluginBase):
         counts = status.get("counts") or {}
         candidates = summary.get("candidates") or {}
         api_base = "/api/v1/plugin/BrushFlowLowFreq/diagnostic"
+        api_token = str(getattr(settings, "API_TOKEN", "") or "")
+        token_query = f"&apikey={api_token}" if api_token else ""
         export_days = [1, 3, 7, 30]
         link_rows = []
         for days in export_days:
@@ -5334,7 +5336,7 @@ class BrushFlowLowFreq(_PluginBase):
                 'content': [{
                     'component': 'a',
                     'props': {
-                        'href': f"{api_base}/export?days={days}",
+                        'href': f"{api_base}/export?days={days}{token_query}",
                         'download': f"brushflowlowfreq_diag_{days}d.json",
                         'target': '_blank',
                         'style': 'text-decoration:none;font-weight:500;',
