@@ -562,6 +562,15 @@ class DiagnosticRecorder:
         except Exception:
             return 0
 
+    def fetch_rows(self, sql, params=()):
+        try:
+            with self._lock:
+                rows = self._conn.execute(sql, params).fetchall()
+                return [dict(row) for row in rows]
+        except Exception:
+            logger.warning("brushflowlowfreq 诊断数据库查询失败", exc_info=True)
+            return []
+
 
 class BrushConfig:
     """
@@ -1595,6 +1604,46 @@ class BrushFlowLowFreq(_PluginBase):
                 "endpoint": self.__api_qb_tasks,
                 "methods": ["GET"],
             },
+            {
+                "path": "/diagnostic/status",
+                "endpoint": self.__api_diagnostic_status,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/summary",
+                "endpoint": self.__api_diagnostic_summary,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/candidates",
+                "endpoint": self.__api_diagnostic_candidates,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/tasks",
+                "endpoint": self.__api_diagnostic_tasks,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/samples",
+                "endpoint": self.__api_diagnostic_samples,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/events",
+                "endpoint": self.__api_diagnostic_events,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/downloaders",
+                "endpoint": self.__api_diagnostic_downloaders,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/export",
+                "endpoint": self.__api_diagnostic_export,
+                "methods": ["GET"],
+            },
         ]
 
     def __api_summary(self):
@@ -2123,6 +2172,201 @@ class BrushFlowLowFreq(_PluginBase):
             }
         ]
         return cols, attrs, elements
+
+    def __diagnostic_range(self, days=30, start=None, end=None):
+        now = time.time()
+        if self.__number_or_none(start):
+            range_start = float(start)
+        else:
+            range_start = now - int(days or 30) * 86400
+        if self.__number_or_none(end):
+            range_end = float(end)
+        else:
+            range_end = now
+        return range_start, range_end
+
+    def __diagnostic_recorder_or_none(self):
+        return getattr(self, "_BrushFlowLowFreq__diagnostic_recorder", None)
+
+    def __api_diagnostic_status(self):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "error": "diagnostic disabled"}
+        meta_rows = recorder.fetch_rows(
+            "SELECT key, value FROM diagnostic_meta ORDER BY key"
+        )
+        meta = {row["key"]: row["value"] for row in meta_rows}
+        range_rows = recorder.fetch_rows(
+            "SELECT MIN(sampled_at) AS min_ts, MAX(sampled_at) AS max_ts "
+            "FROM task_samples"
+        )
+        newest = oldest = None
+        if range_rows:
+            oldest = range_rows[0].get("min_ts")
+            newest = range_rows[0].get("max_ts")
+        return {
+            "enabled": True,
+            "db_path": recorder.db_path,
+            "retention_days": recorder.retention_days,
+            "meta": meta,
+            "oldest_sample_at": oldest,
+            "newest_sample_at": newest,
+            "counts": recorder.query_counts(),
+        }
+
+    def __api_diagnostic_summary(self, days: int = 30, start: float = None, end: float = None):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        candidate_rows = recorder.fetch_rows(
+            """
+            SELECT
+              COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN decision='added' THEN 1 ELSE 0 END), 0) AS added,
+              COALESCE(SUM(CASE WHEN decision='added_failed' THEN 1 ELSE 0 END), 0) AS added_failed,
+              COALESCE(SUM(CASE WHEN decision='rejected' THEN 1 ELSE 0 END), 0) AS rejected
+            FROM candidate_snapshots
+            WHERE seen_at>=? AND seen_at<=?
+            """,
+            (range_start, range_end),
+        )
+        task_rows = recorder.fetch_rows(
+            """
+            SELECT
+              COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS deleted,
+              COALESCE(SUM(CASE WHEN archived_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS archived
+            FROM task_profiles
+            WHERE added_at>=? AND added_at<=?
+            """,
+            (range_start, range_end),
+        )
+        sample_rows = recorder.fetch_rows(
+            """
+            SELECT
+              COUNT(*) AS total,
+              MIN(sampled_at) AS first_at,
+              MAX(sampled_at) AS last_at
+            FROM task_samples
+            WHERE sampled_at>=? AND sampled_at<=?
+            """,
+            (range_start, range_end),
+        )
+        return {
+            "enabled": True,
+            "start": range_start,
+            "end": range_end,
+            "candidates": candidate_rows[0] if candidate_rows else {},
+            "tasks": task_rows[0] if task_rows else {},
+            "samples": sample_rows[0] if sample_rows else {},
+        }
+
+    def __api_diagnostic_candidates(self, days: int = 30, start: float = None, end: float = None,
+                                    decision: str = "", limit: int = 5000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        sql = """
+            SELECT c.*, t.title, t.torrent_key
+            FROM candidate_snapshots c
+            JOIN torrent_catalog t ON t.id=c.torrent_id
+            WHERE c.seen_at>=? AND c.seen_at<=?
+        """
+        params = [range_start, range_end]
+        if decision:
+            sql += " AND c.decision=?"
+            params.append(decision)
+        sql += " ORDER BY c.seen_at DESC LIMIT ?"
+        params.append(int(limit or 5000))
+        return {"enabled": True, "start": range_start, "end": range_end, "rows": recorder.fetch_rows(sql, params)}
+
+    def __api_diagnostic_tasks(self, days: int = 30, start: float = None, end: float = None,
+                               site: str = "", downloader: str = "", limit: int = 5000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        sql = "SELECT * FROM task_profiles WHERE added_at>=? AND added_at<=?"
+        params = [range_start, range_end]
+        if site:
+            sql += " AND site=?"
+            params.append(site)
+        if downloader:
+            sql += " AND downloader=?"
+            params.append(downloader)
+        sql += " ORDER BY added_at DESC LIMIT ?"
+        params.append(int(limit or 5000))
+        return {"enabled": True, "start": range_start, "end": range_end, "rows": recorder.fetch_rows(sql, params)}
+
+    def __api_diagnostic_samples(self, days: int = 30, start: float = None, end: float = None,
+                                 task_hash: str = "", limit: int = 10000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        sql = "SELECT * FROM task_samples WHERE sampled_at>=? AND sampled_at<=?"
+        params = [range_start, range_end]
+        if task_hash:
+            sql += " AND task_hash=?"
+            params.append(task_hash)
+        sql += " ORDER BY sampled_at ASC LIMIT ?"
+        params.append(int(limit or 10000))
+        return {"enabled": True, "start": range_start, "end": range_end, "rows": recorder.fetch_rows(sql, params)}
+
+    def __api_diagnostic_events(self, days: int = 30, start: float = None, end: float = None,
+                                task_hash: str = "", event_type: str = "", limit: int = 10000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        sql = "SELECT * FROM task_events WHERE event_at>=? AND event_at<=?"
+        params = [range_start, range_end]
+        if task_hash:
+            sql += " AND task_hash=?"
+            params.append(task_hash)
+        if event_type:
+            sql += " AND event_type=?"
+            params.append(event_type)
+        sql += " ORDER BY event_at ASC LIMIT ?"
+        params.append(int(limit or 10000))
+        return {"enabled": True, "start": range_start, "end": range_end, "rows": recorder.fetch_rows(sql, params)}
+
+    def __api_diagnostic_downloaders(self, days: int = 30, start: float = None, end: float = None,
+                                     downloader: str = "", limit: int = 10000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        sql = "SELECT * FROM downloader_samples WHERE sampled_at>=? AND sampled_at<=?"
+        params = [range_start, range_end]
+        if downloader:
+            sql += " AND downloader=?"
+            params.append(downloader)
+        sql += " ORDER BY sampled_at ASC LIMIT ?"
+        params.append(int(limit or 10000))
+        return {"enabled": True, "start": range_start, "end": range_end, "rows": recorder.fetch_rows(sql, params)}
+
+    def __api_diagnostic_export(self, days: int = 30, start: float = None, end: float = None,
+                                include_candidates: bool = True, include_tasks: bool = True,
+                                include_samples: bool = True, include_events: bool = True,
+                                include_downloaders: bool = True):
+        data = self.__api_diagnostic_summary(days=days, start=start, end=end)
+        if not data.get("enabled"):
+            return data
+        payload = dict(data)
+        if include_candidates:
+            payload["candidates"] = self.__api_diagnostic_candidates(days=days, start=start, end=end, limit=100000)
+        if include_tasks:
+            payload["tasks"] = self.__api_diagnostic_tasks(days=days, start=start, end=end, limit=100000)
+        if include_samples:
+            payload["samples"] = self.__api_diagnostic_samples(days=days, start=start, end=end, limit=100000)
+        if include_events:
+            payload["events"] = self.__api_diagnostic_events(days=days, start=start, end=end, limit=100000)
+        if include_downloaders:
+            payload["downloaders"] = self.__api_diagnostic_downloaders(days=days, start=start, end=end, limit=100000)
+        return payload
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """

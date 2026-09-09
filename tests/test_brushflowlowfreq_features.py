@@ -8043,13 +8043,20 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             finally:
                 loop.close()
 
-    def test_get_api_returns_four_endpoints(self):
-        """get_api 返回 4 个端点定义"""
+    def test_get_api_returns_original_and_diagnostic_endpoints(self):
+        """get_api 返回原有 5 个端点与 8 个诊断端点"""
         plugin = self._new_plugin({"enabled": False})
         api_list = plugin.get_api()
-        self.assertEqual(len(api_list), 5)
+        self.assertEqual(len(api_list), 13)
         paths = {ep["path"] for ep in api_list}
-        self.assertSetEqual(paths, {"/summary", "/daily_compare", "/tasks", "/trend", "/qb_tasks"})
+        original = {"/summary", "/daily_compare", "/tasks", "/trend", "/qb_tasks"}
+        diagnostic = {
+            "/diagnostic/status", "/diagnostic/summary", "/diagnostic/candidates",
+            "/diagnostic/tasks", "/diagnostic/samples", "/diagnostic/events",
+            "/diagnostic/downloaders", "/diagnostic/export",
+        }
+        self.assertTrue(original.issubset(paths))
+        self.assertTrue(diagnostic.issubset(paths))
         for ep in api_list:
             self.assertIn("endpoint", ep)
             self.assertIn("methods", ep)
@@ -8867,6 +8874,23 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_get_api_includes_diagnostic_endpoints(self):
+        plugin = self._new_plugin({})
+        paths = [item["path"] for item in plugin.get_api()]
+        self.assertIn("/diagnostic/status", paths)
+        self.assertIn("/diagnostic/summary", paths)
+        self.assertIn("/diagnostic/candidates", paths)
+        self.assertIn("/diagnostic/tasks", paths)
+        self.assertIn("/diagnostic/samples", paths)
+        self.assertIn("/diagnostic/events", paths)
+        self.assertIn("/diagnostic/downloaders", paths)
+        self.assertIn("/diagnostic/export", paths)
+
+    def test_diagnostic_api_returns_disabled_when_recorder_off(self):
+        plugin = self._new_plugin({})
+        status = plugin._BrushFlowLowFreq__api_diagnostic_status()
+        self.assertFalse(status["enabled"])
 
 
 if __name__ == "__main__":
