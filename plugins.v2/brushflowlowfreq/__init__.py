@@ -6,6 +6,7 @@ import logging
 import math
 import random
 import re
+import sqlite3
 import threading
 import time
 from datetime import datetime, timedelta
@@ -37,6 +38,504 @@ import shutil
 from pathlib import Path
 
 lock = threading.RLock()
+
+
+class DiagnosticRecorder:
+    """独立诊断记录器，失败时只记日志，不参与业务。"""
+
+    def __init__(self, db_path, retention_days=30):
+        self.db_path = str(db_path)
+        self.retention_days = max(1, int(retention_days or 30))
+        self._conn = sqlite3.connect(self.db_path)
+        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
+        self._init_schema()
+        self._set_meta()
+
+    def _init_schema(self):
+        with self._lock:
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS brush_runs (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  started_at REAL NOT NULL,
+                  finished_at REAL,
+                  site TEXT NOT NULL,
+                  pages INTEGER NOT NULL DEFAULT 0,
+                  candidates_seen INTEGER NOT NULL DEFAULT 0,
+                  added INTEGER NOT NULL DEFAULT 0,
+                  rejected INTEGER NOT NULL DEFAULT 0,
+                  scan_ms INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS torrent_catalog (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  site TEXT NOT NULL,
+                  page_url TEXT NOT NULL,
+                  torrent_key TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  first_seen_at REAL NOT NULL,
+                  last_seen_at REAL NOT NULL,
+                  seen_count INTEGER NOT NULL DEFAULT 0,
+                  size_bytes INTEGER,
+                  UNIQUE(site, torrent_key)
+                );
+                CREATE TABLE IF NOT EXISTS candidate_snapshots (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  run_id INTEGER NOT NULL REFERENCES brush_runs(id) ON DELETE CASCADE,
+                  torrent_id INTEGER NOT NULL REFERENCES torrent_catalog(id),
+                  seen_at REAL NOT NULL,
+                  size_bytes INTEGER,
+                  seeders INTEGER,
+                  leechers INTEGER,
+                  is_free INTEGER,
+                  free_remaining_minutes REAL,
+                  decision TEXT NOT NULL,
+                  reject_reason TEXT,
+                  downloader TEXT
+                );
+                CREATE TABLE IF NOT EXISTS task_profiles (
+                  task_hash TEXT PRIMARY KEY,
+                  site TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  size_bytes INTEGER,
+                  downloader TEXT,
+                  added_at REAL NOT NULL,
+                  first_downloaded_at REAL,
+                  first_uploaded_at REAL,
+                  completion_on REAL,
+                  deleted_at REAL,
+                  deleted_type TEXT,
+                  deleted_reason TEXT,
+                  archived_at REAL,
+                  final_uploaded INTEGER,
+                  final_downloaded INTEGER,
+                  final_ratio REAL,
+                  final_seeding_time INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS task_samples (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_hash TEXT NOT NULL REFERENCES task_profiles(task_hash) ON DELETE CASCADE,
+                  sampled_at REAL NOT NULL,
+                  downloader TEXT,
+                  state TEXT,
+                  downloaded INTEGER,
+                  uploaded INTEGER,
+                  progress REAL,
+                  dl_speed REAL,
+                  up_speed REAL,
+                  interval_downloaded INTEGER,
+                  interval_uploaded INTEGER,
+                  interval_downspeed REAL,
+                  interval_upspeed REAL,
+                  seeding_time INTEGER,
+                  completion_on REAL,
+                  upload_protection_stage TEXT,
+                  upload_protection_low_streak INTEGER,
+                  upload_protection_no_upload_streak INTEGER,
+                  upload_protection_good_streak INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS task_events (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_hash TEXT NOT NULL REFERENCES task_profiles(task_hash) ON DELETE CASCADE,
+                  event_at REAL NOT NULL,
+                  event_type TEXT NOT NULL,
+                  detail TEXT
+                );
+                CREATE TABLE IF NOT EXISTS downloader_samples (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  sampled_at REAL NOT NULL,
+                  downloader TEXT NOT NULL,
+                  active_count INTEGER,
+                  downloading_count INTEGER,
+                  uploading_count INTEGER,
+                  upload_speed REAL,
+                  download_speed REAL,
+                  error TEXT
+                );
+                CREATE TABLE IF NOT EXISTS diagnostic_meta (
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_candidate_snapshots_seen_at
+                  ON candidate_snapshots(seen_at);
+                CREATE INDEX IF NOT EXISTS idx_candidate_snapshots_torrent_id
+                  ON candidate_snapshots(torrent_id);
+                CREATE INDEX IF NOT EXISTS idx_task_samples_hash_time
+                  ON task_samples(task_hash, sampled_at);
+                CREATE INDEX IF NOT EXISTS idx_task_samples_time
+                  ON task_samples(sampled_at);
+                CREATE INDEX IF NOT EXISTS idx_task_events_hash_time
+                  ON task_events(task_hash, event_at);
+                CREATE INDEX IF NOT EXISTS idx_task_events_time
+                  ON task_events(event_at);
+                CREATE INDEX IF NOT EXISTS idx_downloader_samples_time
+                  ON downloader_samples(sampled_at, downloader);
+                """
+            )
+
+    def _set_meta(self):
+        with self._lock:
+            now = int(time.time())
+            meta = {
+                "schema_version": "1",
+                "plugin_version": "4.3.93",
+                "created_at": str(now),
+            }
+            for key, value in meta.items():
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO diagnostic_meta(key, value) VALUES(?, ?)",
+                    (key, value),
+                )
+
+    def _safe_execute(self, sql, params=()):
+        try:
+            with self._lock:
+                return self._conn.execute(sql, params)
+        except Exception:
+            logger.warning("brushflowlowfreq 诊断数据库写入失败", exc_info=True)
+            return None
+
+    def commit(self):
+        try:
+            with self._lock:
+                self._conn.commit()
+        except Exception:
+            logger.warning("brushflowlowfreq 诊断数据库提交失败", exc_info=True)
+
+    def record_brush_start(self, site, started_at=None):
+        cursor = self._safe_execute(
+            "INSERT INTO brush_runs(started_at, site) VALUES(?, ?)",
+            (float(started_at or time.time()), str(site or "")),
+        )
+        return cursor.lastrowid if cursor is not None else None
+
+    def record_brush_end(self, run_id, finished_at=None, pages=0, candidates_seen=0,
+                         added=0, rejected=0, scan_ms=0):
+        self._safe_execute(
+            """
+            UPDATE brush_runs
+            SET finished_at=?, pages=?, candidates_seen=?, added=?, rejected=?, scan_ms=?
+            WHERE id=?
+            """,
+            (
+                float(finished_at or time.time()),
+                int(pages or 0),
+                int(candidates_seen or 0),
+                int(added or 0),
+                int(rejected or 0),
+                int(scan_ms or 0),
+                int(run_id or 0),
+            ),
+        )
+
+    def record_candidate(self, run_id, site, torrent, decision, reject_reason=None,
+                         downloader=None):
+        if not torrent:
+            return
+        torrent_key = str(getattr(torrent, "page_url", "") or getattr(torrent, "title", "") or "")
+        if not torrent_key:
+            return
+        title = str(getattr(torrent, "title", "") or torrent_key)
+        site = str(site or "")
+        seen_at = time.time()
+        size_bytes = self._number(getattr(torrent, "size", None))
+        seeders = self._number(getattr(torrent, "seeders", None))
+        leechers = self._number(getattr(torrent, "leechers", None))
+        if leechers is None:
+            leechers = self._number(getattr(torrent, "peers", None))
+        is_free = None
+        free_remaining_minutes = self._number(getattr(torrent, "free_remaining_minutes", None))
+        try:
+            download_factor = getattr(torrent, "downloadvolumefactor", None)
+            upload_factor = getattr(torrent, "uploadvolumefactor", None)
+            if download_factor is not None:
+                is_free = 1 if float(download_factor) == 0 else 0
+            elif upload_factor is not None:
+                is_free = 1 if float(upload_factor) > 1 else 0
+        except (TypeError, ValueError):
+            pass
+        self._safe_execute(
+            """
+            INSERT INTO torrent_catalog(
+                site, page_url, torrent_key, title, first_seen_at, last_seen_at,
+                seen_count, size_bytes
+            ) VALUES(?, ?, ?, ?, ?, ?, 1, ?)
+            ON CONFLICT(site, torrent_key) DO UPDATE SET
+                last_seen_at=excluded.last_seen_at,
+                seen_count=torrent_catalog.seen_count + 1,
+                size_bytes=COALESCE(excluded.size_bytes, torrent_catalog.size_bytes)
+            """,
+            (site, str(getattr(torrent, "page_url", "") or torrent_key), torrent_key, title,
+             seen_at, seen_at, size_bytes),
+        )
+        row = self._conn.execute(
+            "SELECT id FROM torrent_catalog WHERE site=? AND torrent_key=?",
+            (site, torrent_key),
+        ).fetchone()
+        if row is None:
+            return
+        self._safe_execute(
+            """
+            INSERT INTO candidate_snapshots(
+                run_id, torrent_id, seen_at, size_bytes, seeders, leechers,
+                is_free, free_remaining_minutes, decision, reject_reason, downloader
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                self._number(run_id),
+                int(row["id"]),
+                seen_at,
+                size_bytes,
+                seeders,
+                leechers,
+                is_free,
+                free_remaining_minutes,
+                str(decision or ""),
+                str(reject_reason or "") or None,
+                str(downloader or "") or None,
+            ),
+        )
+
+    def record_task_added(self, task_hash, torrent_task=None):
+        task_hash = str(task_hash or "")
+        if not task_hash:
+            return
+        torrent_task = torrent_task or {}
+        self._safe_execute(
+            """
+            INSERT OR IGNORE INTO task_profiles(
+                task_hash, site, title, size_bytes, downloader, added_at
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_hash,
+                str(torrent_task.get("site_name") or ""),
+                str(torrent_task.get("title") or task_hash),
+                self._number(torrent_task.get("total_size") or torrent_task.get("size")),
+                str(torrent_task.get("downloader") or ""),
+                self._number(torrent_task.get("time")) or time.time(),
+            ),
+        )
+        self.record_task_event(task_hash, time.time(), "added", {"source": "brush"})
+
+    def record_task_sample(self, task_hash, sampled_at, downloader, torrent_info=None,
+                           torrent_task=None):
+        task_hash = str(task_hash or "")
+        if not task_hash:
+            return
+        torrent_info = torrent_info or {}
+        torrent_task = torrent_task or {}
+        self._ensure_task_profile(task_hash, torrent_task)
+        self._safe_execute(
+            """
+            INSERT INTO task_samples(
+                task_hash, sampled_at, downloader, state, downloaded, uploaded,
+                progress, dl_speed, up_speed, interval_downloaded, interval_uploaded,
+                interval_downspeed, interval_upspeed, seeding_time, completion_on,
+                upload_protection_stage, upload_protection_low_streak,
+                upload_protection_no_upload_streak, upload_protection_good_streak
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_hash,
+                float(sampled_at or time.time()),
+                str(downloader or torrent_task.get("downloader") or ""),
+                str(torrent_info.get("state") or torrent_task.get("state") or ""),
+                self._number(torrent_info.get("downloaded") if torrent_info else torrent_task.get("downloaded")),
+                self._number(torrent_info.get("uploaded") if torrent_info else torrent_task.get("uploaded")),
+                self._number(torrent_info.get("progress") if torrent_info else torrent_task.get("progress")),
+                self._number(torrent_info.get("dlspeed") if torrent_info else torrent_task.get("dlspeed")),
+                self._number(torrent_info.get("upspeed") if torrent_info else torrent_task.get("upspeed")),
+                self._number(torrent_task.get("last_check_interval_downloaded")),
+                self._number(torrent_task.get("last_check_interval_uploaded")),
+                self._number(torrent_task.get("last_check_interval_downspeed")),
+                self._number(torrent_task.get("last_check_interval_upspeed")),
+                self._number(torrent_info.get("seeding_time") if torrent_info else torrent_task.get("seeding_time")),
+                self._number(torrent_info.get("completion_on") if torrent_info else torrent_task.get("completion_on")),
+                str(torrent_task.get("upload_protection_stage") or ""),
+                self._number(torrent_task.get("upload_protection_low_streak")),
+                self._number(torrent_task.get("upload_protection_no_upload_streak")),
+                self._number(torrent_task.get("upload_protection_good_streak")),
+            ),
+        )
+
+    def record_task_event(self, task_hash, event_at, event_type, detail=None):
+        task_hash = str(task_hash or "")
+        if not task_hash:
+            return
+        try:
+            detail_json = json.dumps(detail, ensure_ascii=False, default=str)
+        except Exception:
+            detail_json = None
+        self._safe_execute(
+            "INSERT INTO task_events(task_hash, event_at, event_type, detail) VALUES(?, ?, ?, ?)",
+            (task_hash, float(event_at or time.time()), str(event_type or ""), detail_json),
+        )
+
+    def record_downloader_sample(self, sampled_at, downloader, snapshot=None):
+        snapshot = snapshot or {}
+        self._safe_execute(
+            """
+            INSERT INTO downloader_samples(
+                sampled_at, downloader, active_count, downloading_count,
+                uploading_count, upload_speed, download_speed, error
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                float(sampled_at or time.time()),
+                str(downloader or ""),
+                self._number(snapshot.get("active_count")),
+                self._number(snapshot.get("downloading_count")),
+                self._number(snapshot.get("uploading_count")),
+                self._number(snapshot.get("upload_speed")),
+                self._number(snapshot.get("download_speed")),
+                str(snapshot.get("error") or "") or None,
+            ),
+        )
+
+    def finalize_task(self, task_hash, torrent_task=None, deleted_type=None, deleted_reason=None):
+        task_hash = str(task_hash or "")
+        if not task_hash:
+            return
+        torrent_task = torrent_task or {}
+        deleted_at = self._number(torrent_task.get("deleted_time")) or time.time()
+        self._safe_execute(
+            """
+            UPDATE task_profiles
+            SET first_downloaded_at=COALESCE(first_downloaded_at, ?),
+                first_uploaded_at=COALESCE(first_uploaded_at, ?),
+                completion_on=COALESCE(completion_on, ?),
+                deleted_at=COALESCE(deleted_at, ?),
+                deleted_type=COALESCE(deleted_type, ?),
+                deleted_reason=COALESCE(deleted_reason, ?),
+                final_uploaded=?,
+                final_downloaded=?,
+                final_ratio=?,
+                final_seeding_time=?
+            WHERE task_hash=?
+            """,
+            (
+                self._number(torrent_task.get("first_downloaded_time")),
+                self._number(torrent_task.get("first_uploaded_time")),
+                self._number(torrent_task.get("download_dashboard_completed_time")),
+                deleted_at,
+                str(deleted_type or torrent_task.get("deleted_type") or "") or None,
+                str(deleted_reason or torrent_task.get("deleted_reason") or "") or None,
+                self._number(torrent_task.get("uploaded")),
+                self._number(torrent_task.get("downloaded")),
+                self._number(torrent_task.get("ratio")),
+                self._number(torrent_task.get("seeding_time")),
+                task_hash,
+            ),
+        )
+
+    def _ensure_task_profile(self, task_hash, torrent_task=None):
+        torrent_task = torrent_task or {}
+        self._safe_execute(
+            """
+            INSERT OR IGNORE INTO task_profiles(
+                task_hash, site, title, size_bytes, downloader, added_at
+            ) VALUES(?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_hash,
+                str(torrent_task.get("site_name") or ""),
+                str(torrent_task.get("title") or task_hash),
+                self._number(torrent_task.get("total_size") or torrent_task.get("size")),
+                str(torrent_task.get("downloader") or ""),
+                self._number(torrent_task.get("time")) or time.time(),
+            ),
+        )
+
+    @staticmethod
+    def _number(value):
+        try:
+            if value is None or value == "":
+                return None
+            numeric = float(value)
+            return int(numeric) if numeric.is_integer() else numeric
+        except (TypeError, ValueError):
+            return None
+
+    def cleanup(self):
+        cutoff = time.time() - self.retention_days * 86400
+        with self._lock:
+            self._conn.execute("DELETE FROM candidate_snapshots WHERE seen_at < ?", (cutoff,))
+            self._conn.execute(
+                """
+                DELETE FROM brush_runs
+                WHERE started_at < ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM candidate_snapshots s WHERE s.run_id = brush_runs.id
+                  )
+                """,
+                (cutoff,),
+            )
+            self._conn.execute("DELETE FROM task_samples WHERE sampled_at < ?", (cutoff,))
+            self._conn.execute("DELETE FROM task_events WHERE event_at < ?", (cutoff,))
+            self._conn.execute("DELETE FROM downloader_samples WHERE sampled_at < ?", (cutoff,))
+            self._conn.commit()
+
+    def close(self):
+        try:
+            with self._lock:
+                self._conn.commit()
+                self._conn.close()
+        except Exception:
+            pass
+
+    def query_counts(self):
+        result = {}
+        for table in (
+            "brush_runs", "torrent_catalog", "candidate_snapshots", "task_profiles",
+            "task_samples", "task_events", "downloader_samples",
+        ):
+            try:
+                row = self._conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
+                result[table] = int(row["c"]) if row else 0
+            except Exception:
+                result[table] = 0
+        return result
+
+    def query_task_samples(self, task_hash, limit=10000):
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM task_samples WHERE task_hash=? ORDER BY sampled_at DESC LIMIT ?",
+                (task_hash, int(limit or 10000)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        except Exception:
+            return []
+
+    def query_events(self, task_hash, limit=10000):
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM task_events WHERE task_hash=? ORDER BY event_at DESC LIMIT ?",
+                (task_hash, int(limit or 10000)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        except Exception:
+            return []
+
+    def query_downloader_samples(self, downloader, limit=10000):
+        try:
+            rows = self._conn.execute(
+                "SELECT * FROM downloader_samples WHERE downloader=? ORDER BY sampled_at DESC LIMIT ?",
+                (downloader, int(limit or 10000)),
+            ).fetchall()
+            return [dict(row) for row in rows]
+        except Exception:
+            return []
+
+    def count_samples(self, task_hash):
+        try:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM task_samples WHERE task_hash=?",
+                (task_hash,),
+            ).fetchone()
+            return int(row["c"]) if row else 0
+        except Exception:
+            return 0
 
 
 class BrushConfig:
@@ -252,6 +751,12 @@ class BrushConfig:
         self.yield_guard_rehearsal = config.get("yield_guard_rehearsal", True)
         self.yield_guard_detail_log = config.get("yield_guard_detail_log", False)
         self.log_mode = self.__normalize_log_mode(config.get("log_mode", "full"))
+        self.diagnostic_enabled = bool(config.get("diagnostic_enabled", False))
+        try:
+            retention_days = int(float(config.get("diagnostic_retention_days", 30) or 30))
+        except (TypeError, ValueError):
+            retention_days = 30
+        self.diagnostic_retention_days = max(1, retention_days)
         self.multi_downloader_enabled = bool(config.get("multi_downloader_enabled", False))
         self.downloader_profiles = self.__parse_downloader_profiles(config)
         self._downloader_profile_raw = {
@@ -870,6 +1375,7 @@ class BrushFlowLowFreq(_PluginBase):
 
         # 停止现有任务
         self.stop_service()
+        self.__start_diagnostic_recorder()
 
         # 如果站点都没有配置，则不开启定时刷流服务
         if not brush_config.brushsites:
@@ -3680,6 +4186,8 @@ class BrushFlowLowFreq(_PluginBase):
             "yield_guard_rehearsal": True,
             "yield_guard_detail_log": False,
             "log_mode": "full",
+            "diagnostic_enabled": False,
+            "diagnostic_retention_days": 30,
             "freeleech": "free",
             "hr": "yes",
             "enable_site_config": False,
@@ -4643,6 +5151,7 @@ class BrushFlowLowFreq(_PluginBase):
         """
         退出插件
         """
+        self.__stop_diagnostic_recorder()
         try:
             if self._scheduler:
                 self._scheduler.remove_all_jobs()
@@ -4653,6 +5162,56 @@ class BrushFlowLowFreq(_PluginBase):
                 self._scheduler = None
         except Exception as e:
             logger.error(f"停止服务异常: {e}")
+
+    def __diagnostic_db_path(self):
+        try:
+            log_path = getattr(settings, "LOG_PATH", None)
+            if log_path:
+                base = Path(str(log_path))
+            else:
+                config_path = Path(str(getattr(settings, "CONFIG_PATH", "/config")))
+                base = config_path.parent if config_path.suffix.lower() in {".yaml", ".yml"} else config_path
+                base = base / "logs"
+            diagnostic_dir = base if base.name == "plugins" else base / "plugins"
+            diagnostic_dir.mkdir(parents=True, exist_ok=True)
+            return diagnostic_dir / "brushflowlowfreq_diagnostics.db"
+        except Exception:
+            return Path("/tmp") / "brushflowlowfreq_diagnostics.db"
+
+    def __start_diagnostic_recorder(self):
+        self.__stop_diagnostic_recorder()
+        brush_config = self._brush_config
+        if not brush_config or not brush_config.diagnostic_enabled:
+            return
+        try:
+            self.__diagnostic_recorder = DiagnosticRecorder(
+                db_path=self.__diagnostic_db_path(),
+                retention_days=brush_config.diagnostic_retention_days,
+            )
+            self.__diagnostic_recorder.cleanup()
+            logger.info("brushflowlowfreq 独立诊断记录已启动")
+        except Exception:
+            self.__diagnostic_recorder = None
+            logger.warning("brushflowlowfreq 独立诊断记录启动失败", exc_info=True)
+
+    def __stop_diagnostic_recorder(self):
+        try:
+            recorder = getattr(self, "_BrushFlowLowFreq__diagnostic_recorder", None)
+            if recorder:
+                recorder.close()
+        except Exception:
+            logger.warning("brushflowlowfreq 独立诊断记录关闭失败", exc_info=True)
+        self.__diagnostic_recorder = None
+
+    def __diagnostic(self, method_name, *args, **kwargs):
+        recorder = getattr(self, "_BrushFlowLowFreq__diagnostic_recorder", None)
+        if not recorder:
+            return None
+        try:
+            return getattr(recorder, method_name)(*args, **kwargs)
+        except Exception:
+            logger.warning("brushflowlowfreq 诊断记录失败", exc_info=True)
+            return None
 
     # region Brush
 
@@ -10214,6 +10773,8 @@ class BrushFlowLowFreq(_PluginBase):
             "brush_interval_seconds": brush_config.brush_interval_seconds,
             "check_interval_seconds": brush_config.check_interval_seconds,
             "log_mode": brush_config.log_mode,
+            "diagnostic_enabled": brush_config.diagnostic_enabled,
+            "diagnostic_retention_days": brush_config.diagnostic_retention_days,
             "qb_category": brush_config.qb_category,
             "enable_site_config": brush_config.enable_site_config,
             "site_config": brush_config.site_config,

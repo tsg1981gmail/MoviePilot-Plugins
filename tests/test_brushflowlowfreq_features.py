@@ -2,7 +2,10 @@ import importlib.util
 import hashlib
 import json
 import logging
+import shutil
 import sys
+import tempfile
+import time
 import types
 import unittest
 from datetime import datetime, timedelta
@@ -8718,6 +8721,40 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(by_downloader["QB-1"]["active_count"], 1)
         self.assertEqual(by_downloader["QB-1"]["deleted"], 1)
         self.assertEqual(by_downloader["TR-1"]["active_count"], 1)
+
+    def test_diagnostic_config_defaults_are_off_and_30_days(self):
+        config = self.module.BrushConfig({})
+        self.assertFalse(config.diagnostic_enabled)
+        self.assertEqual(config.diagnostic_retention_days, 30)
+
+    def test_diagnostic_disabled_does_not_open_database(self):
+        plugin = self._new_plugin({})
+        self.assertIsNone(getattr(plugin, "_BrushFlowLowFreq__diagnostic_recorder", None))
+
+    def test_diagnostic_recorder_schema_and_counts(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            run_id = recorder.record_brush_start("天空", time.time())
+            self.assertIsNotNone(run_id)
+            recorder.record_brush_end(
+                run_id,
+                finished_at=time.time(),
+                pages=2,
+                candidates_seen=1,
+                added=1,
+                rejected=0,
+                scan_ms=10,
+            )
+            recorder.commit()
+            counts = recorder.query_counts()
+            self.assertEqual(counts["brush_runs"], 1)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
