@@ -403,6 +403,14 @@
 
 规则按页面显示顺序匹配，大小区间为 `最小 <= 种子大小 < 最大`。没有命中任何启用规则的种子仍使用顶部“下载器”选择的默认下载器。关闭该功能后，已有任务仍会按原记录下载器继续检查，不会误删。
 
+## 独立诊断库
+
+v4.3.93 起新增独立 SQLite 诊断记录，默认关闭，只在开启后写入，不参与任何刷流、检查、上传保护或删种判断。
+
+- 配置项：`diagnostic_enabled`、`diagnostic_retention_days`
+- 数据默认保留 30 天，可导出任意 `days` 或 `start`/`end` 日期范围
+- 诊断 API：`/diagnostic/status`、`/diagnostic/summary`、`/diagnostic/candidates`、`/diagnostic/tasks`、`/diagnostic/samples`、`/diagnostic/events`、`/diagnostic/downloaders`、`/diagnostic/export`
+
 ## 上传保护
 
 上传保护是 v4.3.47 重做后的独立功能，位于配置页顶层“上传保护”标签。它只处理插件托管且仍在下载中的种子；已完成或已做种的种子不会更新上传保护计数，不会被上传保护限速，也不会被上传保护删种。
