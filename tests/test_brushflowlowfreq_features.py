@@ -5,6 +5,7 @@ import logging
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -8871,6 +8872,35 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             recorder.cleanup()
             self.assertEqual(recorder.count_samples("hash_new"), 1)
             self.assertEqual(recorder.count_samples("hash_old"), 0)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_recorder_supports_scheduler_thread_writes(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            errors = []
+
+            def write_in_other_thread():
+                try:
+                    recorder.record_task_added("thread_hash", {
+                        "site_name": "天空",
+                        "title": "thread task",
+                        "size": 1,
+                    })
+                    recorder.commit()
+                except Exception as err:
+                    errors.append(err)
+
+            thread = threading.Thread(target=write_in_other_thread)
+            thread.start()
+            thread.join(timeout=5)
+            self.assertEqual(errors, [])
+            self.assertEqual(recorder.query_counts()["task_profiles"], 1)
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

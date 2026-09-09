@@ -46,7 +46,7 @@ class DiagnosticRecorder:
     def __init__(self, db_path, retention_days=30):
         self.db_path = str(db_path)
         self.retention_days = max(1, int(retention_days or 30))
-        self._conn = sqlite3.connect(self.db_path)
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._init_schema()
