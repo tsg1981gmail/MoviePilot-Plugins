@@ -6313,6 +6313,43 @@ class BrushFlowLowFreq(_PluginBase):
             torrent_info_cache: Dict[str, dict] = {}
             live_info_cache: Dict[str, dict] = {}
 
+            diagnostic_snapshot = {
+                "active_count": len(active_torrent_tasks),
+                "downloading_count": 0,
+                "uploading_count": 0,
+                "upload_speed": 0,
+                "download_speed": 0,
+            }
+            for torrent_hash in active_torrent_tasks:
+                torrent = seeding_torrents_dict.get(torrent_hash)
+                if not torrent:
+                    continue
+                torrent_values = torrent if isinstance(torrent, dict) else vars(torrent)
+                try:
+                    up_speed = float(torrent_values.get("upspeed") or torrent_values.get("up_speed") or 0)
+                    dl_speed = float(torrent_values.get("dlspeed") or torrent_values.get("dl_speed") or 0)
+                except (TypeError, ValueError):
+                    up_speed = 0
+                    dl_speed = 0
+                state = str(torrent_values.get("state") or torrent_values.get("status") or "")
+                progress = torrent_values.get("progress")
+                try:
+                    downloading = progress is None or float(progress) < 100 or "downloading" in state.lower()
+                except (TypeError, ValueError):
+                    downloading = "downloading" in state.lower()
+                if downloading:
+                    diagnostic_snapshot["downloading_count"] += 1
+                if up_speed > 0:
+                    diagnostic_snapshot["uploading_count"] += 1
+                diagnostic_snapshot["upload_speed"] += up_speed
+                diagnostic_snapshot["download_speed"] += dl_speed
+            self.__diagnostic(
+                "record_downloader_sample",
+                time.time(),
+                downloader_name or brush_config.downloader,
+                diagnostic_snapshot,
+            )
+
             # 检查种子刷流标签变更情况
             self.__update_seeding_tasks_based_on_tags(torrent_tasks=torrent_tasks, unmanaged_tasks=unmanaged_tasks,
                                                       seeding_torrents_dict=seeding_torrents_dict)
@@ -6468,6 +6505,38 @@ class BrushFlowLowFreq(_PluginBase):
                             if torrent_hash in torrent_tasks:
                                 torrent_tasks[torrent_hash]["deleted"] = True
                                 torrent_tasks[torrent_hash]["deleted_time"] = time.time()
+                                torrent_task = torrent_tasks[torrent_hash]
+                                payloads = (delete_message_map or {}).get(torrent_hash) or []
+                                if payloads:
+                                    delete_reason = str(payloads[-1].get("reason") or "")
+                                else:
+                                    delete_reason = self.__decorate_delete_reason_with_audit(
+                                        reason="满足删除条件并已执行彻底删除（含下载文件）",
+                                        torrent_hash=torrent_hash,
+                                        torrent_task=torrent_task,
+                                        torrent_info=None,
+                                        delete_type="rule_delete",
+                                    )
+                                delete_type = self.__infer_delete_type(delete_reason)
+                                torrent_task["deleted_type"] = delete_type
+                                torrent_task["deleted_reason"] = delete_reason
+                                self.__diagnostic(
+                                    "finalize_task",
+                                    torrent_hash,
+                                    torrent_task,
+                                    deleted_type=delete_type,
+                                    deleted_reason=delete_reason,
+                                )
+                                self.__diagnostic(
+                                    "record_task_event",
+                                    torrent_hash,
+                                    time.time(),
+                                    "deleted",
+                                    {
+                                        "delete_type": delete_type,
+                                        "reason": delete_reason,
+                                    },
+                                )
                         self.__send_delete_messages_after_success(delete_hashes=deleted_hashes,
                                                                   delete_message_map=delete_message_map,
                                                                   torrent_tasks=torrent_tasks)
@@ -11332,6 +11401,18 @@ class BrushFlowLowFreq(_PluginBase):
                     logger.debug(success_message)
                 else:
                     self.__log_summary_key(success_message)
+                self.__diagnostic(
+                    "record_task_event",
+                    torrent_hash,
+                    time.time(),
+                    "upload_action",
+                    {
+                        "action": action,
+                        "stage": (torrent_task or {}).get("upload_protection_stage"),
+                        "reason": reason,
+                        "downloader": downloader_name,
+                    },
+                )
                 return True
             if hasattr(downloader, "change_torrent"):
                 downloader.change_torrent(hash_string=torrent_hash, download_limit=download_limit)
@@ -11347,6 +11428,18 @@ class BrushFlowLowFreq(_PluginBase):
                     logger.debug(success_message)
                 else:
                     self.__log_summary_key(success_message)
+                self.__diagnostic(
+                    "record_task_event",
+                    torrent_hash,
+                    time.time(),
+                    "upload_action",
+                    {
+                        "action": action,
+                        "stage": (torrent_task or {}).get("upload_protection_stage"),
+                        "reason": reason,
+                        "downloader": downloader_name,
+                    },
+                )
                 return True
         except Exception as err:
             logger.error(
@@ -12411,12 +12504,26 @@ class BrushFlowLowFreq(_PluginBase):
                     current_time - deleted_time > archive_threshold_seconds):
                 keys_to_delete.add(key)
                 archived_tasks[key] = value
+                self.__diagnostic(
+                    "record_task_event",
+                    key,
+                    current_time,
+                    "archived",
+                    {"title": value.get("title", ""), "deleted": bool(value.get("deleted"))},
+                )
                 continue
 
             # 场景 2: 检查没有明确删除时间的历史数据
             if value.get("deleted") and deleted_time is None:
                 keys_to_delete.add(key)
                 archived_tasks[key] = value
+                self.__diagnostic(
+                    "record_task_event",
+                    key,
+                    current_time,
+                    "archived",
+                    {"title": value.get("title", ""), "deleted": bool(value.get("deleted"))},
+                )
                 continue
 
         # 从原始字典中移除已删除的条目
