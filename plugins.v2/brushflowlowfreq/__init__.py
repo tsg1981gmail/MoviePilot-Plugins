@@ -1173,7 +1173,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.92"
+    plugin_version = "4.3.93"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -4202,6 +4202,42 @@ class BrushFlowLowFreq(_PluginBase):
                                                                 {'title': '精简日志', 'value': 'concise'}
                                                             ],
                                                             'hint': '控制刷流检查日志可见性，不改变任务判断结果'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VSwitch',
+                                                        'props': {
+                                                            'model': 'diagnostic_enabled',
+                                                            'label': '独立诊断记录',
+                                                            'hint': '只读记录，不参与刷流判断'
+                                                        }
+                                                    }
+                                                ]
+                                            },
+                                            {
+                                                'component': 'VCol',
+                                                'props': {
+                                                    'cols': 12,
+                                                    'md': 4
+                                                },
+                                                'content': [
+                                                    {
+                                                        'component': 'VTextField',
+                                                        'props': {
+                                                            'model': 'diagnostic_retention_days',
+                                                            'label': '诊断保留天数',
+                                                            'type': 'number',
+                                                            'min': 1,
+                                                            'hint': '默认 30 天，只清理诊断库'
                                                         }
                                                     }
                                                 ]
