@@ -7125,8 +7125,9 @@ class BrushFlowLowFreq(_PluginBase):
         if not torrent_task:
             return
         self.__ensure_upload_protection_task_state(torrent_task)
-        reason = (f"上传保护：下载中任务数 {downloading_count} 小于等于例外阈值 {skip_threshold}，"
-                  f"跳过限速及删种并放开下载限速")
+        downloader_name = self._active_downloader_name or brush_config.downloader or ""
+        reason = (f"上传保护：下载器 {downloader_name}，下载中任务数 {downloading_count} "
+                  f"小于等于例外阈值 {skip_threshold}，跳过限速及删种并放开下载限速")
         handled = False
         stage = str(torrent_task.get("upload_protection_stage") or "normal")
         pending_action = str(torrent_task.get("upload_protection_pending_action") or "").strip().lower()
@@ -7158,7 +7159,7 @@ class BrushFlowLowFreq(_PluginBase):
                 site_name=site_name
             )
         self.__log_summary_routine(
-            f"上传保护放开限速评估：站点：{site_name}，hash={torrent_hash}，阶段={stage}，"
+            f"下载器 {downloader_name}，上传保护放开限速评估：站点：{site_name}，hash={torrent_hash}，阶段={stage}，"
             f"待处理动作={pending_action or 'none'}，下载中任务数={downloading_count}，例外阈值={skip_threshold}，"
             f"目标限速={self.__format_speed_kbs(target_limit)}{torrent_log_part}，"
             f"执行结果={'已执行' if handled else '未执行'}，原因={reason}"
@@ -7167,7 +7168,9 @@ class BrushFlowLowFreq(_PluginBase):
         torrent_task["upload_protection_stage"] = "released"
         torrent_task["upload_protection_low_streak"] = 0
         torrent_task["upload_protection_good_streak"] = 0
-        torrent_task["upload_protection_no_upload_streak"] = 0
+        torrent_task["upload_protection_no_upload_streak"] = self.__positive_int(
+            torrent_task.get("upload_protection_no_upload_streak"), 0
+        )
         torrent_task["upload_protection_pending_action"] = None
         torrent_task["upload_protection_release_eligible"] = False
         torrent_task["upload_protection_evaluated_in_check"] = False

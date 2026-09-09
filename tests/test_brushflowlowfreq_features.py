@@ -1298,6 +1298,48 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual([], calls)
         self.assertEqual("released", torrent_task.get("upload_protection_stage"))
 
+    def test_small_pool_release_preserves_no_upload_streak(self):
+        calls = []
+
+        class FakeQbc:
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
+                calls.append((limit, torrent_hashes))
+
+        plugin = self._new_qb_plugin(
+            {
+                "upload_protection_enabled": True,
+                "upload_protection_skip_when_downloading_le": 1,
+            },
+            downloader=SimpleNamespace(qbc=FakeQbc(), is_inactive=lambda: False),
+        )
+        plugin._active_downloader_name = "QB-1"
+        brush_config = self.module.BrushConfig({
+            "upload_protection_enabled": True,
+            "upload_protection_skip_when_downloading_le": 1,
+        })
+        torrent_task = {
+            "title": "仍有观察记录的低价值任务",
+            "upload_protection_stage": "strict_limited",
+            "upload_protection_pending_action": "strict_limit",
+            "upload_protection_low_streak": 12,
+            "upload_protection_good_streak": 0,
+            "upload_protection_no_upload_streak": 39,
+        }
+
+        plugin._BrushFlowLowFreq__release_upload_protection_for_small_pool(
+            torrent_hash="hash1",
+            torrent_task=torrent_task,
+            brush_config=brush_config,
+            site_name="天空",
+            downloading_count=1,
+            skip_threshold=1,
+        )
+
+        self.assertEqual([(0, ["hash1"])], calls)
+        self.assertEqual("released", torrent_task.get("upload_protection_stage"))
+        self.assertEqual(39, torrent_task.get("upload_protection_no_upload_streak"))
+        self.assertEqual(0, torrent_task.get("upload_protection_low_streak"))
+
     def test_qualified_fallback_skips_hash_with_upload_action_in_same_cycle(self):
         calls = []
 
