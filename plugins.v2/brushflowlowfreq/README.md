@@ -6,6 +6,11 @@
 
 ## 版本更新日志
 
+- v4.3.93
+  - **独立诊断库**：新增默认关闭的 SQLite 诊断记录，30 天滚动保留
+  - 诊断只做只读记录，不参与刷流、检查、上传保护或删种判断
+  - 新增只读诊断 API 与任意日期范围导出
+
 - v4.3.92
   - **检查收尾优化**：多下载器完整检查只归档/统计/保存一次，并输出分下载器统计摘要
   - **审计日志**：新增任务与上传保护动作日志显示下载器，便于核对大小分流
@@ -397,6 +402,14 @@
 - 添加任务时的单任务上传/下载限速、保存目录和种子分类
 
 规则按页面显示顺序匹配，大小区间为 `最小 <= 种子大小 < 最大`。没有命中任何启用规则的种子仍使用顶部“下载器”选择的默认下载器。关闭该功能后，已有任务仍会按原记录下载器继续检查，不会误删。
+
+## 独立诊断库
+
+v4.3.93 起新增独立 SQLite 诊断记录，默认关闭，只在开启后写入，不参与任何刷流、检查、上传保护或删种判断。
+
+- 配置项：`diagnostic_enabled`、`diagnostic_retention_days`
+- 数据默认保留 30 天，可导出任意 `days` 或 `start`/`end` 日期范围
+- 诊断 API：`/diagnostic/status`、`/diagnostic/summary`、`/diagnostic/candidates`、`/diagnostic/tasks`、`/diagnostic/samples`、`/diagnostic/events`、`/diagnostic/downloaders`、`/diagnostic/export`
 
 ## 上传保护
 

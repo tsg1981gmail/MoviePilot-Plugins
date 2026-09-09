@@ -2,7 +2,10 @@ import importlib.util
 import hashlib
 import json
 import logging
+import shutil
 import sys
+import tempfile
+import time
 import types
 import unittest
 from datetime import datetime, timedelta
@@ -8040,13 +8043,20 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             finally:
                 loop.close()
 
-    def test_get_api_returns_four_endpoints(self):
-        """get_api 返回 4 个端点定义"""
+    def test_get_api_returns_original_and_diagnostic_endpoints(self):
+        """get_api 返回原有 5 个端点与 8 个诊断端点"""
         plugin = self._new_plugin({"enabled": False})
         api_list = plugin.get_api()
-        self.assertEqual(len(api_list), 5)
+        self.assertEqual(len(api_list), 13)
         paths = {ep["path"] for ep in api_list}
-        self.assertSetEqual(paths, {"/summary", "/daily_compare", "/tasks", "/trend", "/qb_tasks"})
+        original = {"/summary", "/daily_compare", "/tasks", "/trend", "/qb_tasks"}
+        diagnostic = {
+            "/diagnostic/status", "/diagnostic/summary", "/diagnostic/candidates",
+            "/diagnostic/tasks", "/diagnostic/samples", "/diagnostic/events",
+            "/diagnostic/downloaders", "/diagnostic/export",
+        }
+        self.assertTrue(original.issubset(paths))
+        self.assertTrue(diagnostic.issubset(paths))
         for ep in api_list:
             self.assertIn("endpoint", ep)
             self.assertIn("methods", ep)
@@ -8718,6 +8728,169 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(by_downloader["QB-1"]["active_count"], 1)
         self.assertEqual(by_downloader["QB-1"]["deleted"], 1)
         self.assertEqual(by_downloader["TR-1"]["active_count"], 1)
+
+    def test_diagnostic_config_defaults_are_off_and_30_days(self):
+        config = self.module.BrushConfig({})
+        self.assertFalse(config.diagnostic_enabled)
+        self.assertEqual(config.diagnostic_retention_days, 30)
+
+    def test_diagnostic_disabled_does_not_open_database(self):
+        plugin = self._new_plugin({})
+        self.assertIsNone(getattr(plugin, "_BrushFlowLowFreq__diagnostic_recorder", None))
+
+    def test_diagnostic_recorder_schema_and_counts(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            run_id = recorder.record_brush_start("天空", time.time())
+            self.assertIsNotNone(run_id)
+            recorder.record_brush_end(
+                run_id,
+                finished_at=time.time(),
+                pages=2,
+                candidates_seen=1,
+                added=1,
+                rejected=0,
+                scan_ms=10,
+            )
+            recorder.commit()
+            counts = recorder.query_counts()
+            self.assertEqual(counts["brush_runs"], 1)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_records_candidate_snapshot(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            run_id = recorder.record_brush_start("天空", time.time())
+            torrent = SimpleNamespace(
+                page_url="details.php?id=1",
+                title="候选种子",
+                size=5 * 1024 ** 3,
+                seeders=3,
+                leechers=20,
+                downloadvolumefactor=0,
+                uploadvolumefactor=1,
+                free_remaining_minutes=60,
+            )
+            recorder.record_candidate(
+                run_id=run_id,
+                site="天空",
+                torrent=torrent,
+                decision="rejected",
+                reject_reason="发布时间太旧",
+                downloader="NAS QB",
+            )
+            recorder.commit()
+            counts = recorder.query_counts()
+            self.assertEqual(counts["candidate_snapshots"], 1)
+            self.assertEqual(counts["torrent_catalog"], 1)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_records_task_added_and_samples(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            task = {
+                "site_name": "天空",
+                "title": "测试任务",
+                "size": 1024,
+                "time": time.time(),
+            }
+            recorder.record_task_added("hash1", task)
+            recorder.record_task_sample(
+                "hash1",
+                time.time(),
+                "NAS QB",
+                {"downloaded": 10, "uploaded": 20, "state": "downloading"},
+                {"last_check_interval_upspeed": 100},
+            )
+            recorder.record_task_progress("hash1", {
+                "first_downloaded_time": 10,
+                "first_uploaded_time": 20,
+                "download_dashboard_completed_time": 30,
+            })
+            recorder.commit()
+            rows = recorder.query_task_samples("hash1")
+            events = recorder.query_events("hash1")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["state"], "downloading")
+            self.assertTrue(any(event["event_type"] == "added" for event in events))
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_records_events_and_downloader(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            recorder.record_task_added("hash1", {"site_name": "天空", "title": "t", "size": 1})
+            recorder.record_task_event("hash1", time.time(), "deleted", {"type": "no_value"})
+            recorder.record_downloader_sample(time.time(), "NAS QB", {
+                "active_count": 3,
+                "downloading_count": 1,
+                "upload_speed": 100,
+            })
+            recorder.commit()
+            self.assertEqual(recorder.query_events("hash1")[0]["event_type"], "deleted")
+            self.assertEqual(
+                recorder.query_downloader_samples("NAS QB")[0]["active_count"],
+                3,
+            )
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_retention_deletes_only_expired_rows(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            recorder.record_task_added("hash_old", {"site_name": "天空", "title": "old"})
+            recorder.record_task_sample("hash_old", time.time() - 31 * 86400, "NAS QB", {}, {})
+            recorder.record_task_added("hash_new", {"site_name": "天空", "title": "new"})
+            recorder.record_task_sample("hash_new", time.time(), "NAS QB", {}, {})
+            recorder.cleanup()
+            self.assertEqual(recorder.count_samples("hash_new"), 1)
+            self.assertEqual(recorder.count_samples("hash_old"), 0)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_get_api_includes_diagnostic_endpoints(self):
+        plugin = self._new_plugin({})
+        paths = [item["path"] for item in plugin.get_api()]
+        self.assertIn("/diagnostic/status", paths)
+        self.assertIn("/diagnostic/summary", paths)
+        self.assertIn("/diagnostic/candidates", paths)
+        self.assertIn("/diagnostic/tasks", paths)
+        self.assertIn("/diagnostic/samples", paths)
+        self.assertIn("/diagnostic/events", paths)
+        self.assertIn("/diagnostic/downloaders", paths)
+        self.assertIn("/diagnostic/export", paths)
+
+    def test_diagnostic_api_returns_disabled_when_recorder_off(self):
+        plugin = self._new_plugin({})
+        status = plugin._BrushFlowLowFreq__api_diagnostic_status()
+        self.assertFalse(status["enabled"])
 
 
 if __name__ == "__main__":
