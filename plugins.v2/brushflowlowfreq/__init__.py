@@ -634,7 +634,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.91"
+    plugin_version = "4.3.92"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -690,6 +690,19 @@ class BrushFlowLowFreq(_PluginBase):
 
     def __log_summary_key(self, message: str) -> None:
         logger.info(message)
+
+    def __log_added_torrent(self, siteinfo, torrent, downloader_name=None):
+        display_name = (
+            downloader_name
+            or self._active_downloader_name
+            or getattr(self._brush_config, "downloader", "")
+            or ""
+        )
+        logger.info(
+            f"站点 {siteinfo.name}，下载器 {display_name}，新增刷流种子下载"
+            f"（大小 {self.__bytes_to_gb(torrent.size or 0):.2f} GB）："
+            f"{self.__format_title_desc(torrent.title, torrent.description)}"
+        )
 
     @staticmethod
     def __is_external_fetch_noise_log_message(message: str) -> bool:
@@ -4958,8 +4971,11 @@ class BrushFlowLowFreq(_PluginBase):
             # 统计数据
             torrents_size += torrent.size
             statistic_info["count"] += 1
-            logger.info(f"站点 {siteinfo.name}，新增刷流种子下载："
-                        f"{self.__format_title_desc(torrent.title, torrent.description)}")
+            self.__log_added_torrent(
+                siteinfo=siteinfo,
+                torrent=torrent,
+                downloader_name=downloader_name,
+            )
             self.__send_add_message(torrent)
 
         return True
@@ -5518,6 +5534,15 @@ class BrushFlowLowFreq(_PluginBase):
 
     # region Check
 
+    def __finalize_check_cycle(self, torrent_tasks: Optional[Dict[str, dict]] = None) -> None:
+        """单次完整检查（可能是多下载器多轮分组）结束后统一归档并保存统计。"""
+        if torrent_tasks is None:
+            torrent_tasks = self.get_data("torrents") or {}
+        self.__auto_archive_tasks(torrent_tasks=torrent_tasks)
+        self.__prune_download_dashboard_history(torrent_tasks=torrent_tasks)
+        self.__update_and_save_statistic_info(torrent_tasks)
+        self.__log_status("刷流下载任务检查完成")
+
     def __check_multi_downloaders(self) -> None:
         """按任务所属下载器分组执行检查，保持原单下载器代码路径不变。"""
         if not self.__check_and_resolve_plugin_conflict():
@@ -5548,6 +5573,7 @@ class BrushFlowLowFreq(_PluginBase):
                 return
 
             check_names = list(dict.fromkeys(enabled_profile_names + list(groups.keys())))
+            checked_any = False
             for downloader_name in check_names:
                 torrent_hashes = groups.get(downloader_name, [])
                 previous_name = self._active_downloader_name
@@ -5555,11 +5581,20 @@ class BrushFlowLowFreq(_PluginBase):
                 try:
                     if not self.downloader:
                         continue
-                    self.check(downloader_name=str(downloader_name), group_hashes=set(torrent_hashes))
+                    checked_any = True
+                    self.check(
+                        downloader_name=str(downloader_name),
+                        group_hashes=set(torrent_hashes),
+                        finalize=False,
+                    )
                 finally:
                     self._active_downloader_name = previous_name
 
-    def check(self, downloader_name: str = None, group_hashes: Optional[Set[str]] = None):
+            if checked_any:
+                self.__finalize_check_cycle()
+
+    def check(self, downloader_name: str = None, group_hashes: Optional[Set[str]] = None,
+              finalize: bool = True):
         """
         定时检查，删除下载任务
         """
@@ -5793,16 +5828,10 @@ class BrushFlowLowFreq(_PluginBase):
                     excluded_hashes=set(need_delete_hashes) | upload_protection_action_hashes
                 )
 
-            # 归档数据
-            self.__auto_archive_tasks(torrent_tasks=torrent_tasks)
-
-            self.__prune_download_dashboard_history(torrent_tasks=torrent_tasks)
-
-            self.__update_and_save_statistic_info(torrent_tasks)
-
-            self.save_data("torrents", torrent_tasks)
-
-            self.__log_status("刷流下载任务检查完成")
+            if finalize:
+                self.__finalize_check_cycle(torrent_tasks=torrent_tasks)
+            else:
+                self.save_data("torrents", torrent_tasks)
 
     def __update_torrent_tasks_state(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                      torrent_info_cache: Optional[Dict[str, dict]] = None):
@@ -7096,8 +7125,9 @@ class BrushFlowLowFreq(_PluginBase):
         if not torrent_task:
             return
         self.__ensure_upload_protection_task_state(torrent_task)
-        reason = (f"上传保护：下载中任务数 {downloading_count} 小于等于例外阈值 {skip_threshold}，"
-                  f"跳过限速及删种并放开下载限速")
+        downloader_name = self._active_downloader_name or brush_config.downloader or ""
+        reason = (f"上传保护：下载器 {downloader_name}，下载中任务数 {downloading_count} "
+                  f"小于等于例外阈值 {skip_threshold}，跳过限速及删种并放开下载限速")
         handled = False
         stage = str(torrent_task.get("upload_protection_stage") or "normal")
         pending_action = str(torrent_task.get("upload_protection_pending_action") or "").strip().lower()
@@ -7129,7 +7159,7 @@ class BrushFlowLowFreq(_PluginBase):
                 site_name=site_name
             )
         self.__log_summary_routine(
-            f"上传保护放开限速评估：站点：{site_name}，hash={torrent_hash}，阶段={stage}，"
+            f"下载器 {downloader_name}，上传保护放开限速评估：站点：{site_name}，hash={torrent_hash}，阶段={stage}，"
             f"待处理动作={pending_action or 'none'}，下载中任务数={downloading_count}，例外阈值={skip_threshold}，"
             f"目标限速={self.__format_speed_kbs(target_limit)}{torrent_log_part}，"
             f"执行结果={'已执行' if handled else '未执行'}，原因={reason}"
@@ -7138,7 +7168,9 @@ class BrushFlowLowFreq(_PluginBase):
         torrent_task["upload_protection_stage"] = "released"
         torrent_task["upload_protection_low_streak"] = 0
         torrent_task["upload_protection_good_streak"] = 0
-        torrent_task["upload_protection_no_upload_streak"] = 0
+        torrent_task["upload_protection_no_upload_streak"] = self.__positive_int(
+            torrent_task.get("upload_protection_no_upload_streak"), 0
+        )
         torrent_task["upload_protection_pending_action"] = None
         torrent_task["upload_protection_release_eligible"] = False
         torrent_task["upload_protection_evaluated_in_check"] = False
@@ -9193,21 +9225,52 @@ class BrushFlowLowFreq(_PluginBase):
         statistic_info = self.__get_statistic_info()
         archived_tasks = self.get_data("archived") or {}
         combined_tasks = {**torrent_tasks, **archived_tasks}
+        default_name = str(getattr(self._brush_config, "downloader", "") or "未知")
+        downloader_stats = {}
+
+        def _bucket(name):
+            key = str(name or default_name or "未知")
+            bucket = downloader_stats.get(key)
+            if bucket is None:
+                bucket = {
+                    "downloader": key,
+                    "total_count": 0,
+                    "uploaded": 0,
+                    "downloaded": 0,
+                    "deleted": 0,
+                    "active_count": 0,
+                    "unarchived": 0,
+                    "active_uploaded": 0,
+                    "active_downloaded": 0,
+                }
+                downloader_stats[key] = bucket
+            return bucket
 
         for task in combined_tasks.values():
             if task.get("deleted", False):
                 total_deleted += 1
             total_downloaded += task.get("downloaded", 0)
             total_uploaded += task.get("uploaded", 0)
+            bucket = _bucket(task.get("downloader") or default_name)
+            bucket["total_count"] += 1
+            bucket["uploaded"] += task.get("uploaded", 0)
+            bucket["downloaded"] += task.get("downloaded", 0)
+            if task.get("deleted", False):
+                bucket["deleted"] += 1
 
         # 计算torrent_tasks中未标记为删除的活跃任务的统计信息，及待归档的任务数
         for task in torrent_tasks.values():
+            bucket = _bucket(task.get("downloader") or default_name)
             if not task.get("deleted", False):
                 active_uploaded += task.get("uploaded", 0)
                 active_downloaded += task.get("downloaded", 0)
                 active_count += 1
+                bucket["active_count"] += 1
+                bucket["active_uploaded"] += task.get("uploaded", 0)
+                bucket["active_downloaded"] += task.get("downloaded", 0)
             else:
                 total_unarchived += 1
+                bucket["unarchived"] += 1
 
         # 更新统计信息
         total_count = len(combined_tasks)
@@ -9221,6 +9284,7 @@ class BrushFlowLowFreq(_PluginBase):
             "active_uploaded": active_uploaded,
             "active_downloaded": active_downloaded
         })
+        statistic_info["downloaders"] = downloader_stats
 
         self.__log_status(
             f"刷流任务统计数据，总任务数：{total_count}，活跃任务数：{active_count}，已删除：{total_deleted}，"
@@ -9230,6 +9294,20 @@ class BrushFlowLowFreq(_PluginBase):
             f"总上传量：{StringUtils.str_filesize(total_uploaded)}，"
             f"总下载量：{StringUtils.str_filesize(total_downloaded)}"
         )
+
+        for downloader_name in sorted(downloader_stats):
+            bucket = downloader_stats[downloader_name]
+            if not bucket.get("total_count"):
+                continue
+            self.__log_status(
+                f"下载器 {downloader_name} 统计，总任务数：{bucket['total_count']}，"
+                f"活跃任务数：{bucket['active_count']}，已删除：{bucket['deleted']}，"
+                f"待归档：{bucket['unarchived']}，"
+                f"活跃上传量：{StringUtils.str_filesize(bucket['active_uploaded'])}，"
+                f"活跃下载量：{StringUtils.str_filesize(bucket['active_downloaded'])}，"
+                f"总上传量：{StringUtils.str_filesize(bucket['uploaded'])}，"
+                f"总下载量：{StringUtils.str_filesize(bucket['downloaded'])}"
+            )
 
         self.save_data("statistic", statistic_info)
         self.save_data("torrents", torrent_tasks)
@@ -10519,13 +10597,14 @@ class BrushFlowLowFreq(_PluginBase):
         action = str(action or "").strip().lower()
         if action not in {"limit", "strict_limit", "restore_limit", "release_limit"}:
             return False
+        downloader_name = self._active_downloader_name or brush_config.downloader or ""
         torrent_log_part = f"，种子：{torrent_title}" if torrent_title else self.__format_upload_protection_torrent_part(
             torrent_task=torrent_task,
             torrent_hash=torrent_hash
         )
         if brush_config.upload_protection_rehearsal:
             logger.info(
-                f"站点：{site_name}，上传保护演练模式：hash={torrent_hash}{torrent_log_part}，"
+                f"下载器 {downloader_name}，站点：{site_name}，上传保护演练模式：hash={torrent_hash}{torrent_log_part}，"
                 f"动作={action}，原因：{reason}"
             )
             return False
@@ -10563,7 +10642,7 @@ class BrushFlowLowFreq(_PluginBase):
                         or torrent_task.get("qualified_fallback_release_active")):
                     torrent_task["download_limit"] = download_limit
                 success_message = (
-                    f"上传保护执行 qB 动作成功，站点：{site_name}，hash={torrent_hash}，"
+                    f"下载器 {downloader_name}，上传保护执行 qB 动作成功，站点：{site_name}，hash={torrent_hash}，"
                     f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}{torrent_log_part}，原因={reason}"
                 )
                 if getattr(brush_config, "log_mode", "full") == "concise":
@@ -10578,7 +10657,7 @@ class BrushFlowLowFreq(_PluginBase):
                         or torrent_task.get("qualified_fallback_release_active")):
                     torrent_task["download_limit"] = download_limit
                 success_message = (
-                    f"上传保护执行下载器动作成功，站点：{site_name}，hash={torrent_hash}，"
+                    f"下载器 {downloader_name}，上传保护执行下载器动作成功，站点：{site_name}，hash={torrent_hash}，"
                     f"动作={action}，目标限速={self.__format_speed_kbs(download_limit)}{torrent_log_part}，原因={reason}"
                 )
                 if getattr(brush_config, "log_mode", "full") == "concise":
@@ -10588,7 +10667,7 @@ class BrushFlowLowFreq(_PluginBase):
                 return True
         except Exception as err:
             logger.error(
-                f"上传保护执行 qB 动作失败，站点：{site_name}，hash={torrent_hash}，"
+                f"下载器 {downloader_name}，上传保护执行 qB 动作失败，站点：{site_name}，hash={torrent_hash}，"
                 f"动作={action}{torrent_log_part}，原因={reason}，错误：{err}"
             )
         return False

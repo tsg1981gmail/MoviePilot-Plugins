@@ -1217,6 +1217,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             {"log_mode": "full"},
             downloader=SimpleNamespace(qbc=FakeQbc(), is_inactive=lambda: False)
         )
+        plugin._active_downloader_name = "QB-1"
         brush_config = self.module.BrushConfig({
             "log_mode": "full",
             "upload_protection_download_limit_kbs": 300,
@@ -1237,6 +1238,29 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual([(300 * 1024, ["hash1"])], calls)
         self.assertTrue(any("上传保护执行 qB 动作成功" in msg for msg in new_info_logs))
+        self.assertTrue(any("下载器 QB-1" in msg for msg in new_info_logs), new_info_logs)
+
+    def test_added_torrent_log_includes_downloader(self):
+        plugin = self._new_plugin({"downloader": "QB-1"})
+        start_info_count = len(self.module.logger.info_messages)
+        siteinfo = SimpleNamespace(name="天空")
+        torrent = SimpleNamespace(
+            size=6 * 1024 ** 3,
+            title="下载器审计种子",
+            description="description",
+        )
+
+        plugin._BrushFlowLowFreq__log_added_torrent(
+            siteinfo=siteinfo,
+            torrent=torrent,
+            downloader_name="QB-1",
+        )
+
+        new_info_logs = self.module.logger.info_messages[start_info_count:]
+        self.assertTrue(
+            any("下载器 QB-1" in msg and "新增刷流种子下载" in msg for msg in new_info_logs),
+            new_info_logs,
+        )
 
     def test_upload_protection_small_pool_does_not_repeat_release_when_already_released(self):
         calls = []
@@ -1273,6 +1297,48 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         self.assertEqual([], calls)
         self.assertEqual("released", torrent_task.get("upload_protection_stage"))
+
+    def test_small_pool_release_preserves_no_upload_streak(self):
+        calls = []
+
+        class FakeQbc:
+            def torrents_set_download_limit(self, limit=None, torrent_hashes=None):
+                calls.append((limit, torrent_hashes))
+
+        plugin = self._new_qb_plugin(
+            {
+                "upload_protection_enabled": True,
+                "upload_protection_skip_when_downloading_le": 1,
+            },
+            downloader=SimpleNamespace(qbc=FakeQbc(), is_inactive=lambda: False),
+        )
+        plugin._active_downloader_name = "QB-1"
+        brush_config = self.module.BrushConfig({
+            "upload_protection_enabled": True,
+            "upload_protection_skip_when_downloading_le": 1,
+        })
+        torrent_task = {
+            "title": "仍有观察记录的低价值任务",
+            "upload_protection_stage": "strict_limited",
+            "upload_protection_pending_action": "strict_limit",
+            "upload_protection_low_streak": 12,
+            "upload_protection_good_streak": 0,
+            "upload_protection_no_upload_streak": 39,
+        }
+
+        plugin._BrushFlowLowFreq__release_upload_protection_for_small_pool(
+            torrent_hash="hash1",
+            torrent_task=torrent_task,
+            brush_config=brush_config,
+            site_name="天空",
+            downloading_count=1,
+            skip_threshold=1,
+        )
+
+        self.assertEqual([(0, ["hash1"])], calls)
+        self.assertEqual("released", torrent_task.get("upload_protection_stage"))
+        self.assertEqual(39, torrent_task.get("upload_protection_no_upload_streak"))
+        self.assertEqual(0, torrent_task.get("upload_protection_low_streak"))
 
     def test_qualified_fallback_skips_hash_with_upload_action_in_same_cycle(self):
         calls = []
@@ -7897,11 +7963,13 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
     def test_get_page_rebuilds_incorrect_monthly_dashboard_from_daily_statistic(self):
         plugin = self._new_plugin({})
+        stat_month = datetime.now().strftime("%Y-%m")
+        stat_date = f"{stat_month}-06"
         store = self._attach_memory_store(plugin, {
             "torrents": {},
             "daily_statistic": {
-                "2026-07-06": {
-                    "date": "2026-07-06",
+                stat_date: {
+                    "date": stat_date,
                     "uploaded": 300,
                     "downloaded": 400,
                     "task_count": 2,
@@ -7909,8 +7977,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 },
             },
             "monthly_statistic": {
-                "2026-07": {
-                    "date": "2026-07",
+                stat_month: {
+                    "date": stat_month,
                     "uploaded": 9999,
                     "downloaded": 8888,
                     "task_count": 99,
@@ -7921,7 +7989,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
 
         page_text = json.dumps(plugin.get_page(), ensure_ascii=False)
 
-        monthly = store["monthly_statistic"]["2026-07"]
+        monthly = store["monthly_statistic"][stat_month]
         self.assertEqual(300, monthly["uploaded"])
         self.assertEqual(400, monthly["downloaded"])
         self.assertEqual(2, monthly["task_count"])
@@ -8571,6 +8639,85 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(calls[1][0], "TR-1")
         self.assertEqual(calls[1][1], {"hash2"})
         self.assertIsNone(plugin._active_downloader_name)
+
+    def test_multi_downloader_check_finalizes_once(self):
+        """多下载器完整检查只收尾一次"""
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+            "notify": False,
+        })
+        self._attach_memory_store(plugin, {
+            "torrents": {
+                "hash1": {"deleted": False, "downloader": "QB-1"},
+                "hash2": {"deleted": False, "downloader": "TR-1"},
+            },
+            "statistic": {},
+            "archived": {},
+        })
+        check_calls = []
+        final_calls = []
+        plugin.check = lambda **kwargs: check_calls.append(kwargs)
+        plugin._BrushFlowLowFreq__finalize_check_cycle = lambda **kwargs: final_calls.append(kwargs)
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin._BrushFlowLowFreq__configured_downloader_names = lambda: ["QB-1", "TR-1"]
+
+        class FakeDownloader:
+            def is_inactive(self):
+                return False
+
+        class FakeHelper:
+            def get_service(self, name):
+                return SimpleNamespace(name=name, instance=FakeDownloader())
+
+            def is_downloader(self, name, service=None):
+                return name == "qbittorrent"
+
+        plugin.downloader_helper = FakeHelper()
+        plugin._BrushFlowLowFreq__check_multi_downloaders()
+
+        self.assertEqual(len(check_calls), 2)
+        self.assertTrue(all(call.get("finalize") is False for call in check_calls))
+        self.assertEqual(len(final_calls), 1)
+
+    def test_per_downloader_statistic_is_persisted(self):
+        """统计中保存每个下载器的独立摘要"""
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+        })
+        store = self._attach_memory_store(plugin, {
+            "torrents": {
+                "h1": {
+                    "deleted": False,
+                    "downloader": "QB-1",
+                    "uploaded": 10,
+                    "downloaded": 20,
+                },
+                "h2": {
+                    "deleted": False,
+                    "downloader": "TR-1",
+                    "uploaded": 30,
+                    "downloaded": 40,
+                },
+                "h3": {
+                    "deleted": True,
+                    "downloader": "QB-1",
+                    "uploaded": 5,
+                    "downloaded": 7,
+                },
+            },
+            "statistic": {},
+            "archived": {},
+        })
+
+        plugin._BrushFlowLowFreq__update_and_save_statistic_info(store["torrents"])
+
+        by_downloader = store["statistic"]["downloaders"]
+        self.assertEqual(by_downloader["QB-1"]["total_count"], 2)
+        self.assertEqual(by_downloader["QB-1"]["active_count"], 1)
+        self.assertEqual(by_downloader["QB-1"]["deleted"], 1)
+        self.assertEqual(by_downloader["TR-1"]["active_count"], 1)
 
 
 if __name__ == "__main__":
