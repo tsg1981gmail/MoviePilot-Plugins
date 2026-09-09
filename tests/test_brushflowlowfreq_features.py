@@ -8572,6 +8572,85 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(calls[1][1], {"hash2"})
         self.assertIsNone(plugin._active_downloader_name)
 
+    def test_multi_downloader_check_finalizes_once(self):
+        """多下载器完整检查只收尾一次"""
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+            "notify": False,
+        })
+        self._attach_memory_store(plugin, {
+            "torrents": {
+                "hash1": {"deleted": False, "downloader": "QB-1"},
+                "hash2": {"deleted": False, "downloader": "TR-1"},
+            },
+            "statistic": {},
+            "archived": {},
+        })
+        check_calls = []
+        final_calls = []
+        plugin.check = lambda **kwargs: check_calls.append(kwargs)
+        plugin._BrushFlowLowFreq__finalize_check_cycle = lambda **kwargs: final_calls.append(kwargs)
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        plugin._BrushFlowLowFreq__configured_downloader_names = lambda: ["QB-1", "TR-1"]
+
+        class FakeDownloader:
+            def is_inactive(self):
+                return False
+
+        class FakeHelper:
+            def get_service(self, name):
+                return SimpleNamespace(name=name, instance=FakeDownloader())
+
+            def is_downloader(self, name, service=None):
+                return name == "qbittorrent"
+
+        plugin.downloader_helper = FakeHelper()
+        plugin._BrushFlowLowFreq__check_multi_downloaders()
+
+        self.assertEqual(len(check_calls), 2)
+        self.assertTrue(all(call.get("finalize") is False for call in check_calls))
+        self.assertEqual(len(final_calls), 1)
+
+    def test_per_downloader_statistic_is_persisted(self):
+        """统计中保存每个下载器的独立摘要"""
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+        })
+        store = self._attach_memory_store(plugin, {
+            "torrents": {
+                "h1": {
+                    "deleted": False,
+                    "downloader": "QB-1",
+                    "uploaded": 10,
+                    "downloaded": 20,
+                },
+                "h2": {
+                    "deleted": False,
+                    "downloader": "TR-1",
+                    "uploaded": 30,
+                    "downloaded": 40,
+                },
+                "h3": {
+                    "deleted": True,
+                    "downloader": "QB-1",
+                    "uploaded": 5,
+                    "downloaded": 7,
+                },
+            },
+            "statistic": {},
+            "archived": {},
+        })
+
+        plugin._BrushFlowLowFreq__update_and_save_statistic_info(store["torrents"])
+
+        by_downloader = store["statistic"]["downloaders"]
+        self.assertEqual(by_downloader["QB-1"]["total_count"], 2)
+        self.assertEqual(by_downloader["QB-1"]["active_count"], 1)
+        self.assertEqual(by_downloader["QB-1"]["deleted"], 1)
+        self.assertEqual(by_downloader["TR-1"]["active_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
