@@ -5346,6 +5346,7 @@ class BrushFlowLowFreq(_PluginBase):
         brush_config = self.__get_brush_config(sitename=siteinfo.name)
 
         self.__log_status(f"开始获取站点 {siteinfo.name} 的新种子 ...")
+        diagnostic_pages = 0
         if brush_config.include_second_page:
             torrents = []
             for page in range(2):
@@ -5356,10 +5357,12 @@ class BrushFlowLowFreq(_PluginBase):
                 )
                 if page_torrents:
                     torrents.extend(page_torrents)
+                    diagnostic_pages += 1
                     self.__log_status(f"站点 {siteinfo.name} 第{page + 1}页获取到 {len(page_torrents)} 个种子")
                 else:
                     break
         else:
+            diagnostic_pages = 1
             torrents = self.__with_quiet_external_fetch_logs(
                 self.torrents_chain.browse,
                 domain=siteinfo.domain
@@ -5367,6 +5370,41 @@ class BrushFlowLowFreq(_PluginBase):
         if not torrents:
             self.__log_status(f"站点 {siteinfo.name} 没有获取到种子")
             return True
+
+        diagnostic_run_id = self.__diagnostic("record_brush_start", siteinfo.name, time.time())
+        diagnostic_seen = 0
+        diagnostic_added = 0
+        diagnostic_rejected = 0
+        diagnostic_started_at = time.time()
+
+        def diagnostic_record_candidate(torrent, decision, reason=None, downloader=None):
+            nonlocal diagnostic_seen, diagnostic_added, diagnostic_rejected
+            diagnostic_seen += 1
+            if decision == "added":
+                diagnostic_added += 1
+            elif decision != "added_failed":
+                diagnostic_rejected += 1
+            self.__diagnostic(
+                "record_candidate",
+                diagnostic_run_id,
+                siteinfo.name,
+                torrent,
+                decision=decision,
+                reject_reason=reason,
+                downloader=downloader,
+            )
+
+        def diagnostic_finish_brush():
+            self.__diagnostic(
+                "record_brush_end",
+                diagnostic_run_id,
+                time.time(),
+                pages=diagnostic_pages,
+                candidates_seen=diagnostic_seen,
+                added=diagnostic_added,
+                rejected=diagnostic_rejected,
+                scan_ms=int((time.time() - diagnostic_started_at) * 1000),
+            )
 
         self.__cache_free_expire_from_brush_list(
             siteinfo=siteinfo,
@@ -5411,6 +5449,12 @@ class BrushFlowLowFreq(_PluginBase):
                     )
                     self.__log_brush_conditions(passed=add_pre_passed, reason=add_pre_reason, torrent=torrent)
                     if not add_pre_passed:
+                        diagnostic_record_candidate(
+                            torrent,
+                            decision="rejected",
+                            reason=add_pre_reason,
+                            downloader=downloader_name,
+                        )
                         continue
                 finally:
                     self._active_downloader_name = previous_name
@@ -5422,6 +5466,7 @@ class BrushFlowLowFreq(_PluginBase):
                 )
                 self.__log_brush_conditions(passed=pre_condition_passed, reason=reason)
                 if not pre_condition_passed:
+                    diagnostic_finish_brush()
                     return False
 
                 # 判断能否通过保种体积刷流条件
@@ -5431,6 +5476,12 @@ class BrushFlowLowFreq(_PluginBase):
                 )
                 self.__log_brush_conditions(passed=size_condition_passed, reason=reason, torrent=torrent)
                 if not size_condition_passed:
+                    diagnostic_record_candidate(
+                        torrent,
+                        decision="rejected",
+                        reason=reason,
+                        downloader=downloader_name,
+                    )
                     continue
 
             logger.debug(f"种子详情：{torrent}")
@@ -5440,6 +5491,12 @@ class BrushFlowLowFreq(_PluginBase):
                                                                             torrent_tasks=torrent_tasks)
             self.__log_brush_conditions(passed=condition_passed, reason=reason, torrent=torrent)
             if not condition_passed:
+                diagnostic_record_candidate(
+                    torrent,
+                    decision="rejected",
+                    reason=reason,
+                    downloader=downloader_name,
+                )
                 continue
 
             # 添加下载任务
@@ -5454,8 +5511,19 @@ class BrushFlowLowFreq(_PluginBase):
                 hash_string = self.__download(torrent=torrent)
             if not hash_string:
                 logger.warning(f"{torrent.title} 添加刷流任务失败！")
+                diagnostic_record_candidate(
+                    torrent,
+                    decision="added_failed",
+                    reason="添加刷流任务失败",
+                    downloader=downloader_name,
+                )
                 continue
             hash_string = self.__normalize_hash(hash_string)
+            diagnostic_record_candidate(
+                torrent,
+                decision="added",
+                downloader=downloader_name,
+            )
 
             # 触发刷流下载时间并保存任务信息
             torrent_task = {
@@ -5537,6 +5605,7 @@ class BrushFlowLowFreq(_PluginBase):
             )
             self.__send_add_message(torrent)
 
+        diagnostic_finish_brush()
         return True
 
     def __evaluate_size_condition_for_brush(self, torrents_size: float,

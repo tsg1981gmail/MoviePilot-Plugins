@@ -8756,6 +8756,40 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_diagnostic_records_candidate_snapshot(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            run_id = recorder.record_brush_start("天空", time.time())
+            torrent = SimpleNamespace(
+                page_url="details.php?id=1",
+                title="候选种子",
+                size=5 * 1024 ** 3,
+                seeders=3,
+                leechers=20,
+                downloadvolumefactor=0,
+                uploadvolumefactor=1,
+                free_remaining_minutes=60,
+            )
+            recorder.record_candidate(
+                run_id=run_id,
+                site="天空",
+                torrent=torrent,
+                decision="rejected",
+                reject_reason="发布时间太旧",
+                downloader="NAS QB",
+            )
+            recorder.commit()
+            counts = recorder.query_counts()
+            self.assertEqual(counts["candidate_snapshots"], 1)
+            self.assertEqual(counts["torrent_catalog"], 1)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
