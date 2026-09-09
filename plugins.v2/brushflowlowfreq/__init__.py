@@ -372,6 +372,31 @@ class DiagnosticRecorder:
             (task_hash, float(event_at or time.time()), str(event_type or ""), detail_json),
         )
 
+    def record_task_progress(self, task_hash, torrent_task=None):
+        task_hash = str(task_hash or "")
+        if not task_hash:
+            return
+        torrent_task = torrent_task or {}
+        self._ensure_task_profile(task_hash, torrent_task)
+        self._safe_execute(
+            """
+            UPDATE task_profiles
+            SET first_downloaded_at=COALESCE(first_downloaded_at, ?),
+                first_uploaded_at=COALESCE(first_uploaded_at, ?),
+                completion_on=COALESCE(completion_on, ?)
+            WHERE task_hash=?
+            """,
+            (
+                self._number(torrent_task.get("first_downloaded_time")),
+                self._number(torrent_task.get("first_uploaded_time")),
+                self._number(
+                    torrent_task.get("download_dashboard_completed_time")
+                    or torrent_task.get("completion_on")
+                ),
+                task_hash,
+            ),
+        )
+
     def record_downloader_sample(self, sampled_at, downloader, snapshot=None):
         snapshot = snapshot or {}
         self._safe_execute(
@@ -5405,6 +5430,7 @@ class BrushFlowLowFreq(_PluginBase):
                 rejected=diagnostic_rejected,
                 scan_ms=int((time.time() - diagnostic_started_at) * 1000),
             )
+            self.__diagnostic("commit")
 
         self.__cache_free_expire_from_brush_list(
             siteinfo=siteinfo,
@@ -5594,6 +5620,7 @@ class BrushFlowLowFreq(_PluginBase):
                 "downloader": downloader_name or self.service_info.name
             })
             torrent_tasks[hash_string] = torrent_task
+            self.__diagnostic("record_task_added", hash_string, torrent_task)
 
             # 统计数据
             torrents_size += torrent.size
@@ -6169,6 +6196,7 @@ class BrushFlowLowFreq(_PluginBase):
         self.__auto_archive_tasks(torrent_tasks=torrent_tasks)
         self.__prune_download_dashboard_history(torrent_tasks=torrent_tasks)
         self.__update_and_save_statistic_info(torrent_tasks)
+        self.__diagnostic("commit")
         self.__log_status("刷流下载任务检查完成")
 
     def __check_multi_downloaders(self) -> None:
@@ -6460,6 +6488,7 @@ class BrushFlowLowFreq(_PluginBase):
                 self.__finalize_check_cycle(torrent_tasks=torrent_tasks)
             else:
                 self.save_data("torrents", torrent_tasks)
+                self.__diagnostic("commit")
 
     def __update_torrent_tasks_state(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                      torrent_info_cache: Optional[Dict[str, dict]] = None):
@@ -6558,6 +6587,9 @@ class BrushFlowLowFreq(_PluginBase):
                 "last_check_interval_downspeed_valid": interval_downspeed_valid,
                 "last_check_interval_downspeed_reason": interval_downspeed_reason
             })
+            previous_completed_time = self.__number_or_none(
+                torrent_task.get("download_dashboard_completed_time")
+            )
             if self.__is_torrent_seeding_or_completed(torrent_info=torrent_info):
                 completed_time = self.__get_download_dashboard_completed_time(
                     torrent_task=torrent_task,
@@ -6566,6 +6598,27 @@ class BrushFlowLowFreq(_PluginBase):
                 )
                 if completed_time:
                     torrent_task["download_dashboard_completed_time"] = completed_time
+                    if not previous_completed_time:
+                        self.__diagnostic(
+                            "record_task_event",
+                            torrent_hash,
+                            check_time,
+                            "completed",
+                            {
+                                "completion_on": completed_time,
+                                "uploaded": uploaded,
+                                "downloaded": downloaded,
+                            },
+                        )
+            self.__diagnostic("record_task_progress", torrent_hash, torrent_task)
+            self.__diagnostic(
+                "record_task_sample",
+                torrent_hash,
+                check_time,
+                self._active_downloader_name,
+                torrent_info,
+                torrent_task,
+            )
 
     def __apply_upload_protection_actions(self, torrents: List[Any], torrent_tasks: Dict[str, dict],
                                           delete_message_map: Optional[Dict[str, List[dict]]] = None,

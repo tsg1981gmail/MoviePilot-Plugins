@@ -8790,6 +8790,42 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_diagnostic_records_task_added_and_samples(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            task = {
+                "site_name": "天空",
+                "title": "测试任务",
+                "size": 1024,
+                "time": time.time(),
+            }
+            recorder.record_task_added("hash1", task)
+            recorder.record_task_sample(
+                "hash1",
+                time.time(),
+                "NAS QB",
+                {"downloaded": 10, "uploaded": 20, "state": "downloading"},
+                {"last_check_interval_upspeed": 100},
+            )
+            recorder.record_task_progress("hash1", {
+                "first_downloaded_time": 10,
+                "first_uploaded_time": 20,
+                "download_dashboard_completed_time": 30,
+            })
+            recorder.commit()
+            rows = recorder.query_task_samples("hash1")
+            events = recorder.query_events("hash1")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["state"], "downloading")
+            self.assertTrue(any(event["event_type"] == "added" for event in events))
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
