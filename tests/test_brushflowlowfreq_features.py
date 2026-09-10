@@ -8798,6 +8798,89 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_diagnostic_v2_candidate_dedupe_and_run_summary(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            torrent = SimpleNamespace(
+                page_url="details.php?id=9",
+                title="重复候选",
+                size=1024,
+                seeders=1,
+                leechers=10,
+                downloadvolumefactor=0,
+                uploadvolumefactor=1,
+            )
+            for _ in range(3):
+                run_id = recorder.record_brush_start("天空", time.time())
+                recorder.record_candidate(
+                    run_id=run_id,
+                    site="天空",
+                    torrent=torrent,
+                    decision="rejected",
+                    reject_reason="重复种子",
+                )
+            recorder.commit()
+            counts = recorder.query_counts()
+            self.assertEqual(counts["candidate_snapshots"], 1)
+            self.assertEqual(counts["torrent_catalog"], 1)
+            self.assertEqual(counts["candidate_run_summary"], 3)
+            catalog = recorder.fetch_rows(
+                "SELECT seen_count, latest_seeders, latest_leechers FROM torrent_catalog"
+            )
+            self.assertEqual(catalog[0]["seen_count"], 3)
+            self.assertEqual(catalog[0]["latest_leechers"], 10)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_v2_candidate_task_link(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            torrent = SimpleNamespace(
+                page_url="details.php?id=10",
+                title="被添加候选",
+                size=2048,
+                seeders=1,
+                leechers=18,
+                downloadvolumefactor=0,
+                uploadvolumefactor=1,
+            )
+            run_id = recorder.record_brush_start("天空", time.time())
+            recorder.record_candidate(
+                run_id=run_id,
+                site="天空",
+                torrent=torrent,
+                decision="added",
+            )
+            recorder.record_task_added("hash_added", {
+                "site_name": "天空",
+                "title": "被添加候选",
+                "size": 2048,
+                "time": time.time(),
+            })
+            recorder.record_candidate_task_link("天空", torrent, "hash_added")
+            recorder.commit()
+            snapshots = recorder.fetch_rows(
+                "SELECT task_hash FROM candidate_snapshots"
+            )
+            profiles = recorder.fetch_rows(
+                "SELECT source_seeders, source_leechers FROM task_profiles"
+            )
+            self.assertEqual(snapshots[0]["task_hash"], "hash_added")
+            self.assertEqual(profiles[0]["source_seeders"], 1)
+            self.assertEqual(profiles[0]["source_leechers"], 18)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_diagnostic_records_task_added_and_samples(self):
         temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
         try:

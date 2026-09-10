@@ -77,6 +77,10 @@ class DiagnosticRecorder:
                   last_seen_at REAL NOT NULL,
                   seen_count INTEGER NOT NULL DEFAULT 0,
                   size_bytes INTEGER,
+                  latest_seeders INTEGER,
+                  latest_leechers INTEGER,
+                  latest_is_free INTEGER,
+                  latest_free_remaining_minutes REAL,
                   UNIQUE(site, torrent_key)
                 );
                 CREATE TABLE IF NOT EXISTS candidate_snapshots (
@@ -91,7 +95,17 @@ class DiagnosticRecorder:
                   free_remaining_minutes REAL,
                   decision TEXT NOT NULL,
                   reject_reason TEXT,
-                  downloader TEXT
+                  downloader TEXT,
+                  task_hash TEXT,
+                  decision_changed INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS candidate_run_summary (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  run_id INTEGER NOT NULL REFERENCES brush_runs(id) ON DELETE CASCADE,
+                  reason TEXT,
+                  decision TEXT,
+                  count INTEGER NOT NULL DEFAULT 0,
+                  UNIQUE(run_id, reason, decision)
                 );
                 CREATE TABLE IF NOT EXISTS task_profiles (
                   task_hash TEXT PRIMARY KEY,
@@ -103,6 +117,21 @@ class DiagnosticRecorder:
                   first_downloaded_at REAL,
                   first_uploaded_at REAL,
                   completion_on REAL,
+                  source_seeders INTEGER,
+                  source_leechers INTEGER,
+                  source_free INTEGER,
+                  source_free_remaining_minutes REAL,
+                  source_size_bytes INTEGER,
+                  first_real_completed_at REAL,
+                  completion_uploaded INTEGER,
+                  completion_downloaded INTEGER,
+                  upload_before_complete INTEGER,
+                  download_before_complete INTEGER,
+                  upload_after_complete INTEGER,
+                  download_after_complete INTEGER,
+                  peak_interval_upspeed REAL,
+                  peak_interval_upspeed_at REAL,
+                  last_upload_at REAL,
                   deleted_at REAL,
                   deleted_type TEXT,
                   deleted_reason TEXT,
@@ -110,7 +139,9 @@ class DiagnosticRecorder:
                   final_uploaded INTEGER,
                   final_downloaded INTEGER,
                   final_ratio REAL,
-                  final_seeding_time INTEGER
+                  final_seeding_time INTEGER,
+                  final_state TEXT,
+                  final_progress REAL
                 );
                 CREATE TABLE IF NOT EXISTS task_samples (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,6 +191,8 @@ class DiagnosticRecorder:
                   ON candidate_snapshots(seen_at);
                 CREATE INDEX IF NOT EXISTS idx_candidate_snapshots_torrent_id
                   ON candidate_snapshots(torrent_id);
+                CREATE INDEX IF NOT EXISTS idx_candidate_snapshots_task_hash
+                  ON candidate_snapshots(task_hash);
                 CREATE INDEX IF NOT EXISTS idx_task_samples_hash_time
                   ON task_samples(task_hash, sampled_at);
                 CREATE INDEX IF NOT EXISTS idx_task_samples_time
@@ -177,8 +210,8 @@ class DiagnosticRecorder:
         with self._lock:
             now = int(time.time())
             meta = {
-                "schema_version": "1",
-                "plugin_version": "4.3.95",
+                "schema_version": "2",
+                "plugin_version": "4.3.96",
                 "created_at": str(now),
             }
             for key, value in meta.items():
@@ -229,7 +262,7 @@ class DiagnosticRecorder:
         )
 
     def record_candidate(self, run_id, site, torrent, decision, reject_reason=None,
-                         downloader=None):
+                         downloader=None, task_hash=None):
         if not torrent:
             return
         torrent_key = str(getattr(torrent, "page_url", "") or getattr(torrent, "title", "") or "")
@@ -254,19 +287,29 @@ class DiagnosticRecorder:
                 is_free = 1 if float(upload_factor) > 1 else 0
         except (TypeError, ValueError):
             pass
+        row = self._conn.execute(
+            "SELECT id, first_seen_at FROM torrent_catalog WHERE site=? AND torrent_key=?",
+            (site, torrent_key),
+        ).fetchone()
+        is_new = row is None
         self._safe_execute(
             """
             INSERT INTO torrent_catalog(
                 site, page_url, torrent_key, title, first_seen_at, last_seen_at,
-                seen_count, size_bytes
-            ) VALUES(?, ?, ?, ?, ?, ?, 1, ?)
+                seen_count, size_bytes, latest_seeders, latest_leechers,
+                latest_is_free, latest_free_remaining_minutes
+            ) VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
             ON CONFLICT(site, torrent_key) DO UPDATE SET
                 last_seen_at=excluded.last_seen_at,
                 seen_count=torrent_catalog.seen_count + 1,
-                size_bytes=COALESCE(excluded.size_bytes, torrent_catalog.size_bytes)
+                size_bytes=COALESCE(excluded.size_bytes, torrent_catalog.size_bytes),
+                latest_seeders=excluded.latest_seeders,
+                latest_leechers=excluded.latest_leechers,
+                latest_is_free=excluded.latest_is_free,
+                latest_free_remaining_minutes=excluded.latest_free_remaining_minutes
             """,
             (site, str(getattr(torrent, "page_url", "") or torrent_key), torrent_key, title,
-             seen_at, seen_at, size_bytes),
+             seen_at, seen_at, size_bytes, seeders, leechers, is_free, free_remaining_minutes),
         )
         row = self._conn.execute(
             "SELECT id FROM torrent_catalog WHERE site=? AND torrent_key=?",
@@ -274,25 +317,114 @@ class DiagnosticRecorder:
         ).fetchone()
         if row is None:
             return
+        torrent_id = int(row["id"])
+        last_decision_row = self._conn.execute(
+            "SELECT decision FROM candidate_snapshots WHERE torrent_id=? "
+            "ORDER BY seen_at DESC, id DESC LIMIT 1",
+            (torrent_id,),
+        ).fetchone()
+        last_decision = last_decision_row["decision"] if last_decision_row else None
+        decision_changed = int(
+            is_new
+            or last_decision != str(decision or "")
+            or str(decision or "") == "added"
+            or bool(task_hash)
+        )
+        if decision_changed or task_hash:
+            self._safe_execute(
+                """
+                INSERT INTO candidate_snapshots(
+                    run_id, torrent_id, seen_at, size_bytes, seeders, leechers,
+                    is_free, free_remaining_minutes, decision, reject_reason,
+                    downloader, task_hash, decision_changed
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    self._number(run_id),
+                    torrent_id,
+                    seen_at,
+                    size_bytes,
+                    seeders,
+                    leechers,
+                    is_free,
+                    free_remaining_minutes,
+                    str(decision or ""),
+                    str(reject_reason or "") or None,
+                    str(downloader or "") or None,
+                    str(task_hash or "") or None,
+                    decision_changed,
+                ),
+            )
+        else:
+            self._safe_execute(
+                """
+                UPDATE candidate_snapshots
+                SET seen_at=?, size_bytes=COALESCE(?, size_bytes),
+                    seeders=?, leechers=?, is_free=?,
+                    free_remaining_minutes=?, reject_reason=?,
+                    downloader=?
+                WHERE torrent_id=?
+                  AND id=(SELECT id FROM candidate_snapshots
+                          WHERE torrent_id=? ORDER BY seen_at DESC, id DESC LIMIT 1)
+                """,
+                (
+                    seen_at,
+                    size_bytes,
+                    seeders,
+                    leechers,
+                    is_free,
+                    free_remaining_minutes,
+                    str(reject_reason or "") or None,
+                    str(downloader or "") or None,
+                    torrent_id,
+                    torrent_id,
+                ),
+            )
+        reason_key = str(reject_reason or "").strip() or str(decision or "")
         self._safe_execute(
             """
-            INSERT INTO candidate_snapshots(
-                run_id, torrent_id, seen_at, size_bytes, seeders, leechers,
-                is_free, free_remaining_minutes, decision, reject_reason, downloader
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO candidate_run_summary(run_id, reason, decision, count)
+            VALUES(?, ?, ?, 1)
+            ON CONFLICT(run_id, reason, decision) DO UPDATE SET
+                count=candidate_run_summary.count + 1
+            """,
+            (self._number(run_id), reason_key, str(decision or "")),
+        )
+
+    def record_candidate_task_link(self, site, torrent, task_hash):
+        if not task_hash or not torrent:
+            return
+        torrent_key = str(getattr(torrent, "page_url", "") or getattr(torrent, "title", "") or "")
+        row = self._conn.execute(
+            "SELECT id FROM torrent_catalog WHERE site=? AND torrent_key=?",
+            (str(site or ""), torrent_key),
+        ).fetchone()
+        if row:
+            self._safe_execute(
+                "UPDATE candidate_snapshots SET task_hash=? "
+                "WHERE id=(SELECT id FROM candidate_snapshots "
+                "WHERE torrent_id=? AND task_hash IS NULL "
+                "ORDER BY seen_at DESC, id DESC LIMIT 1)",
+                (str(task_hash), int(row["id"])),
+            )
+        self._safe_execute(
+            """
+            UPDATE task_profiles
+            SET source_seeders=(SELECT latest_seeders FROM torrent_catalog WHERE site=? AND torrent_key=?),
+                source_leechers=(SELECT latest_leechers FROM torrent_catalog WHERE site=? AND torrent_key=?),
+                source_free=(SELECT latest_is_free FROM torrent_catalog WHERE site=? AND torrent_key=?),
+                source_free_remaining_minutes=(SELECT latest_free_remaining_minutes
+                                               FROM torrent_catalog WHERE site=? AND torrent_key=?),
+                source_size_bytes=(SELECT size_bytes FROM torrent_catalog WHERE site=? AND torrent_key=?)
+            WHERE task_hash=?
             """,
             (
-                self._number(run_id),
-                int(row["id"]),
-                seen_at,
-                size_bytes,
-                seeders,
-                leechers,
-                is_free,
-                free_remaining_minutes,
-                str(decision or ""),
-                str(reject_reason or "") or None,
-                str(downloader or "") or None,
+                str(site or ""), torrent_key,
+                str(site or ""), torrent_key,
+                str(site or ""), torrent_key,
+                str(site or ""), torrent_key,
+                str(site or ""), torrent_key,
+                str(task_hash),
             ),
         )
 
@@ -378,21 +510,65 @@ class DiagnosticRecorder:
             return
         torrent_task = torrent_task or {}
         self._ensure_task_profile(task_hash, torrent_task)
+        completion_value = self._number(
+            torrent_task.get("download_dashboard_completed_time")
+            or torrent_task.get("completion_on")
+        )
+        if completion_value is not None and completion_value <= 0:
+            completion_value = None
+        first_upload = self._number(torrent_task.get("first_uploaded_time"))
+        first_download = self._number(torrent_task.get("first_downloaded_time"))
+        interval_upspeed = self._number(torrent_task.get("last_check_interval_upspeed"))
+        uploaded = self._number(torrent_task.get("uploaded"))
+        downloaded = self._number(torrent_task.get("downloaded"))
+        last_uploaded = self._number(torrent_task.get("uploaded"))
+        last_sample_at = self._number(torrent_task.get("last_check_time")) or time.time()
         self._safe_execute(
             """
             UPDATE task_profiles
             SET first_downloaded_at=COALESCE(first_downloaded_at, ?),
                 first_uploaded_at=COALESCE(first_uploaded_at, ?),
-                completion_on=COALESCE(completion_on, ?)
+                completion_on=COALESCE(completion_on, ?),
+                first_real_completed_at=CASE
+                    WHEN ? IS NOT NULL THEN COALESCE(first_real_completed_at, ?)
+                    ELSE first_real_completed_at END,
+                completion_uploaded=CASE
+                    WHEN ? IS NOT NULL THEN COALESCE(completion_uploaded, ?)
+                    ELSE completion_uploaded END,
+                completion_downloaded=CASE
+                    WHEN ? IS NOT NULL THEN COALESCE(completion_downloaded, ?)
+                    ELSE completion_downloaded END,
+                peak_interval_upspeed=CASE
+                    WHEN ? IS NOT NULL AND COALESCE(peak_interval_upspeed, 0) < ?
+                    THEN ? ELSE peak_interval_upspeed END,
+                peak_interval_upspeed_at=CASE
+                    WHEN ? IS NOT NULL AND COALESCE(peak_interval_upspeed, 0) < ?
+                    THEN ? ELSE peak_interval_upspeed_at END,
+                last_upload_at=CASE
+                    WHEN ? IS NOT NULL AND ? > 0 THEN ?
+                    ELSE COALESCE(last_upload_at, ?) END
             WHERE task_hash=?
             """,
             (
-                self._number(torrent_task.get("first_downloaded_time")),
-                self._number(torrent_task.get("first_uploaded_time")),
-                self._number(
-                    torrent_task.get("download_dashboard_completed_time")
-                    or torrent_task.get("completion_on")
-                ),
+                first_download,
+                first_upload,
+                completion_value,
+                completion_value,
+                completion_value,
+                uploaded,
+                uploaded,
+                downloaded,
+                downloaded,
+                interval_upspeed,
+                interval_upspeed,
+                last_sample_at,
+                interval_upspeed,
+                interval_upspeed,
+                last_sample_at,
+                last_uploaded,
+                last_uploaded,
+                last_sample_at,
+                last_sample_at,
                 task_hash,
             ),
         )
@@ -418,12 +594,24 @@ class DiagnosticRecorder:
             ),
         )
 
-    def finalize_task(self, task_hash, torrent_task=None, deleted_type=None, deleted_reason=None):
+    def finalize_task(self, task_hash, torrent_task=None, deleted_type=None, deleted_reason=None,
+                      torrent_info=None):
         task_hash = str(task_hash or "")
         if not task_hash:
             return
         torrent_task = torrent_task or {}
+        torrent_info = torrent_info or {}
         deleted_at = self._number(torrent_task.get("deleted_time")) or time.time()
+        final_state = str(torrent_info.get("state") or torrent_task.get("state") or "") or None
+        final_downloaded = self._number(torrent_task.get("downloaded")) or 0
+        total_size = self._number(
+            torrent_info.get("total_size")
+            or torrent_task.get("total_size")
+            or torrent_task.get("size")
+        )
+        final_progress = self._number(torrent_info.get("progress"))
+        if final_progress is None and total_size:
+            final_progress = min(100.0, max(0.0, final_downloaded * 100.0 / float(total_size)))
         self._safe_execute(
             """
             UPDATE task_profiles
@@ -436,7 +624,9 @@ class DiagnosticRecorder:
                 final_uploaded=?,
                 final_downloaded=?,
                 final_ratio=?,
-                final_seeding_time=?
+                final_seeding_time=?,
+                final_state=?,
+                final_progress=?
             WHERE task_hash=?
             """,
             (
@@ -450,6 +640,8 @@ class DiagnosticRecorder:
                 self._number(torrent_task.get("downloaded")),
                 self._number(torrent_task.get("ratio")),
                 self._number(torrent_task.get("seeding_time")),
+                final_state,
+                final_progress,
                 task_hash,
             ),
         )
@@ -492,6 +684,31 @@ class DiagnosticRecorder:
                 WHERE started_at < ?
                   AND NOT EXISTS (
                     SELECT 1 FROM candidate_snapshots s WHERE s.run_id = brush_runs.id
+                  ) AND NOT EXISTS (
+                    SELECT 1 FROM candidate_run_summary c WHERE c.run_id = brush_runs.id
+                  )
+                """,
+                (cutoff,),
+            )
+            self._conn.execute(
+                """
+                DELETE FROM candidate_run_summary
+                WHERE run_id IN (
+                  SELECT id FROM brush_runs
+                  WHERE started_at < ?
+                    AND NOT EXISTS (
+                      SELECT 1 FROM candidate_snapshots s WHERE s.run_id = brush_runs.id
+                    )
+                )
+                """,
+                (cutoff,),
+            )
+            self._conn.execute(
+                """
+                DELETE FROM brush_runs
+                WHERE started_at < ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM candidate_snapshots s WHERE s.run_id = brush_runs.id
                   )
                 """,
                 (cutoff,),
@@ -513,7 +730,7 @@ class DiagnosticRecorder:
         result = {}
         for table in (
             "brush_runs", "torrent_catalog", "candidate_snapshots", "task_profiles",
-            "task_samples", "task_events", "downloader_samples",
+            "task_samples", "task_events", "downloader_samples", "candidate_run_summary",
         ):
             try:
                 row = self._conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
@@ -1173,7 +1390,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.95"
+    plugin_version = "4.3.96"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -5590,7 +5807,7 @@ class BrushFlowLowFreq(_PluginBase):
                 base = base / "logs"
             diagnostic_dir = base if base.name == "plugins" else base / "plugins"
             diagnostic_dir.mkdir(parents=True, exist_ok=True)
-            return diagnostic_dir / "brushflowlowfreq_diagnostics.db"
+            return diagnostic_dir / "brushflowlowfreq_diagnostics_v2.db"
         except Exception:
             return Path("/tmp") / "brushflowlowfreq_diagnostics.db"
 
@@ -6012,6 +6229,12 @@ class BrushFlowLowFreq(_PluginBase):
             })
             torrent_tasks[hash_string] = torrent_task
             self.__diagnostic("record_task_added", hash_string, torrent_task)
+            self.__diagnostic(
+                "record_candidate_task_link",
+                siteinfo.name,
+                torrent,
+                hash_string,
+            )
 
             # 统计数据
             torrents_size += torrent.size
@@ -6715,15 +6938,16 @@ class BrushFlowLowFreq(_PluginBase):
                 torrent = seeding_torrents_dict.get(torrent_hash)
                 if not torrent:
                     continue
-                torrent_values = torrent if isinstance(torrent, dict) else vars(torrent)
+                torrent_info_cache[torrent_hash] = self.__get_torrent_info(torrent)
+                info = torrent_info_cache[torrent_hash]
                 try:
-                    up_speed = float(torrent_values.get("upspeed") or torrent_values.get("up_speed") or 0)
-                    dl_speed = float(torrent_values.get("dlspeed") or torrent_values.get("dl_speed") or 0)
+                    up_speed = float(info.get("upspeed") or 0)
+                    dl_speed = float(info.get("dlspeed") or 0)
                 except (TypeError, ValueError):
                     up_speed = 0
                     dl_speed = 0
-                state = str(torrent_values.get("state") or torrent_values.get("status") or "")
-                progress = torrent_values.get("progress")
+                state = str(info.get("state") or "")
+                progress = info.get("progress")
                 try:
                     downloading = progress is None or float(progress) < 100 or "downloading" in state.lower()
                 except (TypeError, ValueError):
@@ -6911,12 +7135,14 @@ class BrushFlowLowFreq(_PluginBase):
                                 delete_type = self.__infer_delete_type(delete_reason)
                                 torrent_task["deleted_type"] = delete_type
                                 torrent_task["deleted_reason"] = delete_reason
+                                delete_torrent_info = (torrent_info_cache or {}).get(torrent_hash) or {}
                                 self.__diagnostic(
                                     "finalize_task",
                                     torrent_hash,
                                     torrent_task,
                                     deleted_type=delete_type,
                                     deleted_reason=delete_reason,
+                                    torrent_info=delete_torrent_info,
                                 )
                                 self.__diagnostic(
                                     "record_task_event",
