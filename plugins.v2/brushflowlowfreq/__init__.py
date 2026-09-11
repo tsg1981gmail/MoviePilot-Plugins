@@ -183,6 +183,87 @@ class DiagnosticRecorder:
                   download_speed REAL,
                   error TEXT
                 );
+                CREATE TABLE IF NOT EXISTS downloader_config_snapshots (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  sampled_at REAL NOT NULL,
+                  downloader TEXT NOT NULL,
+                  enabled INTEGER,
+                  is_default INTEGER,
+                  maxdlcount INTEGER,
+                  maxupspeed REAL,
+                  maxdlspeed REAL,
+                  disksize REAL,
+                  up_speed REAL,
+                  dl_speed REAL,
+                  save_path TEXT,
+                  qb_category TEXT,
+                  raw_json TEXT
+                );
+                CREATE TABLE IF NOT EXISTS downloader_resource_samples (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  sampled_at REAL NOT NULL,
+                  downloader TEXT NOT NULL,
+                  global_total INTEGER,
+                  global_downloading INTEGER,
+                  global_queued INTEGER,
+                  global_paused INTEGER,
+                  global_checking INTEGER,
+                  global_seeding INTEGER,
+                  managed_total INTEGER,
+                  managed_downloading INTEGER,
+                  managed_seeding INTEGER,
+                  global_up_speed REAL,
+                  global_dl_speed REAL,
+                  managed_up_speed REAL,
+                  managed_dl_speed REAL,
+                  global_up_limit REAL,
+                  global_dl_limit REAL,
+                  disk_total INTEGER,
+                  disk_used INTEGER,
+                  disk_free INTEGER,
+                  managed_seed_size INTEGER,
+                  error TEXT
+                );
+                CREATE TABLE IF NOT EXISTS task_swarm_samples (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_hash TEXT NOT NULL REFERENCES task_profiles(task_hash) ON DELETE CASCADE,
+                  site TEXT,
+                  torrent_key TEXT,
+                  sampled_at REAL NOT NULL,
+                  seeders INTEGER,
+                  leechers INTEGER,
+                  is_free INTEGER,
+                  free_remaining_minutes REAL,
+                  rank_position INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS scheduler_shadow_decisions (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  decided_at REAL NOT NULL,
+                  candidate_key TEXT NOT NULL,
+                  torrent_id INTEGER,
+                  task_hash TEXT,
+                  actual_downloader TEXT,
+                  recommended_downloader TEXT,
+                  candidate_size INTEGER,
+                  source_seeders INTEGER,
+                  source_leechers INTEGER,
+                  predicted_upload_score REAL,
+                  selected_resource_score REAL,
+                  hard_constraint_json TEXT,
+                  downloader_scores_json TEXT,
+                  decision_reason TEXT,
+                  decision_ms INTEGER,
+                  executed INTEGER NOT NULL DEFAULT 0,
+                  mode TEXT NOT NULL DEFAULT 'shadow'
+                );
+                CREATE TABLE IF NOT EXISTS task_transfer_events (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_hash TEXT NOT NULL REFERENCES task_profiles(task_hash) ON DELETE CASCADE,
+                  event_at REAL NOT NULL,
+                  event_type TEXT NOT NULL,
+                  downloader TEXT,
+                  detail TEXT
+                );
                 CREATE TABLE IF NOT EXISTS diagnostic_meta (
                   key TEXT PRIMARY KEY,
                   value TEXT NOT NULL
@@ -203,6 +284,16 @@ class DiagnosticRecorder:
                   ON task_events(event_at);
                 CREATE INDEX IF NOT EXISTS idx_downloader_samples_time
                   ON downloader_samples(sampled_at, downloader);
+                CREATE INDEX IF NOT EXISTS idx_downloader_config_time
+                  ON downloader_config_snapshots(sampled_at, downloader);
+                CREATE INDEX IF NOT EXISTS idx_downloader_resources_time
+                  ON downloader_resource_samples(sampled_at, downloader);
+                CREATE INDEX IF NOT EXISTS idx_task_swarm_hash_time
+                  ON task_swarm_samples(task_hash, sampled_at);
+                CREATE INDEX IF NOT EXISTS idx_scheduler_shadow_time
+                  ON scheduler_shadow_decisions(decided_at);
+                CREATE INDEX IF NOT EXISTS idx_task_transfer_hash_time
+                  ON task_transfer_events(task_hash, event_at);
                 """
             )
 
@@ -210,8 +301,8 @@ class DiagnosticRecorder:
         with self._lock:
             now = int(time.time())
             meta = {
-                "schema_version": "2",
-                "plugin_version": "4.3.96",
+                "schema_version": "2.1",
+                "plugin_version": "4.3.97",
                 "created_at": str(now),
             }
             for key, value in meta.items():
@@ -591,6 +682,147 @@ class DiagnosticRecorder:
                 self._number(snapshot.get("upload_speed")),
                 self._number(snapshot.get("download_speed")),
                 str(snapshot.get("error") or "") or None,
+            ),
+        )
+
+    def record_downloader_config(self, downloader, data=None):
+        data = data or {}
+        self._safe_execute(
+            """
+            INSERT INTO downloader_config_snapshots(
+                sampled_at, downloader, enabled, is_default, maxdlcount,
+                maxupspeed, maxdlspeed, disksize, up_speed, dl_speed,
+                save_path, qb_category, raw_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                time.time(),
+                str(downloader or ""),
+                self._number(data.get("enabled")),
+                self._number(data.get("is_default")),
+                self._number(data.get("maxdlcount")),
+                self._number(data.get("maxupspeed")),
+                self._number(data.get("maxdlspeed")),
+                self._number(data.get("disksize")),
+                self._number(data.get("up_speed")),
+                self._number(data.get("dl_speed")),
+                str(data.get("save_path") or "") or None,
+                str(data.get("qb_category") or "") or None,
+                str(data.get("raw_json") or "") or None,
+            ),
+        )
+
+    def record_downloader_resource(self, downloader, data=None):
+        data = data or {}
+        self._safe_execute(
+            """
+            INSERT INTO downloader_resource_samples(
+                sampled_at, downloader, global_total, global_downloading,
+                global_queued, global_paused, global_checking, global_seeding,
+                managed_total, managed_downloading, managed_seeding,
+                global_up_speed, global_dl_speed, managed_up_speed,
+                managed_dl_speed, global_up_limit, global_dl_limit,
+                disk_total, disk_used, disk_free, managed_seed_size, error
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                time.time(),
+                str(downloader or ""),
+                self._number(data.get("global_total")),
+                self._number(data.get("global_downloading")),
+                self._number(data.get("global_queued")),
+                self._number(data.get("global_paused")),
+                self._number(data.get("global_checking")),
+                self._number(data.get("global_seeding")),
+                self._number(data.get("managed_total")),
+                self._number(data.get("managed_downloading")),
+                self._number(data.get("managed_seeding")),
+                self._number(data.get("global_up_speed")),
+                self._number(data.get("global_dl_speed")),
+                self._number(data.get("managed_up_speed")),
+                self._number(data.get("managed_dl_speed")),
+                self._number(data.get("global_up_limit")),
+                self._number(data.get("global_dl_limit")),
+                self._number(data.get("disk_total")),
+                self._number(data.get("disk_used")),
+                self._number(data.get("disk_free")),
+                self._number(data.get("managed_seed_size")),
+                str(data.get("error") or "") or None,
+            ),
+        )
+
+    def record_task_swarm_sample(self, task_hash, site=None, torrent_key=None,
+                                 seeders=None, leechers=None, is_free=None,
+                                 free_remaining_minutes=None, rank_position=None,
+                                 sampled_at=None):
+        self._safe_execute(
+            """
+            INSERT INTO task_swarm_samples(
+                task_hash, site, torrent_key, sampled_at, seeders, leechers,
+                is_free, free_remaining_minutes, rank_position
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(task_hash or ""),
+                str(site or "") or None,
+                str(torrent_key or "") or None,
+                float(sampled_at or time.time()),
+                self._number(seeders),
+                self._number(leechers),
+                self._number(is_free),
+                self._number(free_remaining_minutes),
+                self._number(rank_position),
+            ),
+        )
+
+    def record_shadow_decision(self, candidate_key, actual_downloader=None,
+                               recommended_downloader=None, candidate_size=None,
+                               source_seeders=None, source_leechers=None,
+                               predicted_upload_score=None, selected_resource_score=None,
+                               hard_constraint=None, downloader_scores=None,
+                               decision_reason=None, decision_ms=None, task_hash=None,
+                               torrent_id=None, decided_at=None):
+        self._safe_execute(
+            """
+            INSERT INTO scheduler_shadow_decisions(
+                decided_at, candidate_key, torrent_id, task_hash, actual_downloader,
+                recommended_downloader, candidate_size, source_seeders, source_leechers,
+                predicted_upload_score, selected_resource_score, hard_constraint_json,
+                downloader_scores_json, decision_reason, decision_ms, executed, mode
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'shadow')
+            """,
+            (
+                float(decided_at or time.time()),
+                str(candidate_key or ""),
+                self._number(torrent_id),
+                str(task_hash or "") or None,
+                str(actual_downloader or "") or None,
+                str(recommended_downloader or "") or None,
+                self._number(candidate_size),
+                self._number(source_seeders),
+                self._number(source_leechers),
+                self._number(predicted_upload_score),
+                self._number(selected_resource_score),
+                json.dumps(hard_constraint or {}, ensure_ascii=False, default=str),
+                json.dumps(downloader_scores or {}, ensure_ascii=False, default=str),
+                str(decision_reason or "") or None,
+                self._number(decision_ms),
+            ),
+        )
+
+    def record_transfer_event(self, task_hash, event_type, downloader=None,
+                              detail=None, event_at=None):
+        self._safe_execute(
+            """
+            INSERT INTO task_transfer_events(task_hash, event_at, event_type, downloader, detail)
+            VALUES(?, ?, ?, ?, ?)
+            """,
+            (
+                str(task_hash or ""),
+                float(event_at or time.time()),
+                str(event_type or ""),
+                str(downloader or "") or None,
+                json.dumps(detail or {}, ensure_ascii=False, default=str),
             ),
         )
 
@@ -1627,6 +1859,7 @@ class BrushFlowLowFreq(_PluginBase):
         # 停止现有任务
         self.stop_service()
         self.__start_diagnostic_recorder()
+        self.__record_downloader_config_snapshot()
 
         # 如果站点都没有配置，则不开启定时刷流服务
         if not brush_config.brushsites:
@@ -5835,6 +6068,32 @@ class BrushFlowLowFreq(_PluginBase):
         except Exception:
             logger.warning("brushflowlowfreq 独立诊断记录关闭失败", exc_info=True)
         self.__diagnostic_recorder = None
+
+    def __record_downloader_config_snapshot(self):
+        recorder = self.__diagnostic_recorder_or_none()
+        brush_config = self._brush_config
+        if not recorder or not brush_config:
+            return
+        names = self.__configured_downloader_names()
+        if not names and brush_config.downloader:
+            names = [brush_config.downloader]
+        for name in names:
+            profile = self.__get_downloader_profile(name)
+            data = {
+                "enabled": bool(profile.get("enabled")),
+                "is_default": name == brush_config.downloader,
+                "maxdlcount": profile.get("maxdlcount") or brush_config.maxdlcount,
+                "maxupspeed": profile.get("maxupspeed") or brush_config.maxupspeed,
+                "maxdlspeed": profile.get("maxdlspeed") or brush_config.maxdlspeed,
+                "disksize": profile.get("disksize") or brush_config.disksize,
+                "up_speed": profile.get("up_speed") or brush_config.up_speed,
+                "dl_speed": profile.get("dl_speed") or brush_config.dl_speed,
+                "save_path": profile.get("save_path") or brush_config.save_path,
+                "qb_category": profile.get("qb_category") or brush_config.qb_category,
+                "raw_json": json.dumps(profile, ensure_ascii=False, default=str),
+            }
+            self.__diagnostic("record_downloader_config", name, data)
+        self.__diagnostic("commit")
 
     def __diagnostic(self, method_name, *args, **kwargs):
         recorder = getattr(self, "_BrushFlowLowFreq__diagnostic_recorder", None)

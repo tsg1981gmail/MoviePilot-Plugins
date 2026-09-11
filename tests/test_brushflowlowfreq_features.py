@@ -8764,6 +8764,44 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_diagnostic_v21_schema_and_downloader_config(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            tables = {
+                row["name"] for row in recorder.fetch_rows(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            for name in (
+                "downloader_config_snapshots",
+                "downloader_resource_samples",
+                "task_swarm_samples",
+                "scheduler_shadow_decisions",
+                "task_transfer_events",
+            ):
+                self.assertIn(name, tables)
+            recorder.record_downloader_config("QB-1", {
+                "enabled": True,
+                "is_default": True,
+                "maxdlcount": 3,
+                "maxdlspeed": 1024,
+            })
+            recorder.commit()
+            rows = recorder.fetch_rows("SELECT * FROM downloader_config_snapshots")
+            self.assertEqual(rows[0]["downloader"], "QB-1")
+            self.assertEqual(rows[0]["maxdlcount"], 3)
+            meta = recorder.fetch_rows(
+                "SELECT value FROM diagnostic_meta WHERE key='schema_version'"
+            )
+            self.assertEqual(meta[0]["value"], "2.1")
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_diagnostic_records_candidate_snapshot(self):
         temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
         try:
