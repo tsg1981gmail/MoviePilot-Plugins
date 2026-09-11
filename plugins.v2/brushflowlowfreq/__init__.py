@@ -6258,6 +6258,24 @@ class BrushFlowLowFreq(_PluginBase):
             self.save_data("statistic", statistic_info)
             self.__log_status("刷流任务执行完成")
 
+    @staticmethod
+    def __find_managed_hash_for_torrent(torrent, torrent_tasks):
+        if not torrent or not torrent_tasks:
+            return None
+        site_name = str(getattr(torrent, "site_name", "") or "")
+        page_url = str(getattr(torrent, "page_url", "") or "")
+        title = str(getattr(torrent, "title", "") or "")
+        for task_hash, task in torrent_tasks.items():
+            if not isinstance(task, dict) or task.get("deleted"):
+                continue
+            if site_name and task.get("site_name") and site_name != task.get("site_name"):
+                continue
+            if page_url and page_url == task.get("page_url"):
+                return task_hash
+            if title and title == task.get("title"):
+                return task_hash
+        return None
+
     def __brush_site_torrents(self, siteid, torrent_tasks: Dict[str, dict], statistic_info: Dict[str, int],
                               subscribe_titles: Set[str], multi: bool = False) -> bool:
         """
@@ -6353,7 +6371,32 @@ class BrushFlowLowFreq(_PluginBase):
         self.__log_status(f"正在准备种子刷流，数量 {len(torrents)}")
 
         # 过滤种子
-        for torrent in torrents:
+        for rank_position, torrent in enumerate(torrents):
+            managed_hash = self.__find_managed_hash_for_torrent(
+                torrent=torrent,
+                torrent_tasks=torrent_tasks
+            )
+            if managed_hash:
+                try:
+                    free_remaining = self.__get_free_remaining_minutes(
+                        freedate=getattr(torrent, "freedate", None),
+                        freedate_diff=getattr(torrent, "freedate_diff", None),
+                        title=getattr(torrent, "title", ""),
+                        description=getattr(torrent, "description", ""),
+                    )
+                except Exception:
+                    free_remaining = None
+                self.__diagnostic(
+                    "record_task_swarm_sample",
+                    task_hash=managed_hash,
+                    site=siteinfo.name,
+                    torrent_key=str(getattr(torrent, "page_url", "") or getattr(torrent, "title", "")),
+                    seeders=getattr(torrent, "seeders", None),
+                    leechers=getattr(torrent, "leechers", None) or getattr(torrent, "peers", None),
+                    is_free=1 if self.__is_free_torrent(torrent) else 0,
+                    free_remaining_minutes=free_remaining,
+                    rank_position=rank_position,
+                )
             downloader_name = None
             if multi:
                 downloader_name = self.__resolve_downloader_for_size(torrent.size)

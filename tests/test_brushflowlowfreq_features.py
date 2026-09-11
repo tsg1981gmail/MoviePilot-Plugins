@@ -8838,6 +8838,32 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_diagnostic_v21_task_swarm_sample(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            recorder.record_task_added("hash1", {"site_name": "天空", "title": "t"})
+            recorder.record_task_swarm_sample(
+                task_hash="hash1",
+                site="天空",
+                torrent_key="details.php?id=1",
+                seeders=1,
+                leechers=18,
+                is_free=1,
+                free_remaining_minutes=60,
+                rank_position=3,
+            )
+            recorder.commit()
+            rows = recorder.fetch_rows("SELECT * FROM task_swarm_samples")
+            self.assertEqual(rows[0]["leechers"], 18)
+            self.assertEqual(rows[0]["rank_position"], 3)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_diagnostic_records_candidate_snapshot(self):
         temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
         try:
