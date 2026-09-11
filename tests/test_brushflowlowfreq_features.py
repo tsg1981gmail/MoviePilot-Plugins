@@ -8804,6 +8804,27 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_diagnostic_v21_meta_updates_on_existing_database(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            db_path = str(Path(temp_dir) / "diagnostic.db")
+            recorder = self.module.DiagnosticRecorder(db_path=db_path, retention_days=30)
+            recorder._conn.execute(
+                "UPDATE diagnostic_meta SET value='2' WHERE key='schema_version'"
+            )
+            recorder._conn.commit()
+            recorder.close()
+
+            reopened = self.module.DiagnosticRecorder(db_path=db_path, retention_days=30)
+            meta = {
+                row["key"]: row["value"]
+                for row in reopened.fetch_rows("SELECT key, value FROM diagnostic_meta")
+            }
+            self.assertEqual(meta["schema_version"], "2.1")
+            reopened.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_diagnostic_v21_downloader_resource_and_state(self):
         temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
         try:

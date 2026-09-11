@@ -300,14 +300,19 @@ class DiagnosticRecorder:
     def _set_meta(self):
         with self._lock:
             now = int(time.time())
-            meta = {
+            self._conn.execute(
+                "INSERT OR IGNORE INTO diagnostic_meta(key, value) VALUES('created_at', ?)",
+                (str(now),),
+            )
+            for key, value in {
                 "schema_version": "2.1",
                 "plugin_version": "4.3.97",
-                "created_at": str(now),
-            }
-            for key, value in meta.items():
+            }.items():
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO diagnostic_meta(key, value) VALUES(?, ?)",
+                    """
+                    INSERT INTO diagnostic_meta(key, value) VALUES(?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                    """,
                     (key, value),
                 )
 
