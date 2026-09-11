@@ -8048,13 +8048,15 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         """get_api 返回原有 5 个端点与 8 个诊断端点"""
         plugin = self._new_plugin({"enabled": False})
         api_list = plugin.get_api()
-        self.assertEqual(len(api_list), 13)
+        self.assertEqual(len(api_list), 17)
         paths = {ep["path"] for ep in api_list}
         original = {"/summary", "/daily_compare", "/tasks", "/trend", "/qb_tasks"}
         diagnostic = {
             "/diagnostic/status", "/diagnostic/summary", "/diagnostic/candidates",
             "/diagnostic/tasks", "/diagnostic/samples", "/diagnostic/events",
             "/diagnostic/downloaders", "/diagnostic/export",
+            "/diagnostic/downloader-config", "/diagnostic/downloader-resources",
+            "/diagnostic/swarm", "/diagnostic/scheduler",
         }
         self.assertTrue(original.issubset(paths))
         self.assertTrue(diagnostic.issubset(paths))
@@ -8760,6 +8762,164 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             recorder.commit()
             counts = recorder.query_counts()
             self.assertEqual(counts["brush_runs"], 1)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_v21_schema_and_downloader_config(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            tables = {
+                row["name"] for row in recorder.fetch_rows(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            for name in (
+                "downloader_config_snapshots",
+                "downloader_resource_samples",
+                "task_swarm_samples",
+                "scheduler_shadow_decisions",
+                "task_transfer_events",
+            ):
+                self.assertIn(name, tables)
+            recorder.record_downloader_config("QB-1", {
+                "enabled": True,
+                "is_default": True,
+                "maxdlcount": 3,
+                "maxdlspeed": 1024,
+            })
+            recorder.commit()
+            rows = recorder.fetch_rows("SELECT * FROM downloader_config_snapshots")
+            self.assertEqual(rows[0]["downloader"], "QB-1")
+            self.assertEqual(rows[0]["maxdlcount"], 3)
+            meta = recorder.fetch_rows(
+                "SELECT value FROM diagnostic_meta WHERE key='schema_version'"
+            )
+            self.assertEqual(meta[0]["value"], "2.1")
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_v21_downloader_resource_and_state(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            recorder.record_downloader_resource("QB-1", {
+                "global_total": 10,
+                "global_downloading": 2,
+                "global_queued": 1,
+                "managed_total": 4,
+                "managed_downloading": 1,
+                "global_up_speed": 100,
+                "global_dl_speed": 200,
+            })
+            recorder.commit()
+            rows = recorder.fetch_rows("SELECT * FROM downloader_resource_samples")
+            self.assertEqual(rows[0]["global_total"], 10)
+            self.assertEqual(rows[0]["managed_downloading"], 1)
+            self.assertEqual(
+                self.module.DiagnosticRecorder.diagnostic_state_bucket(
+                    "uploading", progress=0.5, completion_on=1, seeding_time=60
+                ),
+                "seeding",
+            )
+            self.assertEqual(
+                self.module.DiagnosticRecorder.diagnostic_state_bucket(
+                    "downloading", progress=0.5
+                ),
+                "downloading",
+            )
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_v21_task_swarm_sample(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            recorder.record_task_added("hash1", {"site_name": "天空", "title": "t"})
+            recorder.record_task_swarm_sample(
+                task_hash="hash1",
+                site="天空",
+                torrent_key="details.php?id=1",
+                seeders=1,
+                leechers=18,
+                is_free=1,
+                free_remaining_minutes=60,
+                rank_position=3,
+            )
+            recorder.commit()
+            rows = recorder.fetch_rows("SELECT * FROM task_swarm_samples")
+            self.assertEqual(rows[0]["leechers"], 18)
+            self.assertEqual(rows[0]["rank_position"], 3)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_v21_shadow_scheduler_records_without_execution(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            plugin = self._new_plugin({
+                "downloader": "QB-1",
+                "multi_downloader_enabled": True,
+            })
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            plugin._BrushFlowLowFreq__diagnostic_recorder = recorder
+            plugin._BrushFlowLowFreq__configured_downloader_names = (
+                lambda: ["QB-1", "TR-1"]
+            )
+            recommendation = plugin._BrushFlowLowFreq__evaluate_shadow_scheduler(
+                candidate={
+                    "size": 1024,
+                    "seeders": 1,
+                    "leechers": 20,
+                    "title": "shadow candidate",
+                },
+                actual_downloader="QB-1",
+                torrent_key="details.php?id=1",
+                task_hash="hash1",
+            )
+            recorder.commit()
+            self.assertEqual(recommendation, "QB-1")
+            rows = recorder.fetch_rows("SELECT * FROM scheduler_shadow_decisions")
+            self.assertEqual(rows[0]["actual_downloader"], "QB-1")
+            self.assertEqual(rows[0]["mode"], "shadow")
+            self.assertEqual(rows[0]["executed"], 0)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_v21_transfer_events(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            recorder.record_task_added("hash1", {"site_name": "天空", "title": "t"})
+            recorder.record_transfer_event(
+                "hash1",
+                "download_started",
+                "QB-1",
+                {"downloaded": 1024},
+            )
+            recorder.commit()
+            rows = recorder.fetch_rows("SELECT * FROM task_transfer_events")
+            self.assertEqual(rows[0]["event_type"], "download_started")
+            self.assertEqual(rows[0]["downloader"], "QB-1")
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
