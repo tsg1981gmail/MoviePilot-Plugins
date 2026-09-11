@@ -6276,6 +6276,126 @@ class BrushFlowLowFreq(_PluginBase):
                 return task_hash
         return None
 
+    def __record_shadow_decision(self, **kwargs):
+        self.__diagnostic("record_shadow_decision", **kwargs)
+
+    def __evaluate_shadow_scheduler(self, candidate, actual_downloader=None,
+                                    torrent_key=None, task_hash=None,
+                                    torrent_id=None):
+        """
+        只计算影子调度建议，不改变实际下载器。
+        """
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder or not candidate:
+            return None
+        started_at = time.time()
+        size_bytes = self.__number_or_none(candidate.get("size")) or 0
+        seeders = max(0, self.__number_or_none(candidate.get("seeders")) or 0)
+        leechers = max(0, self.__number_or_none(candidate.get("leechers")) or 0)
+        predicted_upload_score = leechers / max(seeders + 1.0, 1.0)
+        brush_config = self._brush_config
+        scores = {}
+        constraints = {}
+        recommended = None
+        selected_score = None
+        for name in self.__configured_downloader_names() or ([brush_config.downloader] if brush_config else []):
+            profile = self.__get_downloader_profile(name)
+            rows = recorder.fetch_rows(
+                "SELECT * FROM downloader_resource_samples WHERE downloader=? "
+                "ORDER BY sampled_at DESC LIMIT 1",
+                (name,),
+            )
+            latest = rows[0] if rows else {}
+            enabled = bool(profile.get("enabled", name == getattr(brush_config, "downloader", None)))
+            maxdlcount = profile.get("maxdlcount") or getattr(brush_config, "maxdlcount", None)
+            maxupspeed = profile.get("maxupspeed") or getattr(brush_config, "maxupspeed", None)
+            maxdlspeed = profile.get("maxdlspeed") or getattr(brush_config, "maxdlspeed", None)
+            disksize = profile.get("disksize") or getattr(brush_config, "disksize", None)
+            managed_downloading = self.__number_or_none(latest.get("managed_downloading")) or 0
+            global_up_speed = self.__number_or_none(latest.get("global_up_speed")) or 0
+            global_dl_speed = self.__number_or_none(latest.get("global_dl_speed")) or 0
+            managed_seed_size = self.__number_or_none(latest.get("managed_seed_size")) or 0
+
+            slot_ok = True
+            if maxdlcount and managed_downloading >= int(maxdlcount):
+                slot_ok = False
+            upload_ok = True
+            if maxupspeed and global_up_speed >= float(maxupspeed) * 1024:
+                upload_ok = False
+            download_ok = True
+            if maxdlspeed and global_dl_speed >= float(maxdlspeed) * 1024:
+                download_ok = False
+            disk_ok = True
+            if disksize and managed_seed_size + size_bytes > float(disksize) * 1024 ** 3:
+                disk_ok = False
+
+            slot_headroom = (
+                max(0.0, 1.0 - managed_downloading / float(maxdlcount))
+                if maxdlcount else 1.0
+            )
+            upload_headroom = (
+                max(0.0, 1.0 - global_up_speed / (float(maxupspeed) * 1024))
+                if maxupspeed else 1.0
+            )
+            download_headroom = (
+                max(0.0, 1.0 - global_dl_speed / (float(maxdlspeed) * 1024))
+                if maxdlspeed else 1.0
+            )
+            disk_headroom = (
+                max(0.0, 1.0 - (managed_seed_size + size_bytes) / (float(disksize) * 1024 ** 3))
+                if disksize else 1.0
+            )
+            recent_upload_efficiency = min(1.0, global_up_speed / (1024 * 1024))
+            resource_score = (
+                slot_headroom
+                * upload_headroom
+                * download_headroom
+                * disk_headroom
+                * recent_upload_efficiency
+            )
+            hard_ok = enabled and slot_ok and upload_ok and download_ok and disk_ok
+            if not hard_ok:
+                resource_score = 0.0
+            score = predicted_upload_score * resource_score
+            scores[name] = {
+                "score": round(score, 6),
+                "resource_score": round(resource_score, 6),
+                "slot_headroom": round(slot_headroom, 6),
+                "upload_headroom": round(upload_headroom, 6),
+                "download_headroom": round(download_headroom, 6),
+                "disk_headroom": round(disk_headroom, 6),
+            }
+            constraints[name] = {
+                "enabled": enabled,
+                "slot_ok": slot_ok,
+                "upload_ok": upload_ok,
+                "download_ok": download_ok,
+                "disk_ok": disk_ok,
+            }
+            if hard_ok and (selected_score is None or score > selected_score):
+                selected_score = score
+                recommended = name
+
+        self.__record_shadow_decision(
+            candidate_key=str(torrent_key or candidate.get("title") or ""),
+            task_hash=task_hash,
+            torrent_id=torrent_id,
+            actual_downloader=actual_downloader,
+            recommended_downloader=recommended,
+            candidate_size=size_bytes,
+            source_seeders=seeders,
+            source_leechers=leechers,
+            predicted_upload_score=predicted_upload_score,
+            selected_resource_score=(
+                scores.get(recommended, {}).get("resource_score") if recommended else None
+            ),
+            hard_constraint=constraints,
+            downloader_scores=scores,
+            decision_reason="shadow_only",
+            decision_ms=int((time.time() - started_at) * 1000),
+        )
+        return recommended
+
     def __brush_site_torrents(self, siteid, torrent_tasks: Dict[str, dict], statistic_info: Dict[str, int],
                               subscribe_titles: Set[str], multi: bool = False) -> bool:
         """
@@ -6488,6 +6608,17 @@ class BrushFlowLowFreq(_PluginBase):
                 )
                 continue
             hash_string = self.__normalize_hash(hash_string)
+            self.__evaluate_shadow_scheduler(
+                candidate={
+                    "size": torrent.size,
+                    "seeders": torrent.seeders,
+                    "leechers": getattr(torrent, "leechers", None) or getattr(torrent, "peers", None),
+                    "title": torrent.title,
+                },
+                actual_downloader=downloader_name or brush_config.downloader,
+                torrent_key=str(torrent.page_url or torrent.title),
+                task_hash=hash_string,
+            )
             diagnostic_record_candidate(
                 torrent,
                 decision="added",

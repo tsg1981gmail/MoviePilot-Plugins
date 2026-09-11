@@ -8864,6 +8864,42 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_diagnostic_v21_shadow_scheduler_records_without_execution(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            plugin = self._new_plugin({
+                "downloader": "QB-1",
+                "multi_downloader_enabled": True,
+            })
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            plugin._BrushFlowLowFreq__diagnostic_recorder = recorder
+            plugin._BrushFlowLowFreq__configured_downloader_names = (
+                lambda: ["QB-1", "TR-1"]
+            )
+            recommendation = plugin._BrushFlowLowFreq__evaluate_shadow_scheduler(
+                candidate={
+                    "size": 1024,
+                    "seeders": 1,
+                    "leechers": 20,
+                    "title": "shadow candidate",
+                },
+                actual_downloader="QB-1",
+                torrent_key="details.php?id=1",
+                task_hash="hash1",
+            )
+            recorder.commit()
+            self.assertEqual(recommendation, "QB-1")
+            rows = recorder.fetch_rows("SELECT * FROM scheduler_shadow_decisions")
+            self.assertEqual(rows[0]["actual_downloader"], "QB-1")
+            self.assertEqual(rows[0]["mode"], "shadow")
+            self.assertEqual(rows[0]["executed"], 0)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_diagnostic_records_candidate_snapshot(self):
         temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
         try:
