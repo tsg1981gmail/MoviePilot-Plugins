@@ -8900,6 +8900,28 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_diagnostic_v21_transfer_events(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            recorder.record_task_added("hash1", {"site_name": "天空", "title": "t"})
+            recorder.record_transfer_event(
+                "hash1",
+                "download_started",
+                "QB-1",
+                {"downloaded": 1024},
+            )
+            recorder.commit()
+            rows = recorder.fetch_rows("SELECT * FROM task_transfer_events")
+            self.assertEqual(rows[0]["event_type"], "download_started")
+            self.assertEqual(rows[0]["downloader"], "QB-1")
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_diagnostic_records_candidate_snapshot(self):
         temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
         try:

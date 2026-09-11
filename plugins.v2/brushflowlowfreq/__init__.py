@@ -6701,6 +6701,13 @@ class BrushFlowLowFreq(_PluginBase):
                 torrent,
                 hash_string,
             )
+            self.__diagnostic(
+                "record_transfer_event",
+                hash_string,
+                "add_requested",
+                downloader_name or brush_config.downloader,
+                {"site": siteinfo.name, "title": torrent.title},
+            )
 
             # 统计数据
             torrents_size += torrent.size
@@ -7661,6 +7668,16 @@ class BrushFlowLowFreq(_PluginBase):
                                         "reason": delete_reason,
                                     },
                                 )
+                                self.__diagnostic(
+                                    "record_transfer_event",
+                                    torrent_hash,
+                                    "deleted",
+                                    torrent_task.get("downloader"),
+                                    {
+                                        "delete_type": delete_type,
+                                        "reason": delete_reason,
+                                    },
+                                )
                         self.__send_delete_messages_after_success(delete_hashes=deleted_hashes,
                                                                   delete_message_map=delete_message_map,
                                                                   torrent_tasks=torrent_tasks)
@@ -7709,9 +7726,23 @@ class BrushFlowLowFreq(_PluginBase):
             # 记录首次有下载数据的时间（存量迁移 + 新种子追踪）
             if torrent_task.get("first_downloaded_time") is None and downloaded > 0:
                 torrent_task["first_downloaded_time"] = check_time
+                self.__diagnostic(
+                    "record_transfer_event",
+                    torrent_hash,
+                    "download_started",
+                    self._active_downloader_name or torrent_task.get("downloader"),
+                    {"downloaded": downloaded},
+                )
             # 记录首次有上传数据的时间（存量迁移 + 新种子追踪）
             if torrent_task.get("first_uploaded_time") is None and uploaded > 0:
                 torrent_task["first_uploaded_time"] = check_time
+                self.__diagnostic(
+                    "record_transfer_event",
+                    torrent_hash,
+                    "first_uploaded",
+                    self._active_downloader_name or torrent_task.get("downloader"),
+                    {"uploaded": uploaded},
+                )
 
             last_check_uploaded = torrent_task.get("last_check_uploaded")
             last_check_downloaded = torrent_task.get("last_check_downloaded")
@@ -7797,6 +7828,17 @@ class BrushFlowLowFreq(_PluginBase):
                             torrent_hash,
                             check_time,
                             "completed",
+                            {
+                                "completion_on": completed_time,
+                                "uploaded": uploaded,
+                                "downloaded": downloaded,
+                            },
+                        )
+                        self.__diagnostic(
+                            "record_transfer_event",
+                            torrent_hash,
+                            "completed",
+                            self._active_downloader_name or torrent_task.get("downloader"),
                             {
                                 "completion_on": completed_time,
                                 "uploaded": uploaded,
@@ -13635,6 +13677,13 @@ class BrushFlowLowFreq(_PluginBase):
                     "archived",
                     {"title": value.get("title", ""), "deleted": bool(value.get("deleted"))},
                 )
+                self.__diagnostic(
+                    "record_transfer_event",
+                    key,
+                    "archived",
+                    value.get("downloader"),
+                    {"title": value.get("title", "")},
+                )
                 continue
 
             # 场景 2: 检查没有明确删除时间的历史数据
@@ -13647,6 +13696,13 @@ class BrushFlowLowFreq(_PluginBase):
                     current_time,
                     "archived",
                     {"title": value.get("title", ""), "deleted": bool(value.get("deleted"))},
+                )
+                self.__diagnostic(
+                    "record_transfer_event",
+                    key,
+                    "archived",
+                    value.get("downloader"),
+                    {"title": value.get("title", "")},
                 )
                 continue
 
