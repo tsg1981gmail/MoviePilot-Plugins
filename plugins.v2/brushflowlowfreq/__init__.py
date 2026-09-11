@@ -981,6 +981,26 @@ class DiagnosticRecorder:
             self._conn.execute("DELETE FROM task_samples WHERE sampled_at < ?", (cutoff,))
             self._conn.execute("DELETE FROM task_events WHERE event_at < ?", (cutoff,))
             self._conn.execute("DELETE FROM downloader_samples WHERE sampled_at < ?", (cutoff,))
+            self._conn.execute(
+                "DELETE FROM downloader_config_snapshots WHERE sampled_at < ?",
+                (cutoff,),
+            )
+            self._conn.execute(
+                "DELETE FROM downloader_resource_samples WHERE sampled_at < ?",
+                (cutoff,),
+            )
+            self._conn.execute(
+                "DELETE FROM task_swarm_samples WHERE sampled_at < ?",
+                (cutoff,),
+            )
+            self._conn.execute(
+                "DELETE FROM scheduler_shadow_decisions WHERE decided_at < ?",
+                (cutoff,),
+            )
+            self._conn.execute(
+                "DELETE FROM task_transfer_events WHERE event_at < ?",
+                (cutoff,),
+            )
             self._conn.commit()
 
     def close(self):
@@ -1657,7 +1677,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.96"
+    plugin_version = "4.3.97"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
