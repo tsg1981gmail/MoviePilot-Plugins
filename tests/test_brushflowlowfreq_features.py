@@ -8048,13 +8048,15 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         """get_api 返回原有 5 个端点与 8 个诊断端点"""
         plugin = self._new_plugin({"enabled": False})
         api_list = plugin.get_api()
-        self.assertEqual(len(api_list), 13)
+        self.assertEqual(len(api_list), 17)
         paths = {ep["path"] for ep in api_list}
         original = {"/summary", "/daily_compare", "/tasks", "/trend", "/qb_tasks"}
         diagnostic = {
             "/diagnostic/status", "/diagnostic/summary", "/diagnostic/candidates",
             "/diagnostic/tasks", "/diagnostic/samples", "/diagnostic/events",
             "/diagnostic/downloaders", "/diagnostic/export",
+            "/diagnostic/downloader-config", "/diagnostic/downloader-resources",
+            "/diagnostic/swarm", "/diagnostic/scheduler",
         }
         self.assertTrue(original.issubset(paths))
         self.assertTrue(diagnostic.issubset(paths))

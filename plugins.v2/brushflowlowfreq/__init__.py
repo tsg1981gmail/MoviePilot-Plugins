@@ -996,6 +996,8 @@ class DiagnosticRecorder:
         for table in (
             "brush_runs", "torrent_catalog", "candidate_snapshots", "task_profiles",
             "task_samples", "task_events", "downloader_samples", "candidate_run_summary",
+            "downloader_config_snapshots", "downloader_resource_samples",
+            "task_swarm_samples", "scheduler_shadow_decisions", "task_transfer_events",
         ):
             try:
                 row = self._conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
@@ -2123,6 +2125,26 @@ class BrushFlowLowFreq(_PluginBase):
                 "methods": ["GET"],
             },
             {
+                "path": "/diagnostic/downloader-config",
+                "endpoint": self.__api_diagnostic_downloader_config,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/downloader-resources",
+                "endpoint": self.__api_diagnostic_downloader_resources,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/swarm",
+                "endpoint": self.__api_diagnostic_swarm,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/scheduler",
+                "endpoint": self.__api_diagnostic_scheduler,
+                "methods": ["GET"],
+            },
+            {
                 "path": "/diagnostic/export",
                 "endpoint": self.__api_diagnostic_export,
                 "methods": ["GET"],
@@ -2831,10 +2853,78 @@ class BrushFlowLowFreq(_PluginBase):
         params.append(int(limit or 10000))
         return {"enabled": True, "start": range_start, "end": range_end, "rows": recorder.fetch_rows(sql, params)}
 
+    def __api_diagnostic_downloader_config(self, days: int = 30, start: float = None,
+                                           end: float = None, downloader: str = "",
+                                           limit: int = 10000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        sql = "SELECT * FROM downloader_config_snapshots WHERE sampled_at>=? AND sampled_at<=?"
+        params = [range_start, range_end]
+        if downloader:
+            sql += " AND downloader=?"
+            params.append(downloader)
+        sql += " ORDER BY sampled_at ASC LIMIT ?"
+        params.append(int(limit or 10000))
+        return {"enabled": True, "start": range_start, "end": range_end,
+                "rows": recorder.fetch_rows(sql, params)}
+
+    def __api_diagnostic_downloader_resources(self, days: int = 30, start: float = None,
+                                              end: float = None, downloader: str = "",
+                                              limit: int = 10000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        sql = "SELECT * FROM downloader_resource_samples WHERE sampled_at>=? AND sampled_at<=?"
+        params = [range_start, range_end]
+        if downloader:
+            sql += " AND downloader=?"
+            params.append(downloader)
+        sql += " ORDER BY sampled_at ASC LIMIT ?"
+        params.append(int(limit or 10000))
+        return {"enabled": True, "start": range_start, "end": range_end,
+                "rows": recorder.fetch_rows(sql, params)}
+
+    def __api_diagnostic_swarm(self, days: int = 30, start: float = None, end: float = None,
+                               task_hash: str = "", limit: int = 10000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        sql = "SELECT * FROM task_swarm_samples WHERE sampled_at>=? AND sampled_at<=?"
+        params = [range_start, range_end]
+        if task_hash:
+            sql += " AND task_hash=?"
+            params.append(task_hash)
+        sql += " ORDER BY sampled_at ASC LIMIT ?"
+        params.append(int(limit or 10000))
+        return {"enabled": True, "start": range_start, "end": range_end,
+                "rows": recorder.fetch_rows(sql, params)}
+
+    def __api_diagnostic_scheduler(self, days: int = 30, start: float = None,
+                                   end: float = None, limit: int = 10000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        rows = recorder.fetch_rows(
+            "SELECT * FROM scheduler_shadow_decisions "
+            "WHERE decided_at>=? AND decided_at<=? ORDER BY decided_at ASC LIMIT ?",
+            (range_start, range_end, int(limit or 10000)),
+        )
+        return {"enabled": True, "start": range_start, "end": range_end, "rows": rows}
+
     def __api_diagnostic_export(self, days: int = 30, start: float = None, end: float = None,
                                 include_candidates: bool = True, include_tasks: bool = True,
                                 include_samples: bool = True, include_events: bool = True,
-                                include_downloaders: bool = True):
+                                include_downloaders: bool = True,
+                                include_downloader_configs: bool = True,
+                                include_downloader_resources: bool = True,
+                                include_swarm: bool = True,
+                                include_scheduler: bool = True,
+                                include_transfer_events: bool = True):
         data = self.__api_diagnostic_summary(days=days, start=start, end=end)
         if not data.get("enabled"):
             return data
@@ -2849,6 +2939,33 @@ class BrushFlowLowFreq(_PluginBase):
             payload["events"] = self.__api_diagnostic_events(days=days, start=start, end=end, limit=100000)
         if include_downloaders:
             payload["downloaders"] = self.__api_diagnostic_downloaders(days=days, start=start, end=end, limit=100000)
+        if include_downloader_configs:
+            payload["downloader_configs"] = self.__api_diagnostic_downloader_config(
+                days=days, start=start, end=end, limit=100000
+            )
+        if include_downloader_resources:
+            payload["downloader_resources"] = self.__api_diagnostic_downloader_resources(
+                days=days, start=start, end=end, limit=100000
+            )
+        if include_swarm:
+            payload["swarm_samples"] = self.__api_diagnostic_swarm(
+                days=days, start=start, end=end, limit=100000
+            )
+        if include_scheduler:
+            payload["scheduler_decisions"] = self.__api_diagnostic_scheduler(
+                days=days, start=start, end=end, limit=100000
+            )
+        if include_transfer_events:
+            recorder = self.__diagnostic_recorder_or_none()
+            range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+            payload["transfer_events"] = {
+                "enabled": bool(recorder),
+                "rows": recorder.fetch_rows(
+                    "SELECT * FROM task_transfer_events WHERE event_at>=? AND event_at<=? "
+                    "ORDER BY event_at ASC LIMIT 100000",
+                    (range_start, range_end),
+                ) if recorder else [],
+            }
         return payload
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -5840,6 +5957,11 @@ class BrushFlowLowFreq(_PluginBase):
             ["任务样本", str(counts.get("task_samples", 0))],
             ["生命周期事件", str(counts.get("task_events", 0))],
             ["下载器快照", str(counts.get("downloader_samples", 0))],
+            ["下载器配置快照", str(counts.get("downloader_config_snapshots", 0))],
+            ["下载器资源快照", str(counts.get("downloader_resource_samples", 0))],
+            ["Swarm 样本", str(counts.get("task_swarm_samples", 0))],
+            ["影子调度决策", str(counts.get("scheduler_shadow_decisions", 0))],
+            ["传输事件", str(counts.get("task_transfer_events", 0))],
         ]
 
         return [{
