@@ -906,6 +906,39 @@ class DiagnosticRecorder:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def diagnostic_state_bucket(state, progress=None, completion_on=None, seeding_time=None):
+        state = str(state or "").lower()
+        try:
+            if completion_on is not None and float(completion_on or 0) > 0:
+                return "seeding"
+        except (TypeError, ValueError):
+            pass
+        try:
+            if seeding_time is not None and float(seeding_time or 0) > 0:
+                return "seeding"
+        except (TypeError, ValueError):
+            pass
+        if state in {"pauseddl", "pausedup", "stoppeddl", "stoppedup"}:
+            return "paused"
+        if state in {"queueddl", "queuedup"}:
+            return "queued"
+        if "checking" in state or state in {"allocating", "moving"}:
+            return "checking"
+        if "downloading" in state or "stalleddl" in state or state == "metadl":
+            return "downloading"
+        if "uploading" in state or "stalledup" in state or state == "forcedup":
+            return "seeding"
+        if progress is not None:
+            try:
+                value = float(progress)
+                if value > 1:
+                    value = value / 100.0
+                return "downloading" if value < 1.0 else "seeding"
+            except (TypeError, ValueError):
+                pass
+        return "unknown"
+
     def cleanup(self):
         cutoff = time.time() - self.retention_days * 86400
         with self._lock:
@@ -7193,35 +7226,76 @@ class BrushFlowLowFreq(_PluginBase):
                 "upload_speed": 0,
                 "download_speed": 0,
             }
-            for torrent_hash in active_torrent_tasks:
-                torrent = seeding_torrents_dict.get(torrent_hash)
-                if not torrent:
+            resource_snapshot = {
+                "global_total": 0,
+                "global_downloading": 0,
+                "global_queued": 0,
+                "global_paused": 0,
+                "global_checking": 0,
+                "global_seeding": 0,
+                "managed_total": len(active_torrent_tasks),
+                "managed_downloading": 0,
+                "managed_seeding": 0,
+                "global_up_speed": 0.0,
+                "global_dl_speed": 0.0,
+                "managed_up_speed": 0.0,
+                "managed_dl_speed": 0.0,
+                "managed_seed_size": 0,
+                "error": error,
+            }
+            for torrent in seeding_torrents:
+                torrent_hash = self.__get_hash(torrent)
+                if not torrent_hash:
                     continue
-                torrent_info_cache[torrent_hash] = self.__get_torrent_info(torrent)
-                info = torrent_info_cache[torrent_hash]
+                info = torrent_info_cache.get(torrent_hash)
+                if info is None:
+                    info = self.__get_torrent_info(torrent)
+                    if torrent_hash in active_torrent_tasks:
+                        torrent_info_cache[torrent_hash] = info
                 try:
                     up_speed = float(info.get("upspeed") or 0)
                     dl_speed = float(info.get("dlspeed") or 0)
                 except (TypeError, ValueError):
                     up_speed = 0
                     dl_speed = 0
-                state = str(info.get("state") or "")
-                progress = info.get("progress")
-                try:
-                    downloading = progress is None or float(progress) < 100 or "downloading" in state.lower()
-                except (TypeError, ValueError):
-                    downloading = "downloading" in state.lower()
-                if downloading:
-                    diagnostic_snapshot["downloading_count"] += 1
-                if up_speed > 0:
-                    diagnostic_snapshot["uploading_count"] += 1
-                diagnostic_snapshot["upload_speed"] += up_speed
-                diagnostic_snapshot["download_speed"] += dl_speed
+                bucket = DiagnosticRecorder.diagnostic_state_bucket(
+                    info.get("state"),
+                    progress=info.get("progress"),
+                    completion_on=info.get("completion_on"),
+                    seeding_time=info.get("seeding_time"),
+                )
+                resource_snapshot["global_total"] += 1
+                if bucket in {"downloading", "queued", "paused", "checking", "seeding"}:
+                    resource_snapshot[f"global_{bucket}"] += 1
+                resource_snapshot["global_up_speed"] += up_speed
+                resource_snapshot["global_dl_speed"] += dl_speed
+                if torrent_hash in active_torrent_tasks:
+                    if bucket == "downloading":
+                        resource_snapshot["managed_downloading"] += 1
+                    elif bucket == "seeding":
+                        resource_snapshot["managed_seeding"] += 1
+                    resource_snapshot["managed_up_speed"] += up_speed
+                    resource_snapshot["managed_dl_speed"] += dl_speed
+                    try:
+                        resource_snapshot["managed_seed_size"] += int(info.get("total_size") or 0)
+                    except (TypeError, ValueError):
+                        pass
+                    if bucket == "downloading":
+                        diagnostic_snapshot["downloading_count"] += 1
+                    if up_speed > 0:
+                        diagnostic_snapshot["uploading_count"] += 1
+                    diagnostic_snapshot["upload_speed"] += up_speed
+                    diagnostic_snapshot["download_speed"] += dl_speed
             self.__diagnostic(
                 "record_downloader_sample",
                 time.time(),
                 downloader_name or brush_config.downloader,
                 diagnostic_snapshot,
+            )
+            self.__diagnostic(
+                "record_downloader_resource",
+                downloader_name or brush_config.downloader,
+                resource_snapshot,
             )
 
             # 检查种子刷流标签变更情况

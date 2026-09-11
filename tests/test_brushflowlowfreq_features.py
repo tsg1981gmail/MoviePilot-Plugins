@@ -8802,6 +8802,42 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_diagnostic_v21_downloader_resource_and_state(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            recorder.record_downloader_resource("QB-1", {
+                "global_total": 10,
+                "global_downloading": 2,
+                "global_queued": 1,
+                "managed_total": 4,
+                "managed_downloading": 1,
+                "global_up_speed": 100,
+                "global_dl_speed": 200,
+            })
+            recorder.commit()
+            rows = recorder.fetch_rows("SELECT * FROM downloader_resource_samples")
+            self.assertEqual(rows[0]["global_total"], 10)
+            self.assertEqual(rows[0]["managed_downloading"], 1)
+            self.assertEqual(
+                self.module.DiagnosticRecorder.diagnostic_state_bucket(
+                    "uploading", progress=0.5, completion_on=1, seeding_time=60
+                ),
+                "seeding",
+            )
+            self.assertEqual(
+                self.module.DiagnosticRecorder.diagnostic_state_bucket(
+                    "downloading", progress=0.5
+                ),
+                "downloading",
+            )
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_diagnostic_records_candidate_snapshot(self):
         temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
         try:
