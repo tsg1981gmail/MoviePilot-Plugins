@@ -428,7 +428,7 @@ class DiagnosticRecorder:
 
     def record_brush_end(self, run_id, finished_at=None, pages=0, candidates_seen=0,
                          added=0, rejected=0, scan_ms=0):
-        self._safe_execute(
+        cursor = self._safe_execute(
             """
             UPDATE brush_runs
             SET finished_at=?, pages=?, candidates_seen=?, added=?, rejected=?, scan_ms=?
@@ -956,6 +956,7 @@ class DiagnosticRecorder:
                 str(candidate_feature_json or "") or None,
             ),
         )
+        return cursor.lastrowid if cursor is not None else None
 
     def record_transfer_event(self, task_hash, event_type, downloader=None,
                               detail=None, event_at=None):
@@ -6708,7 +6709,9 @@ class BrushFlowLowFreq(_PluginBase):
         return None
 
     def __record_shadow_decision(self, **kwargs):
-        self.__diagnostic("record_shadow_decision", **kwargs)
+        decision_id = self.__diagnostic("record_shadow_decision", **kwargs)
+        self._last_shadow_decision_id = decision_id
+        return decision_id
 
     @staticmethod
     def __extract_candidate_title_features(title):
@@ -7218,7 +7221,12 @@ class BrushFlowLowFreq(_PluginBase):
                 hash_string,
                 "add_requested",
                 downloader_name or brush_config.downloader,
-                {"site": siteinfo.name, "title": torrent.title},
+                {
+                    "site": siteinfo.name,
+                    "title": torrent.title,
+                    "queued_at": time.time(),
+                    "source_decision_id": getattr(self, "_last_shadow_decision_id", None),
+                },
             )
 
             # 统计数据
@@ -8247,7 +8255,7 @@ class BrushFlowLowFreq(_PluginBase):
                     torrent_hash,
                     "download_started",
                     self._active_downloader_name or torrent_task.get("downloader"),
-                    {"downloaded": downloaded},
+                    {"downloaded": downloaded, "started_at": check_time},
                 )
             # 记录首次有上传数据的时间（存量迁移 + 新种子追踪）
             if torrent_task.get("first_uploaded_time") is None and uploaded > 0:
@@ -8257,7 +8265,7 @@ class BrushFlowLowFreq(_PluginBase):
                     torrent_hash,
                     "first_uploaded",
                     self._active_downloader_name or torrent_task.get("downloader"),
-                    {"uploaded": uploaded},
+                    {"uploaded": uploaded, "first_uploaded_at": check_time},
                 )
 
             last_check_uploaded = torrent_task.get("last_check_uploaded")
@@ -8346,6 +8354,7 @@ class BrushFlowLowFreq(_PluginBase):
                             "completed",
                             {
                                 "completion_on": completed_time,
+                                "completed_at": check_time,
                                 "uploaded": uploaded,
                                 "downloaded": downloaded,
                             },
