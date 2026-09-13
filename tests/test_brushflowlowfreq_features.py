@@ -8048,7 +8048,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         """get_api 返回原有 5 个端点与 8 个诊断端点"""
         plugin = self._new_plugin({"enabled": False})
         api_list = plugin.get_api()
-        self.assertEqual(len(api_list), 17)
+        self.assertEqual(len(api_list), 19)
         paths = {ep["path"] for ep in api_list}
         original = {"/summary", "/daily_compare", "/tasks", "/trend", "/qb_tasks"}
         diagnostic = {
@@ -8057,6 +8057,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             "/diagnostic/downloaders", "/diagnostic/export",
             "/diagnostic/downloader-config", "/diagnostic/downloader-resources",
             "/diagnostic/swarm", "/diagnostic/scheduler",
+            "/diagnostic/downloader-efficiency", "/diagnostic/task-outcomes",
         }
         self.assertTrue(original.issubset(paths))
         self.assertTrue(diagnostic.issubset(paths))
@@ -8799,7 +8800,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             meta = recorder.fetch_rows(
                 "SELECT value FROM diagnostic_meta WHERE key='schema_version'"
             )
-            self.assertEqual(meta[0]["value"], "2.1")
+            self.assertEqual(meta[0]["value"], "2.2")
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -8820,8 +8821,39 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 row["key"]: row["value"]
                 for row in reopened.fetch_rows("SELECT key, value FROM diagnostic_meta")
             }
-            self.assertEqual(meta["schema_version"], "2.1")
+            self.assertEqual(meta["schema_version"], "2.2")
             reopened.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_v22_schema(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            tables = {
+                row["name"] for row in recorder.fetch_rows(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertIn("downloader_efficiency_samples", tables)
+            self.assertIn("task_outcome_samples", tables)
+            shadow_columns = {
+                row["name"]
+                for row in recorder.fetch_rows(
+                    "PRAGMA table_info(scheduler_shadow_decisions)"
+                )
+            }
+            self.assertIn("early_upload_score", shadow_columns)
+            self.assertIn("expected_download_seconds", shadow_columns)
+            meta = {
+                row["key"]: row["value"]
+                for row in recorder.fetch_rows("SELECT key, value FROM diagnostic_meta")
+            }
+            self.assertEqual(meta["schema_version"], "2.2")
+            recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -8841,10 +8873,19 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 "global_up_speed": 100,
                 "global_dl_speed": 200,
             })
+            recorder.record_downloader_efficiency("QB-1", 5, {
+                "managed_total": 4,
+                "managed_downloading": 1,
+                "managed_up_speed": 100,
+                "upload_per_downloading": 100,
+            })
             recorder.commit()
             rows = recorder.fetch_rows("SELECT * FROM downloader_resource_samples")
             self.assertEqual(rows[0]["global_total"], 10)
             self.assertEqual(rows[0]["managed_downloading"], 1)
+            efficiency = recorder.fetch_rows("SELECT * FROM downloader_efficiency_samples")
+            self.assertEqual(efficiency[0]["window_minutes"], 5)
+            self.assertEqual(efficiency[0]["upload_per_downloading"], 100)
             self.assertEqual(
                 self.module.DiagnosticRecorder.diagnostic_state_bucket(
                     "uploading", progress=0.5, completion_on=1, seeding_time=60
@@ -8919,6 +8960,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             self.assertEqual(rows[0]["actual_downloader"], "QB-1")
             self.assertEqual(rows[0]["mode"], "shadow")
             self.assertEqual(rows[0]["executed"], 0)
+            self.assertIsNotNone(rows[0]["early_upload_score"])
+            self.assertIsNotNone(rows[0]["total_upload_score"])
+            self.assertIsNotNone(rows[0]["candidate_feature_json"])
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -8941,6 +8985,44 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             rows = recorder.fetch_rows("SELECT * FROM task_transfer_events")
             self.assertEqual(rows[0]["event_type"], "download_started")
             self.assertEqual(rows[0]["downloader"], "QB-1")
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_v22_task_outcome_samples(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            base = time.time() - 3600
+            recorder.record_task_added("hash1", {
+                "site_name": "天空",
+                "title": "outcome task",
+                "time": base,
+            })
+            recorder.record_transfer_event("hash1", "add_requested", "QB-1", event_at=base)
+            recorder.record_transfer_event("hash1", "download_started", "QB-1", event_at=base + 60)
+            recorder.record_transfer_event("hash1", "first_uploaded", "QB-1", event_at=base + 120)
+            recorder.record_task_sample(
+                "hash1", base + 900, "QB-1",
+                {"uploaded": 10, "downloaded": 100},
+                {},
+            )
+            recorder.record_task_sample(
+                "hash1", base + 2400, "QB-1",
+                {"uploaded": 50, "downloaded": 200},
+                {},
+            )
+            recorder.record_task_outcome("hash1")
+            recorder.commit()
+            row = recorder.fetch_rows("SELECT * FROM task_outcome_samples")[0]
+            self.assertEqual(row["uploaded_at_30m"], 10)
+            self.assertEqual(row["uploaded_at_60m"], 50)
+            self.assertEqual(row["uploaded_after_30m"], 40)
+            self.assertEqual(row["download_start_delay"], 60)
+            self.assertEqual(row["first_upload_delay"], 120)
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
