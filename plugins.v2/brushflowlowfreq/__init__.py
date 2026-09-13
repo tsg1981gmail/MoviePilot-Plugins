@@ -1059,6 +1059,17 @@ class DiagnosticRecorder:
             ),
         )
 
+    def backfill_task_outcomes(self):
+        try:
+            rows = self._conn.execute(
+                "SELECT DISTINCT task_hash FROM task_samples"
+            ).fetchall()
+            for row in rows:
+                self.record_task_outcome(row["task_hash"])
+            self.commit()
+        except Exception:
+            logger.warning("brushflowlowfreq 诊断任务结果回填失败", exc_info=True)
+
     def finalize_task(self, task_hash, torrent_task=None, deleted_type=None, deleted_reason=None,
                       torrent_info=None):
         task_hash = str(task_hash or "")
@@ -6530,6 +6541,7 @@ class BrushFlowLowFreq(_PluginBase):
                 retention_days=brush_config.diagnostic_retention_days,
             )
             self.__diagnostic_recorder.cleanup()
+            self.__diagnostic("backfill_task_outcomes")
             logger.info("brushflowlowfreq 独立诊断记录已启动")
         except Exception:
             self.__diagnostic_recorder = None

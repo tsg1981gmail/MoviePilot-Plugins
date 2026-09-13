@@ -9015,7 +9015,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 {"uploaded": 50, "downloaded": 200},
                 {},
             )
-            recorder.record_task_outcome("hash1")
+            recorder.backfill_task_outcomes()
             recorder.commit()
             row = recorder.fetch_rows("SELECT * FROM task_outcome_samples")[0]
             self.assertEqual(row["uploaded_at_30m"], 10)
