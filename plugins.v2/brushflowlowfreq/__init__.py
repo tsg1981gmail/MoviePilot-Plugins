@@ -1251,6 +1251,7 @@ class DiagnosticRecorder:
             "task_samples", "task_events", "downloader_samples", "candidate_run_summary",
             "downloader_config_snapshots", "downloader_resource_samples",
             "task_swarm_samples", "scheduler_shadow_decisions", "task_transfer_events",
+            "downloader_efficiency_samples", "task_outcome_samples",
         ):
             try:
                 row = self._conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
@@ -2398,6 +2399,16 @@ class BrushFlowLowFreq(_PluginBase):
                 "methods": ["GET"],
             },
             {
+                "path": "/diagnostic/downloader-efficiency",
+                "endpoint": self.__api_diagnostic_downloader_efficiency,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/task-outcomes",
+                "endpoint": self.__api_diagnostic_task_outcomes,
+                "methods": ["GET"],
+            },
+            {
                 "path": "/diagnostic/export",
                 "endpoint": self.__api_diagnostic_export,
                 "methods": ["GET"],
@@ -3169,6 +3180,36 @@ class BrushFlowLowFreq(_PluginBase):
         )
         return {"enabled": True, "start": range_start, "end": range_end, "rows": rows}
 
+    def __api_diagnostic_downloader_efficiency(self, days: int = 30,
+                                               start: float = None, end: float = None,
+                                               downloader: str = "", limit: int = 10000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        sql = "SELECT * FROM downloader_efficiency_samples WHERE sampled_at>=? AND sampled_at<=?"
+        params = [range_start, range_end]
+        if downloader:
+            sql += " AND downloader=?"
+            params.append(downloader)
+        sql += " ORDER BY sampled_at ASC LIMIT ?"
+        params.append(int(limit or 10000))
+        return {"enabled": True, "start": range_start, "end": range_end,
+                "rows": recorder.fetch_rows(sql, params)}
+
+    def __api_diagnostic_task_outcomes(self, days: int = 30, start: float = None,
+                                       end: float = None, limit: int = 10000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        rows = recorder.fetch_rows(
+            "SELECT * FROM task_outcome_samples WHERE updated_at>=? AND updated_at<=? "
+            "ORDER BY updated_at ASC LIMIT ?",
+            (range_start, range_end, int(limit or 10000)),
+        )
+        return {"enabled": True, "start": range_start, "end": range_end, "rows": rows}
+
     def __api_diagnostic_export(self, days: int = 30, start: float = None, end: float = None,
                                 include_candidates: bool = True, include_tasks: bool = True,
                                 include_samples: bool = True, include_events: bool = True,
@@ -3177,7 +3218,9 @@ class BrushFlowLowFreq(_PluginBase):
                                 include_downloader_resources: bool = True,
                                 include_swarm: bool = True,
                                 include_scheduler: bool = True,
-                                include_transfer_events: bool = True):
+                                include_transfer_events: bool = True,
+                                include_downloader_efficiency: bool = True,
+                                include_task_outcomes: bool = True):
         data = self.__api_diagnostic_summary(days=days, start=start, end=end)
         if not data.get("enabled"):
             return data
@@ -3219,6 +3262,14 @@ class BrushFlowLowFreq(_PluginBase):
                     (range_start, range_end),
                 ) if recorder else [],
             }
+        if include_downloader_efficiency:
+            payload["downloader_efficiency"] = self.__api_diagnostic_downloader_efficiency(
+                days=days, start=start, end=end, limit=100000
+            )
+        if include_task_outcomes:
+            payload["task_outcomes"] = self.__api_diagnostic_task_outcomes(
+                days=days, start=start, end=end, limit=100000
+            )
         return payload
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
@@ -6215,6 +6266,8 @@ class BrushFlowLowFreq(_PluginBase):
             ["Swarm 样本", str(counts.get("task_swarm_samples", 0))],
             ["影子调度决策", str(counts.get("scheduler_shadow_decisions", 0))],
             ["传输事件", str(counts.get("task_transfer_events", 0))],
+            ["下载器效率样本", str(counts.get("downloader_efficiency_samples", 0))],
+            ["任务结果样本", str(counts.get("task_outcome_samples", 0))],
         ]
 
         return [{
