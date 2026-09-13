@@ -8872,10 +8872,19 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 "global_up_speed": 100,
                 "global_dl_speed": 200,
             })
+            recorder.record_downloader_efficiency("QB-1", 5, {
+                "managed_total": 4,
+                "managed_downloading": 1,
+                "managed_up_speed": 100,
+                "upload_per_downloading": 100,
+            })
             recorder.commit()
             rows = recorder.fetch_rows("SELECT * FROM downloader_resource_samples")
             self.assertEqual(rows[0]["global_total"], 10)
             self.assertEqual(rows[0]["managed_downloading"], 1)
+            efficiency = recorder.fetch_rows("SELECT * FROM downloader_efficiency_samples")
+            self.assertEqual(efficiency[0]["window_minutes"], 5)
+            self.assertEqual(efficiency[0]["upload_per_downloading"], 100)
             self.assertEqual(
                 self.module.DiagnosticRecorder.diagnostic_state_bucket(
                     "uploading", progress=0.5, completion_on=1, seeding_time=60

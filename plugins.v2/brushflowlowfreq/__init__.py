@@ -844,6 +844,34 @@ class DiagnosticRecorder:
             ),
         )
 
+    def record_downloader_efficiency(self, downloader, window_minutes, data=None,
+                                     sampled_at=None):
+        data = data or {}
+        self._safe_execute(
+            """
+            INSERT INTO downloader_efficiency_samples(
+                sampled_at, downloader, window_minutes, managed_total,
+                managed_downloading, managed_seeding, managed_up_speed,
+                managed_dl_speed, upload_per_downloading, upload_per_task,
+                upload_headroom_ratio, download_headroom_ratio
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                float(sampled_at or time.time()),
+                str(downloader or ""),
+                int(window_minutes or 0),
+                self._number(data.get("managed_total")),
+                self._number(data.get("managed_downloading")),
+                self._number(data.get("managed_seeding")),
+                self._number(data.get("managed_up_speed")),
+                self._number(data.get("managed_dl_speed")),
+                self._number(data.get("upload_per_downloading")),
+                self._number(data.get("upload_per_task")),
+                self._number(data.get("upload_headroom_ratio")),
+                self._number(data.get("download_headroom_ratio")),
+            ),
+        )
+
     def record_task_swarm_sample(self, task_hash, site=None, torrent_key=None,
                                  seeders=None, leechers=None, is_free=None,
                                  free_remaining_minutes=None, rank_position=None,
@@ -6389,6 +6417,63 @@ class BrushFlowLowFreq(_PluginBase):
             self.__diagnostic("record_downloader_config", name, data)
         self.__diagnostic("commit")
 
+    def __record_downloader_efficiency_windows(self, downloader_name, profile=None):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder or not downloader_name:
+            return
+        now = time.time()
+        profile = profile or self.__get_downloader_profile(downloader_name)
+        brush_config = self._brush_config
+        maxupspeed = profile.get("maxupspeed") or getattr(brush_config, "maxupspeed", None)
+        maxdlspeed = profile.get("maxdlspeed") or getattr(brush_config, "maxdlspeed", None)
+        for window_minutes in (5, 15, 60):
+            rows = recorder.fetch_rows(
+                """
+                SELECT AVG(managed_total) AS managed_total,
+                       AVG(managed_downloading) AS managed_downloading,
+                       AVG(managed_seeding) AS managed_seeding,
+                       AVG(managed_up_speed) AS managed_up_speed,
+                       AVG(managed_dl_speed) AS managed_dl_speed
+                FROM downloader_resource_samples
+                WHERE downloader=? AND sampled_at>=?
+                """,
+                (downloader_name, now - window_minutes * 60),
+            )
+            row = rows[0] if rows else {}
+            managed_total = self.__number_or_none(row.get("managed_total")) or 0
+            managed_downloading = self.__number_or_none(row.get("managed_downloading")) or 0
+            managed_up_speed = self.__number_or_none(row.get("managed_up_speed")) or 0
+            managed_dl_speed = self.__number_or_none(row.get("managed_dl_speed")) or 0
+            data = {
+                "managed_total": managed_total,
+                "managed_downloading": managed_downloading,
+                "managed_seeding": self.__number_or_none(row.get("managed_seeding")) or 0,
+                "managed_up_speed": managed_up_speed,
+                "managed_dl_speed": managed_dl_speed,
+                "upload_per_downloading": (
+                    managed_up_speed / max(managed_downloading, 1)
+                    if managed_downloading else managed_up_speed
+                ),
+                "upload_per_task": (
+                    managed_up_speed / max(managed_total, 1)
+                    if managed_total else managed_up_speed
+                ),
+                "upload_headroom_ratio": (
+                    max(0.0, 1.0 - managed_up_speed / (float(maxupspeed) * 1024))
+                    if maxupspeed else None
+                ),
+                "download_headroom_ratio": (
+                    max(0.0, 1.0 - managed_dl_speed / (float(maxdlspeed) * 1024))
+                    if maxdlspeed else None
+                ),
+            }
+            self.__diagnostic(
+                "record_downloader_efficiency",
+                downloader_name,
+                window_minutes,
+                data,
+            )
+
     def __diagnostic(self, method_name, *args, **kwargs):
         recorder = getattr(self, "_BrushFlowLowFreq__diagnostic_recorder", None)
         if not recorder:
@@ -7819,6 +7904,9 @@ class BrushFlowLowFreq(_PluginBase):
                 "record_downloader_resource",
                 downloader_name or brush_config.downloader,
                 resource_snapshot,
+            )
+            self.__record_downloader_efficiency_windows(
+                downloader_name or brush_config.downloader
             )
 
             # 检查种子刷流标签变更情况
