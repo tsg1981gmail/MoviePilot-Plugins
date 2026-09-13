@@ -222,7 +222,13 @@ class DiagnosticRecorder:
                   disk_used INTEGER,
                   disk_free INTEGER,
                   managed_seed_size INTEGER,
-                  error TEXT
+                  error TEXT,
+                  effective_up_limit REAL,
+                  effective_dl_limit REAL,
+                  managed_uploading INTEGER,
+                  managed_paused INTEGER,
+                  managed_queued INTEGER,
+                  managed_checking INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS task_swarm_samples (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -254,7 +260,20 @@ class DiagnosticRecorder:
                   decision_reason TEXT,
                   decision_ms INTEGER,
                   executed INTEGER NOT NULL DEFAULT 0,
-                  mode TEXT NOT NULL DEFAULT 'shadow'
+                  mode TEXT NOT NULL DEFAULT 'shadow',
+                  publish_age_minutes REAL,
+                  free_remaining_minutes REAL,
+                  page_rank INTEGER,
+                  resolution TEXT,
+                  content_type TEXT,
+                  release_group TEXT,
+                  early_upload_score REAL,
+                  total_upload_score REAL,
+                  predicted_early_upload REAL,
+                  predicted_total_upload REAL,
+                  expected_download_seconds REAL,
+                  downloader_efficiency_score REAL,
+                  candidate_feature_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS task_transfer_events (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -263,6 +282,38 @@ class DiagnosticRecorder:
                   event_type TEXT NOT NULL,
                   downloader TEXT,
                   detail TEXT
+                );
+                CREATE TABLE IF NOT EXISTS downloader_efficiency_samples (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  sampled_at REAL NOT NULL,
+                  downloader TEXT NOT NULL,
+                  window_minutes INTEGER NOT NULL,
+                  managed_total INTEGER,
+                  managed_downloading INTEGER,
+                  managed_seeding INTEGER,
+                  managed_up_speed REAL,
+                  managed_dl_speed REAL,
+                  upload_per_downloading REAL,
+                  upload_per_task REAL,
+                  upload_headroom_ratio REAL,
+                  download_headroom_ratio REAL
+                );
+                CREATE TABLE IF NOT EXISTS task_outcome_samples (
+                  task_hash TEXT PRIMARY KEY REFERENCES task_profiles(task_hash) ON DELETE CASCADE,
+                  updated_at REAL NOT NULL,
+                  uploaded_at_30m INTEGER,
+                  uploaded_at_60m INTEGER,
+                  uploaded_after_30m INTEGER,
+                  uploaded_after_60m INTEGER,
+                  peak_interval_upspeed REAL,
+                  total_uploaded INTEGER,
+                  total_downloaded INTEGER,
+                  first_upload_delay REAL,
+                  download_start_delay REAL,
+                  first_real_completed_at REAL,
+                  final_delete_type TEXT,
+                  final_uploaded INTEGER,
+                  final_downloaded INTEGER
                 );
                 CREATE TABLE IF NOT EXISTS diagnostic_meta (
                   key TEXT PRIMARY KEY,
@@ -294,8 +345,45 @@ class DiagnosticRecorder:
                   ON scheduler_shadow_decisions(decided_at);
                 CREATE INDEX IF NOT EXISTS idx_task_transfer_hash_time
                   ON task_transfer_events(task_hash, event_at);
+                CREATE INDEX IF NOT EXISTS idx_downloader_efficiency_time
+                  ON downloader_efficiency_samples(sampled_at, downloader, window_minutes);
                 """
             )
+            self._migrate_v22()
+
+    def _ensure_column(self, table, column, definition):
+        columns = {
+            row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")
+        }
+        if column not in columns:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _migrate_v22(self):
+        for column, definition in (
+            ("effective_up_limit", "REAL"),
+            ("effective_dl_limit", "REAL"),
+            ("managed_uploading", "INTEGER"),
+            ("managed_paused", "INTEGER"),
+            ("managed_queued", "INTEGER"),
+            ("managed_checking", "INTEGER"),
+        ):
+            self._ensure_column("downloader_resource_samples", column, definition)
+        for column, definition in (
+            ("publish_age_minutes", "REAL"),
+            ("free_remaining_minutes", "REAL"),
+            ("page_rank", "INTEGER"),
+            ("resolution", "TEXT"),
+            ("content_type", "TEXT"),
+            ("release_group", "TEXT"),
+            ("early_upload_score", "REAL"),
+            ("total_upload_score", "REAL"),
+            ("predicted_early_upload", "REAL"),
+            ("predicted_total_upload", "REAL"),
+            ("expected_download_seconds", "REAL"),
+            ("downloader_efficiency_score", "REAL"),
+            ("candidate_feature_json", "TEXT"),
+        ):
+            self._ensure_column("scheduler_shadow_decisions", column, definition)
 
     def _set_meta(self):
         with self._lock:
@@ -305,8 +393,8 @@ class DiagnosticRecorder:
                 (str(now),),
             )
             for key, value in {
-                "schema_version": "2.1",
-                "plugin_version": "4.3.97",
+                "schema_version": "2.2",
+                "plugin_version": "4.3.98",
             }.items():
                 self._conn.execute(
                     """

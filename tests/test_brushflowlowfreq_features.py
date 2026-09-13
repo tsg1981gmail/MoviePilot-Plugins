@@ -8799,7 +8799,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             meta = recorder.fetch_rows(
                 "SELECT value FROM diagnostic_meta WHERE key='schema_version'"
             )
-            self.assertEqual(meta[0]["value"], "2.1")
+            self.assertEqual(meta[0]["value"], "2.2")
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -8820,8 +8820,39 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 row["key"]: row["value"]
                 for row in reopened.fetch_rows("SELECT key, value FROM diagnostic_meta")
             }
-            self.assertEqual(meta["schema_version"], "2.1")
+            self.assertEqual(meta["schema_version"], "2.2")
             reopened.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_v22_schema(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            tables = {
+                row["name"] for row in recorder.fetch_rows(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertIn("downloader_efficiency_samples", tables)
+            self.assertIn("task_outcome_samples", tables)
+            shadow_columns = {
+                row["name"]
+                for row in recorder.fetch_rows(
+                    "PRAGMA table_info(scheduler_shadow_decisions)"
+                )
+            }
+            self.assertIn("early_upload_score", shadow_columns)
+            self.assertIn("expected_download_seconds", shadow_columns)
+            meta = {
+                row["key"]: row["value"]
+                for row in recorder.fetch_rows("SELECT key, value FROM diagnostic_meta")
+            }
+            self.assertEqual(meta["schema_version"], "2.2")
+            recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
