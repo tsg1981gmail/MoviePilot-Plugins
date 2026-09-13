@@ -8988,6 +8988,44 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    def test_diagnostic_v22_task_outcome_samples(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            base = time.time() - 3600
+            recorder.record_task_added("hash1", {
+                "site_name": "天空",
+                "title": "outcome task",
+                "time": base,
+            })
+            recorder.record_transfer_event("hash1", "add_requested", "QB-1", event_at=base)
+            recorder.record_transfer_event("hash1", "download_started", "QB-1", event_at=base + 60)
+            recorder.record_transfer_event("hash1", "first_uploaded", "QB-1", event_at=base + 120)
+            recorder.record_task_sample(
+                "hash1", base + 900, "QB-1",
+                {"uploaded": 10, "downloaded": 100},
+                {},
+            )
+            recorder.record_task_sample(
+                "hash1", base + 2400, "QB-1",
+                {"uploaded": 50, "downloaded": 200},
+                {},
+            )
+            recorder.record_task_outcome("hash1")
+            recorder.commit()
+            row = recorder.fetch_rows("SELECT * FROM task_outcome_samples")[0]
+            self.assertEqual(row["uploaded_at_30m"], 10)
+            self.assertEqual(row["uploaded_at_60m"], 50)
+            self.assertEqual(row["uploaded_after_30m"], 40)
+            self.assertEqual(row["download_start_delay"], 60)
+            self.assertEqual(row["first_upload_delay"], 120)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_diagnostic_records_candidate_snapshot(self):
         temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
         try:

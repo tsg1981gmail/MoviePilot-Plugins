@@ -973,6 +973,91 @@ class DiagnosticRecorder:
             ),
         )
 
+    def record_task_outcome(self, task_hash):
+        task_hash = str(task_hash or "")
+        if not task_hash:
+            return
+        profile = self._conn.execute(
+            "SELECT * FROM task_profiles WHERE task_hash=?",
+            (task_hash,),
+        ).fetchone()
+        if not profile:
+            return
+        samples = self._conn.execute(
+            "SELECT sampled_at, uploaded, downloaded, interval_upspeed "
+            "FROM task_samples WHERE task_hash=? ORDER BY sampled_at ASC",
+            (task_hash,),
+        ).fetchall()
+        if not samples:
+            return
+        add_at = profile["added_at"] or samples[0]["sampled_at"]
+        up30 = up60 = 0
+        peak = None
+        for sample in samples:
+            uploaded = sample["uploaded"] or 0
+            if sample["sampled_at"] <= add_at + 1800:
+                up30 = uploaded
+            if sample["sampled_at"] <= add_at + 3600:
+                up60 = uploaded
+            interval = sample["interval_upspeed"]
+            if interval is not None and (peak is None or interval > peak):
+                peak = interval
+        latest = samples[-1]
+        total_up = latest["uploaded"] or 0
+        total_dl = latest["downloaded"] or 0
+        events = self._conn.execute(
+            "SELECT event_type, MIN(event_at) AS event_at "
+            "FROM task_transfer_events WHERE task_hash=? GROUP BY event_type",
+            (task_hash,),
+        ).fetchall()
+        event_times = {row["event_type"]: row["event_at"] for row in events}
+        add_requested = event_times.get("add_requested") or add_at
+        download_started = event_times.get("download_started")
+        first_uploaded = event_times.get("first_uploaded")
+        self._safe_execute(
+            """
+            INSERT INTO task_outcome_samples(
+                task_hash, updated_at, uploaded_at_30m, uploaded_at_60m,
+                uploaded_after_30m, uploaded_after_60m, peak_interval_upspeed,
+                total_uploaded, total_downloaded, first_upload_delay,
+                download_start_delay, first_real_completed_at, final_delete_type,
+                final_uploaded, final_downloaded
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_hash) DO UPDATE SET
+                updated_at=excluded.updated_at,
+                uploaded_at_30m=excluded.uploaded_at_30m,
+                uploaded_at_60m=excluded.uploaded_at_60m,
+                uploaded_after_30m=excluded.uploaded_after_30m,
+                uploaded_after_60m=excluded.uploaded_after_60m,
+                peak_interval_upspeed=excluded.peak_interval_upspeed,
+                total_uploaded=excluded.total_uploaded,
+                total_downloaded=excluded.total_downloaded,
+                first_upload_delay=excluded.first_upload_delay,
+                download_start_delay=excluded.download_start_delay,
+                first_real_completed_at=excluded.first_real_completed_at,
+                final_delete_type=excluded.final_delete_type,
+                final_uploaded=excluded.final_uploaded,
+                final_downloaded=excluded.final_downloaded
+            """,
+            (
+                task_hash,
+                time.time(),
+                up30,
+                up60,
+                max(0, total_up - up30),
+                max(0, total_up - up60),
+                peak,
+                total_up,
+                total_dl,
+                first_uploaded - add_requested if first_uploaded and add_requested else None,
+                download_started - add_requested if download_started and add_requested else None,
+                profile["first_real_completed_at"],
+                profile["deleted_type"],
+                profile["final_uploaded"],
+                profile["final_downloaded"],
+            ),
+        )
+
     def finalize_task(self, task_hash, torrent_task=None, deleted_type=None, deleted_reason=None,
                       torrent_info=None):
         task_hash = str(task_hash or "")
@@ -8108,6 +8193,7 @@ class BrushFlowLowFreq(_PluginBase):
                                         "reason": delete_reason,
                                     },
                                 )
+                                self.__diagnostic("record_task_outcome", torrent_hash)
                         self.__send_delete_messages_after_success(delete_hashes=deleted_hashes,
                                                                   delete_message_map=delete_message_map,
                                                                   torrent_tasks=torrent_tasks)
@@ -8275,6 +8361,7 @@ class BrushFlowLowFreq(_PluginBase):
                                 "downloaded": downloaded,
                             },
                         )
+                        self.__diagnostic("record_task_outcome", torrent_hash)
             self.__diagnostic("record_task_progress", torrent_hash, torrent_task)
             self.__diagnostic(
                 "record_task_sample",
@@ -14114,6 +14201,7 @@ class BrushFlowLowFreq(_PluginBase):
                     value.get("downloader"),
                     {"title": value.get("title", "")},
                 )
+                self.__diagnostic("record_task_outcome", key)
                 continue
 
             # 场景 2: 检查没有明确删除时间的历史数据
@@ -14134,6 +14222,7 @@ class BrushFlowLowFreq(_PluginBase):
                     value.get("downloader"),
                     {"title": value.get("title", "")},
                 )
+                self.__diagnostic("record_task_outcome", key)
                 continue
 
         # 从原始字典中移除已删除的条目
