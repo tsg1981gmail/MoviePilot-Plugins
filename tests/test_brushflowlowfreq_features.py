@@ -8950,6 +8950,9 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             self.assertEqual(rows[0]["actual_downloader"], "QB-1")
             self.assertEqual(rows[0]["mode"], "shadow")
             self.assertEqual(rows[0]["executed"], 0)
+            self.assertIsNotNone(rows[0]["early_upload_score"])
+            self.assertIsNotNone(rows[0]["total_upload_score"])
+            self.assertIsNotNone(rows[0]["candidate_feature_json"])
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

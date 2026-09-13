@@ -874,15 +874,28 @@ class DiagnosticRecorder:
                                predicted_upload_score=None, selected_resource_score=None,
                                hard_constraint=None, downloader_scores=None,
                                decision_reason=None, decision_ms=None, task_hash=None,
-                               torrent_id=None, decided_at=None):
+                               torrent_id=None, decided_at=None,
+                               publish_age_minutes=None, free_remaining_minutes=None,
+                               page_rank=None, resolution=None, content_type=None,
+                               release_group=None, early_upload_score=None,
+                               total_upload_score=None, predicted_early_upload=None,
+                               predicted_total_upload=None,
+                               expected_download_seconds=None,
+                               downloader_efficiency_score=None,
+                               candidate_feature_json=None):
         self._safe_execute(
             """
             INSERT INTO scheduler_shadow_decisions(
                 decided_at, candidate_key, torrent_id, task_hash, actual_downloader,
                 recommended_downloader, candidate_size, source_seeders, source_leechers,
                 predicted_upload_score, selected_resource_score, hard_constraint_json,
-                downloader_scores_json, decision_reason, decision_ms, executed, mode
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'shadow')
+                downloader_scores_json, decision_reason, decision_ms, executed, mode,
+                publish_age_minutes, free_remaining_minutes, page_rank, resolution,
+                content_type, release_group, early_upload_score, total_upload_score,
+                predicted_early_upload, predicted_total_upload, expected_download_seconds,
+                downloader_efficiency_score, candidate_feature_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'shadow',
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 float(decided_at or time.time()),
@@ -900,6 +913,19 @@ class DiagnosticRecorder:
                 json.dumps(downloader_scores or {}, ensure_ascii=False, default=str),
                 str(decision_reason or "") or None,
                 self._number(decision_ms),
+                self._number(publish_age_minutes),
+                self._number(free_remaining_minutes),
+                self._number(page_rank),
+                str(resolution or "") or None,
+                str(content_type or "") or None,
+                str(release_group or "") or None,
+                self._number(early_upload_score),
+                self._number(total_upload_score),
+                self._number(predicted_early_upload),
+                self._number(predicted_total_upload),
+                self._number(expected_download_seconds),
+                self._number(downloader_efficiency_score),
+                str(candidate_feature_json or "") or None,
             ),
         )
 
@@ -6514,6 +6540,32 @@ class BrushFlowLowFreq(_PluginBase):
     def __record_shadow_decision(self, **kwargs):
         self.__diagnostic("record_shadow_decision", **kwargs)
 
+    @staticmethod
+    def __extract_candidate_title_features(title):
+        text = str(title or "")
+        resolution = ""
+        match = re.search(r"(2160p|1080p|1080i|720p|4K)", text, re.I)
+        if match:
+            resolution = match.group(1).lower()
+        content_type = "unknown"
+        if re.search(r"动漫|动画|Anime", text, re.I):
+            content_type = "anime"
+        elif re.search(r"综艺|真人秀|Show|TV Show", text, re.I):
+            content_type = "variety"
+        elif re.search(r"美剧|英剧|日剧|韩剧|泰剧|第\d+[集期]|S\d{1,2}E\d{1,2}", text, re.I):
+            content_type = "series"
+        elif re.search(r"电影|BluRay|Blu-ray|WEB-DL", text, re.I):
+            content_type = "movie"
+        release_group = ""
+        match = re.search(r"-([A-Za-z0-9@.]+)$", text)
+        if match:
+            release_group = match.group(1)
+        return {
+            "resolution": resolution,
+            "content_type": content_type,
+            "release_group": release_group,
+        }
+
     def __evaluate_shadow_scheduler(self, candidate, actual_downloader=None,
                                     torrent_key=None, task_hash=None,
                                     torrent_id=None):
@@ -6527,7 +6579,29 @@ class BrushFlowLowFreq(_PluginBase):
         size_bytes = self.__number_or_none(candidate.get("size")) or 0
         seeders = max(0, self.__number_or_none(candidate.get("seeders")) or 0)
         leechers = max(0, self.__number_or_none(candidate.get("leechers")) or 0)
-        predicted_upload_score = leechers / max(seeders + 1.0, 1.0)
+        publish_age = max(0.0, self.__number_or_none(candidate.get("publish_age_minutes")) or 0.0)
+        free_remaining = self.__number_or_none(candidate.get("free_remaining_minutes"))
+        page_rank = self.__number_or_none(candidate.get("page_rank"))
+        feature = self.__extract_candidate_title_features(candidate.get("title"))
+        normalized_leechers = min(1.0, leechers / 30.0)
+        inverse_seeders = 1.0 / max(seeders + 1.0, 1.0)
+        freshness_score = 1.0 / (1.0 + publish_age / 60.0)
+        free_window_score = 1.0
+        if free_remaining is not None:
+            free_window_score = min(1.0, max(0.0, float(free_remaining) / 120.0))
+        page_rank_score = 1.0 / (1.0 + max(0.0, float(page_rank or 0)) / 50.0)
+        early_upload_score = (
+            0.45 * normalized_leechers
+            + 0.20 * inverse_seeders
+            + 0.20 * freshness_score
+            + 0.10 * free_window_score
+            + 0.05 * page_rank_score
+        )
+        size_gb = size_bytes / 1024 ** 3
+        size_curve = min(1.0, max(0.0, size_gb / 40.0))
+        total_upload_score = 0.60 * early_upload_score + 0.40 * size_curve
+        predicted_early_upload = early_upload_score * 100 * 1024 * 1024
+        predicted_total_upload = total_upload_score * max(size_bytes, 1)
         brush_config = self._brush_config
         scores = {}
         constraints = {}
@@ -6545,67 +6619,70 @@ class BrushFlowLowFreq(_PluginBase):
             maxdlcount = profile.get("maxdlcount") or getattr(brush_config, "maxdlcount", None)
             maxupspeed = profile.get("maxupspeed") or getattr(brush_config, "maxupspeed", None)
             maxdlspeed = profile.get("maxdlspeed") or getattr(brush_config, "maxdlspeed", None)
-            disksize = profile.get("disksize") or getattr(brush_config, "disksize", None)
             managed_downloading = self.__number_or_none(latest.get("managed_downloading")) or 0
-            global_up_speed = self.__number_or_none(latest.get("global_up_speed")) or 0
-            global_dl_speed = self.__number_or_none(latest.get("global_dl_speed")) or 0
-            managed_seed_size = self.__number_or_none(latest.get("managed_seed_size")) or 0
+            managed_total = self.__number_or_none(latest.get("managed_total")) or 0
+            managed_seeding = self.__number_or_none(latest.get("managed_seeding")) or 0
+            managed_up_speed = self.__number_or_none(latest.get("managed_up_speed")) or 0
+            managed_dl_speed = self.__number_or_none(latest.get("managed_dl_speed")) or 0
 
             slot_ok = True
             if maxdlcount and managed_downloading >= int(maxdlcount):
                 slot_ok = False
             upload_ok = True
-            if maxupspeed and global_up_speed >= float(maxupspeed) * 1024:
+            if maxupspeed and managed_up_speed >= float(maxupspeed) * 1024:
                 upload_ok = False
             download_ok = True
-            if maxdlspeed and global_dl_speed >= float(maxdlspeed) * 1024:
+            if maxdlspeed and managed_dl_speed >= float(maxdlspeed) * 1024:
                 download_ok = False
-            disk_ok = True
-            if disksize and managed_seed_size + size_bytes > float(disksize) * 1024 ** 3:
-                disk_ok = False
 
             slot_headroom = (
                 max(0.0, 1.0 - managed_downloading / float(maxdlcount))
                 if maxdlcount else 1.0
             )
             upload_headroom = (
-                max(0.0, 1.0 - global_up_speed / (float(maxupspeed) * 1024))
+                max(0.0, 1.0 - managed_up_speed / (float(maxupspeed) * 1024))
                 if maxupspeed else 1.0
             )
             download_headroom = (
-                max(0.0, 1.0 - global_dl_speed / (float(maxdlspeed) * 1024))
+                max(0.0, 1.0 - managed_dl_speed / (float(maxdlspeed) * 1024))
                 if maxdlspeed else 1.0
             )
-            disk_headroom = (
-                max(0.0, 1.0 - (managed_seed_size + size_bytes) / (float(disksize) * 1024 ** 3))
-                if disksize else 1.0
+            downloader_efficiency = (
+                managed_up_speed / max(managed_downloading, 1)
+                if managed_downloading else managed_up_speed
             )
-            recent_upload_efficiency = min(1.0, global_up_speed / (1024 * 1024))
+            efficiency_score = min(1.0, downloader_efficiency / (1024 * 1024))
             resource_score = (
                 slot_headroom
                 * upload_headroom
                 * download_headroom
-                * disk_headroom
-                * recent_upload_efficiency
+                * efficiency_score
             )
-            hard_ok = enabled and slot_ok and upload_ok and download_ok and disk_ok
+            hard_ok = enabled and slot_ok and upload_ok and download_ok
             if not hard_ok:
                 resource_score = 0.0
-            score = predicted_upload_score * resource_score
+            score = total_upload_score * resource_score
+            expected_download_seconds = (
+                size_bytes / max(managed_dl_speed, 512 * 1024)
+                if size_bytes else None
+            )
             scores[name] = {
                 "score": round(score, 6),
                 "resource_score": round(resource_score, 6),
                 "slot_headroom": round(slot_headroom, 6),
                 "upload_headroom": round(upload_headroom, 6),
                 "download_headroom": round(download_headroom, 6),
-                "disk_headroom": round(disk_headroom, 6),
+                "downloader_efficiency": round(downloader_efficiency, 3),
+                "expected_download_seconds": (
+                    round(expected_download_seconds, 3)
+                    if expected_download_seconds is not None else None
+                ),
             }
             constraints[name] = {
                 "enabled": enabled,
                 "slot_ok": slot_ok,
                 "upload_ok": upload_ok,
                 "download_ok": download_ok,
-                "disk_ok": disk_ok,
             }
             if hard_ok and (selected_score is None or score > selected_score):
                 selected_score = score
@@ -6620,10 +6697,32 @@ class BrushFlowLowFreq(_PluginBase):
             candidate_size=size_bytes,
             source_seeders=seeders,
             source_leechers=leechers,
-            predicted_upload_score=predicted_upload_score,
+            predicted_upload_score=early_upload_score,
             selected_resource_score=(
                 scores.get(recommended, {}).get("resource_score") if recommended else None
             ),
+            publish_age_minutes=publish_age,
+            free_remaining_minutes=free_remaining,
+            page_rank=page_rank,
+            resolution=feature.get("resolution"),
+            content_type=feature.get("content_type"),
+            release_group=feature.get("release_group"),
+            early_upload_score=early_upload_score,
+            total_upload_score=total_upload_score,
+            predicted_early_upload=predicted_early_upload,
+            predicted_total_upload=predicted_total_upload,
+            expected_download_seconds=(
+                scores.get(recommended, {}).get("expected_download_seconds")
+                if recommended else None
+            ),
+            downloader_efficiency_score=(
+                scores.get(recommended, {}).get("downloader_efficiency")
+                if recommended else None
+            ),
+            candidate_feature_json=json.dumps({
+                "title": candidate.get("title"),
+                **feature,
+            }, ensure_ascii=False),
             hard_constraint=constraints,
             downloader_scores=scores,
             decision_reason="shadow_only",
@@ -6849,6 +6948,14 @@ class BrushFlowLowFreq(_PluginBase):
                     "seeders": torrent.seeders,
                     "leechers": getattr(torrent, "leechers", None) or getattr(torrent, "peers", None),
                     "title": torrent.title,
+                    "publish_age_minutes": self.__get_pubminutes(torrent.pubdate),
+                    "free_remaining_minutes": self.__get_free_remaining_minutes(
+                        freedate=torrent.freedate,
+                        freedate_diff=torrent.freedate_diff,
+                        title=torrent.title,
+                        description=torrent.description,
+                    ),
+                    "page_rank": rank_position,
                 },
                 actual_downloader=downloader_name or brush_config.downloader,
                 torrent_key=str(torrent.page_url or torrent.title),
