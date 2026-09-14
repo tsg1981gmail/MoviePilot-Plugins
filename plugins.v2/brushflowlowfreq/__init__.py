@@ -228,7 +228,8 @@ class DiagnosticRecorder:
                   managed_uploading INTEGER,
                   managed_paused INTEGER,
                   managed_queued INTEGER,
-                  managed_checking INTEGER
+                  managed_checking INTEGER,
+                  limit_detail_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS task_swarm_samples (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -273,7 +274,13 @@ class DiagnosticRecorder:
                   predicted_total_upload REAL,
                   expected_download_seconds REAL,
                   downloader_efficiency_score REAL,
-                  candidate_feature_json TEXT
+                  candidate_feature_json TEXT,
+                  recommended_before_exploration TEXT,
+                  exploration INTEGER NOT NULL DEFAULT 0,
+                  policy_version TEXT,
+                  candidate_bucket TEXT,
+                  predicted_confidence REAL,
+                  selection_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS task_transfer_events (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -297,6 +304,46 @@ class DiagnosticRecorder:
                   upload_per_task REAL,
                   upload_headroom_ratio REAL,
                   download_headroom_ratio REAL
+                );
+                CREATE TABLE IF NOT EXISTS downloader_torrent_limits (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  sampled_at REAL NOT NULL,
+                  downloader TEXT NOT NULL,
+                  task_hash TEXT NOT NULL,
+                  state TEXT,
+                  managed INTEGER NOT NULL DEFAULT 0,
+                  uploaded INTEGER,
+                  downloaded INTEGER,
+                  up_limit REAL,
+                  dl_limit REAL,
+                  effective_up_limit REAL,
+                  effective_dl_limit REAL,
+                  raw_json TEXT,
+                  UNIQUE(downloader, task_hash, sampled_at)
+                );
+                CREATE TABLE IF NOT EXISTS scheduler_policy_state (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  policy_key TEXT NOT NULL UNIQUE,
+                  bucket_type TEXT NOT NULL,
+                  bucket_key TEXT NOT NULL,
+                  downloader TEXT NOT NULL,
+                  policy_version TEXT NOT NULL DEFAULT '4.4.0',
+                  sample_count INTEGER NOT NULL DEFAULT 0,
+                  weighted_sample_count REAL NOT NULL DEFAULT 0,
+                  ema_upload_30m_per_gb REAL,
+                  ema_total_upload_per_gb REAL,
+                  ema_download_seconds REAL,
+                  ema_success_rate REAL,
+                  last_reward REAL,
+                  updated_at REAL NOT NULL,
+                  payload_json TEXT
+                );
+                CREATE TABLE IF NOT EXISTS scheduler_learning_events (
+                  decision_id INTEGER PRIMARY KEY,
+                  task_hash TEXT NOT NULL,
+                  outcome_updated_at REAL,
+                  last_processed_at REAL NOT NULL,
+                  reward_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS task_outcome_samples (
                   task_hash TEXT PRIMARY KEY REFERENCES task_profiles(task_hash) ON DELETE CASCADE,
@@ -347,9 +394,14 @@ class DiagnosticRecorder:
                   ON task_transfer_events(task_hash, event_at);
                 CREATE INDEX IF NOT EXISTS idx_downloader_efficiency_time
                   ON downloader_efficiency_samples(sampled_at, downloader, window_minutes);
+                CREATE INDEX IF NOT EXISTS idx_downloader_torrent_limits_time
+                  ON downloader_torrent_limits(sampled_at, downloader, task_hash);
+                CREATE INDEX IF NOT EXISTS idx_scheduler_policy_lookup
+                  ON scheduler_policy_state(downloader, bucket_type, bucket_key);
                 """
             )
             self._migrate_v22()
+            self._migrate_v30()
 
     def _ensure_column(self, table, column, definition):
         columns = {
@@ -385,6 +437,23 @@ class DiagnosticRecorder:
         ):
             self._ensure_column("scheduler_shadow_decisions", column, definition)
 
+    def _migrate_v30(self):
+        self._ensure_column("downloader_resource_samples", "limit_detail_json", "TEXT")
+        self._ensure_column(
+            "scheduler_policy_state",
+            "policy_version",
+            "TEXT NOT NULL DEFAULT '4.4.0'",
+        )
+        for column, definition in (
+            ("recommended_before_exploration", "TEXT"),
+            ("exploration", "INTEGER NOT NULL DEFAULT 0"),
+            ("policy_version", "TEXT"),
+            ("candidate_bucket", "TEXT"),
+            ("predicted_confidence", "REAL"),
+            ("selection_json", "TEXT"),
+        ):
+            self._ensure_column("scheduler_shadow_decisions", column, definition)
+
     def _set_meta(self):
         with self._lock:
             now = int(time.time())
@@ -393,8 +462,8 @@ class DiagnosticRecorder:
                 (str(now),),
             )
             for key, value in {
-                "schema_version": "2.2",
-                "plugin_version": "4.3.98",
+                "schema_version": "3.0",
+                "plugin_version": "4.4.0",
             }.items():
                 self._conn.execute(
                     """
@@ -476,7 +545,7 @@ class DiagnosticRecorder:
             (site, torrent_key),
         ).fetchone()
         is_new = row is None
-        self._safe_execute(
+        cursor = self._safe_execute(
             """
             INSERT INTO torrent_catalog(
                 site, page_url, torrent_key, title, first_seen_at, last_seen_at,
@@ -815,8 +884,10 @@ class DiagnosticRecorder:
                 managed_total, managed_downloading, managed_seeding,
                 global_up_speed, global_dl_speed, managed_up_speed,
                 managed_dl_speed, global_up_limit, global_dl_limit,
-                disk_total, disk_used, disk_free, managed_seed_size, error
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                disk_total, disk_used, disk_free, managed_seed_size, error,
+                effective_up_limit, effective_dl_limit, managed_uploading,
+                managed_paused, managed_queued, managed_checking, limit_detail_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 time.time(),
@@ -841,6 +912,55 @@ class DiagnosticRecorder:
                 self._number(data.get("disk_free")),
                 self._number(data.get("managed_seed_size")),
                 str(data.get("error") or "") or None,
+                self._number(data.get("effective_up_limit")),
+                self._number(data.get("effective_dl_limit")),
+                self._number(data.get("managed_uploading")),
+                self._number(data.get("managed_paused")),
+                self._number(data.get("managed_queued")),
+                self._number(data.get("managed_checking")),
+                (
+                    json.dumps(data.get("limit_detail") or {}, ensure_ascii=False, default=str)
+                    if data.get("limit_detail") is not None else None
+                ),
+            ),
+        )
+
+    def record_downloader_torrent_limit(self, downloader, task_hash, data=None, sampled_at=None):
+        data = data or {}
+        self._safe_execute(
+            """
+            INSERT INTO downloader_torrent_limits(
+                sampled_at, downloader, task_hash, state, managed, uploaded,
+                downloaded, up_limit, dl_limit, effective_up_limit,
+                effective_dl_limit, raw_json
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(downloader, task_hash, sampled_at) DO UPDATE SET
+                state=excluded.state,
+                managed=excluded.managed,
+                uploaded=excluded.uploaded,
+                downloaded=excluded.downloaded,
+                up_limit=excluded.up_limit,
+                dl_limit=excluded.dl_limit,
+                effective_up_limit=excluded.effective_up_limit,
+                effective_dl_limit=excluded.effective_dl_limit,
+                raw_json=excluded.raw_json
+            """,
+            (
+                float(sampled_at or time.time()),
+                str(downloader or ""),
+                str(task_hash or ""),
+                str(data.get("state") or "") or None,
+                int(bool(data.get("managed"))),
+                self._number(data.get("uploaded")),
+                self._number(data.get("downloaded")),
+                self._number(data.get("up_limit")),
+                self._number(data.get("dl_limit")),
+                self._number(data.get("effective_up_limit")),
+                self._number(data.get("effective_dl_limit")),
+                (
+                    json.dumps(data.get("raw") or {}, ensure_ascii=False, default=str)
+                    if data.get("raw") is not None else None
+                ),
             ),
         )
 
@@ -910,20 +1030,26 @@ class DiagnosticRecorder:
                                predicted_total_upload=None,
                                expected_download_seconds=None,
                                downloader_efficiency_score=None,
-                               candidate_feature_json=None):
-        self._safe_execute(
+                               candidate_feature_json=None,
+                               recommended_before_exploration=None,
+                               exploration=False, policy_version="4.4.0",
+                               candidate_bucket=None, predicted_confidence=None,
+                               selection=None, executed=False, mode="shadow"):
+        cursor = self._safe_execute(
             """
             INSERT INTO scheduler_shadow_decisions(
                 decided_at, candidate_key, torrent_id, task_hash, actual_downloader,
                 recommended_downloader, candidate_size, source_seeders, source_leechers,
                 predicted_upload_score, selected_resource_score, hard_constraint_json,
-                downloader_scores_json, decision_reason, decision_ms, executed, mode,
+                downloader_scores_json, decision_reason, decision_ms,
                 publish_age_minutes, free_remaining_minutes, page_rank, resolution,
                 content_type, release_group, early_upload_score, total_upload_score,
                 predicted_early_upload, predicted_total_upload, expected_download_seconds,
-                downloader_efficiency_score, candidate_feature_json
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'shadow',
-                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                downloader_efficiency_score, candidate_feature_json,
+                recommended_before_exploration, exploration, policy_version,
+                candidate_bucket, predicted_confidence, selection_json, executed, mode
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 float(decided_at or time.time()),
@@ -954,9 +1080,48 @@ class DiagnosticRecorder:
                 self._number(expected_download_seconds),
                 self._number(downloader_efficiency_score),
                 str(candidate_feature_json or "") or None,
+                str(recommended_before_exploration or "") or None,
+                1 if exploration else 0,
+                str(policy_version or "") or None,
+                str(candidate_bucket or "") or None,
+                self._number(predicted_confidence),
+                (
+                    json.dumps(selection or {}, ensure_ascii=False, default=str)
+                    if selection is not None else None
+                ),
+                1 if executed else 0,
+                str(mode or "shadow"),
             ),
         )
         return cursor.lastrowid if cursor is not None else None
+
+    def update_shadow_decision(self, decision_id, task_hash=None, actual_downloader=None,
+                               executed=None, mode=None, decision_reason=None,
+                               selection=None):
+        updates = []
+        params = []
+        for column, value in (
+            ("task_hash", str(task_hash or "") or None),
+            ("actual_downloader", str(actual_downloader or "") or None),
+            ("mode", str(mode or "") or None),
+            ("decision_reason", str(decision_reason or "") or None),
+        ):
+            if value is not None:
+                updates.append(f"{column}=?")
+                params.append(value)
+        if executed is not None:
+            updates.append("executed=?")
+            params.append(1 if executed else 0)
+        if selection is not None:
+            updates.append("selection_json=?")
+            params.append(json.dumps(selection, ensure_ascii=False, default=str))
+        if not updates:
+            return
+        params.append(int(decision_id))
+        self._safe_execute(
+            f"UPDATE scheduler_shadow_decisions SET {', '.join(updates)} WHERE id=?",
+            tuple(params),
+        )
 
     def record_transfer_event(self, task_hash, event_type, downloader=None,
                               detail=None, event_at=None):
@@ -973,6 +1138,291 @@ class DiagnosticRecorder:
                 json.dumps(detail or {}, ensure_ascii=False, default=str),
             ),
         )
+
+    @staticmethod
+    def scheduler_bucket_keys(size_bytes=None, seeders=None, leechers=None,
+                              publish_age_minutes=None, content_type=None,
+                              resolution=None, free_remaining_minutes=None):
+        """返回从精确到通用的调度特征桶，供在线学习和跨任务泛化使用。"""
+        try:
+            size_gb = max(0.0, float(size_bytes or 0) / 1024 ** 3)
+        except (TypeError, ValueError):
+            size_gb = 0.0
+        if size_gb < 5:
+            size_bucket = "lt5"
+        elif size_gb < 20:
+            size_bucket = "5_20"
+        elif size_gb < 50:
+            size_bucket = "20_50"
+        elif size_gb < 100:
+            size_bucket = "50_100"
+        else:
+            size_bucket = "gte100"
+
+        seeder_count = max(0, int(float(seeders or 0)))
+        leecher_count = max(0, int(float(leechers or 0)))
+        if seeder_count <= 2:
+            seeder_bucket = "low"
+        elif seeder_count <= 10:
+            seeder_bucket = "mid"
+        else:
+            seeder_bucket = "high"
+        if leecher_count <= 1:
+            leecher_bucket = "low"
+        elif leecher_count <= 10:
+            leecher_bucket = "mid"
+        else:
+            leecher_bucket = "high"
+        swarm_bucket = f"seed_{seeder_bucket}_leech_{leecher_bucket}"
+
+        try:
+            age_minutes = max(0.0, float(publish_age_minutes or 0))
+        except (TypeError, ValueError):
+            age_minutes = 0.0
+        if age_minutes <= 15:
+            age_bucket = "fresh15"
+        elif age_minutes <= 60:
+            age_bucket = "fresh60"
+        elif age_minutes <= 240:
+            age_bucket = "fresh4h"
+        elif age_minutes <= 1440:
+            age_bucket = "fresh1d"
+        else:
+            age_bucket = "old"
+
+        content_bucket = str(content_type or "unknown").strip().lower() or "unknown"
+        resolution_bucket = str(resolution or "unknown").strip().lower() or "unknown"
+        try:
+            free_value = (
+                None if free_remaining_minutes is None
+                else max(0.0, float(free_remaining_minutes or 0))
+            )
+        except (TypeError, ValueError):
+            free_value = None
+        if free_value is None:
+            free_bucket = "unknown"
+        elif free_value <= 30:
+            free_bucket = "lt30"
+        elif free_value <= 120:
+            free_bucket = "30_120"
+        elif free_value <= 1440:
+            free_bucket = "2h_1d"
+        else:
+            free_bucket = "gte1d"
+
+        exact = "|".join((
+            size_bucket,
+            swarm_bucket,
+            age_bucket,
+            content_bucket,
+            resolution_bucket,
+            free_bucket,
+        ))
+        return [
+            ("exact", exact, 1.0),
+            ("size", size_bucket, 0.75),
+            ("swarm", swarm_bucket, 0.60),
+            ("content_resolution", f"{content_bucket}:{resolution_bucket}", 0.45),
+            ("age_free", f"{age_bucket}:{free_bucket}", 0.35),
+            ("global", "all", 0.20),
+        ]
+
+    @staticmethod
+    def _scheduler_reward(decision, outcome):
+        size_bytes = float(decision.get("candidate_size") or 0)
+        if size_bytes <= 0:
+            return None
+        size_gb = max(size_bytes / 1024 ** 3, 0.01)
+        uploaded_30m = max(0.0, float(outcome.get("uploaded_at_30m") or 0))
+        total_uploaded = max(0.0, float(outcome.get("total_uploaded") or 0))
+        early_per_gb = min(64.0 * 1024 ** 2, uploaded_30m / size_gb)
+        total_per_gb = min(256.0 * 1024 ** 2, total_uploaded / size_gb)
+        completed_at = outcome.get("first_real_completed_at")
+        decided_at = decision.get("decided_at") or 0
+        download_seconds = None
+        if completed_at and decided_at and float(completed_at) > float(decided_at):
+            download_seconds = min(7 * 86400.0, float(completed_at) - float(decided_at))
+        success = 1.0 if total_uploaded >= max(1024 * 1024, size_bytes * 0.001) else 0.0
+        reward = (
+            0.55 * min(1.0, early_per_gb / 20.0)
+            + 0.35 * min(1.0, total_per_gb / 128.0)
+            + 0.10 * success
+        )
+        return {
+            "upload_30m_per_gb": early_per_gb,
+            "total_upload_per_gb": total_per_gb,
+            "download_seconds": download_seconds,
+            "success": success,
+            "reward": reward,
+        }
+
+    def update_scheduler_policy_from_decision(self, decision_id):
+        decision_id = int(decision_id or 0)
+        if not decision_id:
+            return
+        decision_row = self._conn.execute(
+            "SELECT * FROM scheduler_shadow_decisions WHERE id=?",
+            (decision_id,),
+        ).fetchone()
+        if not decision_row:
+            return
+        decision = dict(decision_row)
+        task_hash = str(decision.get("task_hash") or "")
+        downloader = str(decision.get("actual_downloader") or "")
+        if not task_hash or not downloader:
+            return
+        outcome_row = self._conn.execute(
+            "SELECT * FROM task_outcome_samples WHERE task_hash=?",
+            (task_hash,),
+        ).fetchone()
+        if not outcome_row:
+            return
+        outcome = dict(outcome_row)
+        outcome_updated_at = float(outcome.get("updated_at") or 0)
+        previous = self._conn.execute(
+            "SELECT outcome_updated_at FROM scheduler_learning_events WHERE decision_id=?",
+            (decision_id,),
+        ).fetchone()
+        if previous and outcome_updated_at <= float(previous["outcome_updated_at"] or 0):
+            return
+        reward = self._scheduler_reward(decision, outcome)
+        if not reward:
+            return
+
+        feature = {}
+        try:
+            feature = json.loads(decision.get("candidate_feature_json") or "{}")
+        except Exception:
+            feature = {}
+        bucket_keys = self.scheduler_bucket_keys(
+            size_bytes=decision.get("candidate_size"),
+            seeders=decision.get("source_seeders"),
+            leechers=decision.get("source_leechers"),
+            publish_age_minutes=decision.get("publish_age_minutes"),
+            content_type=decision.get("content_type") or feature.get("content_type"),
+            resolution=decision.get("resolution") or feature.get("resolution"),
+            free_remaining_minutes=decision.get("free_remaining_minutes"),
+        )
+        mode_weight = 1.0 if int(decision.get("executed") or 0) else 0.25
+        policy_version = str(decision.get("policy_version") or "4.4.0")
+        now = time.time()
+        for bucket_type, bucket_key, specificity in bucket_keys:
+            policy_key = f"{policy_version}|{downloader}|{bucket_type}|{bucket_key}"
+            existing = self._conn.execute(
+                "SELECT * FROM scheduler_policy_state WHERE policy_key=?",
+                (policy_key,),
+            ).fetchone()
+            weight = max(0.05, mode_weight * specificity)
+            weighted_count = weight if not existing else float(existing["weighted_sample_count"] or 0) + weight
+            alpha = min(1.0, weight / max(weighted_count, 0.05))
+
+            def update_ema(column):
+                new_value = reward[{
+                    "ema_upload_30m_per_gb": "upload_30m_per_gb",
+                    "ema_total_upload_per_gb": "total_upload_per_gb",
+                    "ema_success_rate": "success",
+                }[column]]
+                old_value = None if not existing else existing[column]
+                if old_value is None:
+                    return new_value
+                return float(old_value) + alpha * (new_value - float(old_value))
+
+            download_seconds = reward.get("download_seconds")
+            old_download_seconds = None if not existing else existing["ema_download_seconds"]
+            if download_seconds is not None:
+                if old_download_seconds is None:
+                    ema_download_seconds = download_seconds
+                else:
+                    ema_download_seconds = (
+                        float(old_download_seconds)
+                        + alpha * (download_seconds - float(old_download_seconds))
+                    )
+            else:
+                ema_download_seconds = old_download_seconds
+
+            self._conn.execute(
+                """
+                INSERT INTO scheduler_policy_state(
+                    policy_key, bucket_type, bucket_key, downloader, policy_version, sample_count,
+                    weighted_sample_count, ema_upload_30m_per_gb,
+                    ema_total_upload_per_gb, ema_download_seconds, ema_success_rate,
+                    last_reward, updated_at, payload_json
+                ) VALUES(?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(policy_key) DO UPDATE SET
+                    sample_count=scheduler_policy_state.sample_count+1,
+                    weighted_sample_count=excluded.weighted_sample_count,
+                    ema_upload_30m_per_gb=excluded.ema_upload_30m_per_gb,
+                    ema_total_upload_per_gb=excluded.ema_total_upload_per_gb,
+                    ema_download_seconds=excluded.ema_download_seconds,
+                    ema_success_rate=excluded.ema_success_rate,
+                    last_reward=excluded.last_reward,
+                    updated_at=excluded.updated_at,
+                    payload_json=excluded.payload_json
+                """,
+                (
+                    policy_key,
+                    bucket_type,
+                    bucket_key,
+                    downloader,
+                    policy_version,
+                    weighted_count,
+                    update_ema("ema_upload_30m_per_gb"),
+                    update_ema("ema_total_upload_per_gb"),
+                    ema_download_seconds,
+                    update_ema("ema_success_rate"),
+                    reward["reward"],
+                    now,
+                    json.dumps({
+                        "decision_mode": decision.get("mode"),
+                        "policy_version": policy_version,
+                        "reward": reward,
+                    }, ensure_ascii=False, default=str),
+                ),
+            )
+        self._conn.execute(
+            """
+            INSERT INTO scheduler_learning_events(
+                decision_id, task_hash, outcome_updated_at, last_processed_at, reward_json
+            ) VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(decision_id) DO UPDATE SET
+                outcome_updated_at=excluded.outcome_updated_at,
+                last_processed_at=excluded.last_processed_at,
+                reward_json=excluded.reward_json
+            """,
+            (
+                decision_id,
+                task_hash,
+                outcome_updated_at,
+                now,
+                json.dumps(reward, ensure_ascii=False, default=str),
+            ),
+        )
+
+    def backfill_scheduler_policy_state(self):
+        """用全部历史决策和结果重建冷启动策略；后续只增量学习。"""
+        try:
+            rows = self._conn.execute(
+                """
+                SELECT decision.id
+                FROM scheduler_shadow_decisions AS decision
+                JOIN task_outcome_samples AS outcome ON outcome.task_hash=decision.task_hash
+                WHERE decision.task_hash IS NOT NULL
+                  AND decision.actual_downloader IS NOT NULL
+                  AND decision.id=(
+                      SELECT MAX(latest.id)
+                      FROM scheduler_shadow_decisions AS latest
+                      WHERE latest.task_hash=decision.task_hash
+                  )
+                ORDER BY decision.decided_at ASC
+                """
+            ).fetchall()
+            self._conn.execute("DELETE FROM scheduler_learning_events")
+            self._conn.execute("DELETE FROM scheduler_policy_state")
+            for row in rows:
+                self.update_scheduler_policy_from_decision(row["id"])
+            self.commit()
+        except Exception:
+            logger.warning("brushflowlowfreq 调度冷启动策略重建失败", exc_info=True)
 
     def record_task_outcome(self, task_hash):
         task_hash = str(task_hash or "")
@@ -1058,6 +1508,20 @@ class DiagnosticRecorder:
                 profile["final_downloaded"],
             ),
         )
+        try:
+            decision = self._conn.execute(
+                """
+                SELECT id FROM scheduler_shadow_decisions
+                WHERE task_hash=?
+                ORDER BY decided_at DESC, id DESC
+                LIMIT 1
+                """,
+                (task_hash,),
+            ).fetchone()
+            if decision:
+                self.update_scheduler_policy_from_decision(decision["id"])
+        except Exception:
+            logger.warning("brushflowlowfreq 调度在线学习失败", exc_info=True)
 
     def backfill_task_outcomes(self):
         try:
@@ -1250,6 +1714,14 @@ class DiagnosticRecorder:
                 (cutoff,),
             )
             self._conn.execute(
+                "DELETE FROM downloader_torrent_limits WHERE sampled_at < ?",
+                (cutoff,),
+            )
+            self._conn.execute(
+                "DELETE FROM scheduler_learning_events WHERE last_processed_at < ?",
+                (cutoff,),
+            )
+            self._conn.execute(
                 """
                 DELETE FROM task_outcome_samples
                 WHERE updated_at < ?
@@ -1277,6 +1749,8 @@ class DiagnosticRecorder:
             "downloader_config_snapshots", "downloader_resource_samples",
             "task_swarm_samples", "scheduler_shadow_decisions", "task_transfer_events",
             "downloader_efficiency_samples", "task_outcome_samples",
+            "downloader_torrent_limits", "scheduler_policy_state",
+            "scheduler_learning_events",
         ):
             try:
                 row = self._conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
@@ -1555,6 +2029,21 @@ class BrushConfig:
             retention_days = 30
         self.diagnostic_retention_days = max(1, retention_days)
         self.multi_downloader_enabled = bool(config.get("multi_downloader_enabled", False))
+        self.dynamic_scheduler_enabled = bool(config.get("dynamic_scheduler_enabled", False))
+        self.dynamic_scheduler_exploration_percent = self.__parse_number(
+            config.get("dynamic_scheduler_exploration_percent", 10)
+        )
+        if self.dynamic_scheduler_exploration_percent is None:
+            self.dynamic_scheduler_exploration_percent = 10
+        self.dynamic_scheduler_exploration_percent = min(
+            30.0, max(0.0, float(self.dynamic_scheduler_exploration_percent))
+        )
+        self.dynamic_scheduler_min_samples = self.__parse_number(
+            config.get("dynamic_scheduler_min_samples", 3)
+        )
+        if self.dynamic_scheduler_min_samples is None:
+            self.dynamic_scheduler_min_samples = 3
+        self.dynamic_scheduler_min_samples = max(1, int(self.dynamic_scheduler_min_samples))
         self.downloader_profiles = self.__parse_downloader_profiles(config)
         self._downloader_profile_raw = {
             key: config.get(key)
@@ -1936,7 +2425,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.3.98"
+    plugin_version = "4.4.0"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2260,6 +2749,12 @@ class BrushFlowLowFreq(_PluginBase):
         profiles = getattr(brush_config, "downloader_profiles", None) or {}
         return profiles.get(str(name), {}) or {}
 
+    @staticmethod
+    def __profile_setting(profile, key, fallback=None):
+        """空白沿用默认，显式 0 保留为“不限制”。"""
+        value = (profile or {}).get(key)
+        return fallback if value in (None, "") else value
+
     def __resolve_downloader_for_size(self, torrent_size: Any) -> Optional[str]:
         """按大小规则解析目标下载器，规则为空或未启用时回退默认下载器。"""
         brush_config = self.__get_brush_config()
@@ -2431,6 +2926,16 @@ class BrushFlowLowFreq(_PluginBase):
             {
                 "path": "/diagnostic/task-outcomes",
                 "endpoint": self.__api_diagnostic_task_outcomes,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/downloader-torrent-limits",
+                "endpoint": self.__api_diagnostic_downloader_torrent_limits,
+                "methods": ["GET"],
+            },
+            {
+                "path": "/diagnostic/scheduler-policy",
+                "endpoint": self.__api_diagnostic_scheduler_policy,
                 "methods": ["GET"],
             },
             {
@@ -3235,6 +3740,58 @@ class BrushFlowLowFreq(_PluginBase):
         )
         return {"enabled": True, "start": range_start, "end": range_end, "rows": rows}
 
+    def __api_diagnostic_downloader_torrent_limits(self, days: int = 30,
+                                                  start: float = None,
+                                                  end: float = None,
+                                                  downloader: str = "",
+                                                  limit: int = 10000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        range_start, range_end = self.__diagnostic_range(days=days, start=start, end=end)
+        sql = (
+            "SELECT * FROM downloader_torrent_limits "
+            "WHERE sampled_at>=? AND sampled_at<=?"
+        )
+        params = [range_start, range_end]
+        if downloader:
+            sql += " AND downloader=?"
+            params.append(downloader)
+        sql += " ORDER BY sampled_at ASC LIMIT ?"
+        params.append(int(limit or 10000))
+        return {
+            "enabled": True,
+            "start": range_start,
+            "end": range_end,
+            "rows": recorder.fetch_rows(sql, params),
+        }
+
+    def __api_diagnostic_scheduler_policy(self, downloader: str = "",
+                                          limit: int = 10000):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder:
+            return {"enabled": False, "rows": []}
+        sql = "SELECT * FROM scheduler_policy_state"
+        params = []
+        if downloader:
+            sql += " WHERE downloader=?"
+            params.append(downloader)
+        sql += " ORDER BY downloader ASC, sample_count DESC, bucket_type ASC LIMIT ?"
+        params.append(int(limit or 10000))
+        return {
+            "enabled": True,
+            "policy": {
+                "enabled": bool(getattr(self._brush_config, "dynamic_scheduler_enabled", False)),
+                "exploration_percent": getattr(
+                    self._brush_config, "dynamic_scheduler_exploration_percent", 10
+                ),
+                "min_samples": getattr(
+                    self._brush_config, "dynamic_scheduler_min_samples", 3
+                ),
+            },
+            "rows": recorder.fetch_rows(sql, params),
+        }
+
     def __api_diagnostic_export(self, days: int = 30, start: float = None, end: float = None,
                                 include_candidates: bool = True, include_tasks: bool = True,
                                 include_samples: bool = True, include_events: bool = True,
@@ -3245,7 +3802,9 @@ class BrushFlowLowFreq(_PluginBase):
                                 include_scheduler: bool = True,
                                 include_transfer_events: bool = True,
                                 include_downloader_efficiency: bool = True,
-                                include_task_outcomes: bool = True):
+                                include_task_outcomes: bool = True,
+                                include_downloader_torrent_limits: bool = True,
+                                include_scheduler_policy: bool = True):
         data = self.__api_diagnostic_summary(days=days, start=start, end=end)
         if not data.get("enabled"):
             return data
@@ -3294,6 +3853,14 @@ class BrushFlowLowFreq(_PluginBase):
         if include_task_outcomes:
             payload["task_outcomes"] = self.__api_diagnostic_task_outcomes(
                 days=days, start=start, end=end, limit=100000
+            )
+        if include_downloader_torrent_limits:
+            payload["downloader_torrent_limits"] = self.__api_diagnostic_downloader_torrent_limits(
+                days=days, start=start, end=end, limit=100000
+            )
+        if include_scheduler_policy:
+            payload["scheduler_policy"] = self.__api_diagnostic_scheduler_policy(
+                limit=100000
             )
         return payload
 
@@ -5422,6 +5989,9 @@ class BrushFlowLowFreq(_PluginBase):
             "log_mode": "full",
             "diagnostic_enabled": False,
             "diagnostic_retention_days": 30,
+            "dynamic_scheduler_enabled": False,
+            "dynamic_scheduler_exploration_percent": 10,
+            "dynamic_scheduler_min_samples": 3,
             "freeleech": "free",
             "hr": "yes",
             "enable_site_config": False,
@@ -5519,6 +6089,9 @@ class BrushFlowLowFreq(_PluginBase):
     def __prepare_multi_downloader_form(self, form: List[dict], defaults: Dict[str, Any]) -> None:
         """插入可视化的多下载器大小分配标签页，不暴露JSON配置。"""
         defaults["multi_downloader_enabled"] = False
+        defaults["dynamic_scheduler_enabled"] = False
+        defaults["dynamic_scheduler_exploration_percent"] = 10
+        defaults["dynamic_scheduler_min_samples"] = 3
         configs = list(getattr(self.downloader_helper, "get_configs", lambda: {})().values() or [])
         for config in configs:
             name = getattr(config, "name", None)
@@ -5654,8 +6227,19 @@ class BrushFlowLowFreq(_PluginBase):
         content.insert(0, {
             "component": "VRow",
             "content": [
-                section_label("按大小分配下载器"),
-                switch("multi_downloader_enabled", "启用多下载器大小分配")
+                section_label("新种子下载器调度"),
+                switch("multi_downloader_enabled", "启用多下载器大小分配"),
+                switch("dynamic_scheduler_enabled", "启用在线智能调度"),
+                number_field(
+                    "dynamic_scheduler_exploration_percent",
+                    "探索比例（%）",
+                    "建议5-10；0为完全利用"
+                ),
+                number_field(
+                    "dynamic_scheduler_min_samples",
+                    "历史学习最小样本数",
+                    "不足时使用启发式评分"
+                ),
             ]
         })
         return {
@@ -6273,6 +6857,30 @@ class BrushFlowLowFreq(_PluginBase):
                     'text': f"导出最近 {days} 天"
                 }]
             })
+        for path, label in (
+            ("scheduler-policy", "查看当前学习策略"),
+            ("downloader-torrent-limits?days=1", "查看最近单任务限速"),
+        ):
+            separator = "&" if "?" in path else "?"
+            auth_query = (
+                f"apikey={api_token}" if api_token else ""
+            )
+            link_rows.append({
+                'component': 'VCol',
+                'props': {'cols': 12, 'md': 6},
+                'content': [{
+                    'component': 'a',
+                    'props': {
+                        'href': (
+                            f"{api_base}/{path}{separator}{auth_query}"
+                            if auth_query else f"{api_base}/{path}"
+                        ),
+                        'target': '_blank',
+                        'style': 'text-decoration:none;font-weight:500;',
+                    },
+                    'text': label
+                }]
+            })
 
         detail_rows = [
             ["状态", "已开启" if status.get("enabled") else "未开启"],
@@ -6293,6 +6901,9 @@ class BrushFlowLowFreq(_PluginBase):
             ["传输事件", str(counts.get("task_transfer_events", 0))],
             ["下载器效率样本", str(counts.get("downloader_efficiency_samples", 0))],
             ["任务结果样本", str(counts.get("task_outcome_samples", 0))],
+            ["单任务限速样本", str(counts.get("downloader_torrent_limits", 0))],
+            ["调度策略状态", str(counts.get("scheduler_policy_state", 0))],
+            ["在线学习事件", str(counts.get("scheduler_learning_events", 0))],
         ]
 
         return [{
@@ -6542,6 +7153,7 @@ class BrushFlowLowFreq(_PluginBase):
             )
             self.__diagnostic_recorder.cleanup()
             self.__diagnostic("backfill_task_outcomes")
+            self.__diagnostic("backfill_scheduler_policy_state")
             logger.info("brushflowlowfreq 独立诊断记录已启动")
         except Exception:
             self.__diagnostic_recorder = None
@@ -6569,18 +7181,299 @@ class BrushFlowLowFreq(_PluginBase):
             data = {
                 "enabled": bool(profile.get("enabled")),
                 "is_default": name == brush_config.downloader,
-                "maxdlcount": profile.get("maxdlcount") or brush_config.maxdlcount,
-                "maxupspeed": profile.get("maxupspeed") or brush_config.maxupspeed,
-                "maxdlspeed": profile.get("maxdlspeed") or brush_config.maxdlspeed,
-                "disksize": profile.get("disksize") or brush_config.disksize,
-                "up_speed": profile.get("up_speed") or brush_config.up_speed,
-                "dl_speed": profile.get("dl_speed") or brush_config.dl_speed,
-                "save_path": profile.get("save_path") or brush_config.save_path,
-                "qb_category": profile.get("qb_category") or brush_config.qb_category,
+                "maxdlcount": self.__profile_setting(
+                    profile, "maxdlcount", brush_config.maxdlcount
+                ),
+                "maxupspeed": self.__profile_setting(
+                    profile, "maxupspeed", brush_config.maxupspeed
+                ),
+                "maxdlspeed": self.__profile_setting(
+                    profile, "maxdlspeed", brush_config.maxdlspeed
+                ),
+                "disksize": self.__profile_setting(
+                    profile, "disksize", brush_config.disksize
+                ),
+                "up_speed": self.__profile_setting(
+                    profile, "up_speed", brush_config.up_speed
+                ),
+                "dl_speed": self.__profile_setting(
+                    profile, "dl_speed", brush_config.dl_speed
+                ),
+                "save_path": self.__profile_setting(
+                    profile, "save_path", brush_config.save_path
+                ),
+                "qb_category": self.__profile_setting(
+                    profile, "qb_category", brush_config.qb_category
+                ),
                 "raw_json": json.dumps(profile, ensure_ascii=False, default=str),
             }
             self.__diagnostic("record_downloader_config", name, data)
         self.__diagnostic("commit")
+
+    @staticmethod
+    def __normalized_limit(value):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if numeric < 0:
+            return None
+        return numeric
+
+    def __get_qb_global_limits(self, service):
+        """读取 qB 实际全局限速，字段不可用时返回空值而不是伪造 0。"""
+        if not service or not self.downloader_helper.is_downloader(
+                "qbittorrent", service=service):
+            return None, None, {}
+        instance = getattr(service, "instance", None)
+        qbc = getattr(instance, "qbc", None)
+        detail = {}
+        preferences = {}
+        transfer = {}
+        try:
+            if qbc and hasattr(qbc, "app_preferences"):
+                preferences = qbc.app_preferences() or {}
+                detail["preferences_source"] = "app_preferences"
+        except Exception as err:
+            detail["preferences_error"] = str(err)
+        try:
+            if instance and hasattr(instance, "transfer_info"):
+                transfer = instance.transfer_info() or {}
+                detail["transfer_source"] = "transfer_info"
+        except Exception as err:
+            detail["transfer_error"] = str(err)
+        raw_up = preferences.get("up_limit", transfer.get("up_limit"))
+        raw_dl = preferences.get("dl_limit", transfer.get("dl_limit"))
+        up_limit = self.__normalized_limit(raw_up)
+        dl_limit = self.__normalized_limit(raw_dl)
+        detail.update({
+            "global_up_limit_raw": raw_up,
+            "global_dl_limit_raw": raw_dl,
+            "global_up_limit": up_limit,
+            "global_dl_limit": dl_limit,
+        })
+        return up_limit, dl_limit, detail
+
+    def __collect_downloader_snapshot(self, downloader_name, torrent_tasks=None,
+                                      service=None, persist=False):
+        """采集调度所需的托管任务状态、实际限速和下载器资源。"""
+        if not downloader_name:
+            return {"error": "missing_downloader"}
+        torrent_tasks = torrent_tasks or {}
+        if not self.downloader_helper:
+            return {
+                "error": "downloader_helper_unavailable",
+                "downloader": downloader_name,
+            }
+        service = service or self.downloader_helper.get_service(name=downloader_name)
+        if not service or not getattr(service, "instance", None):
+            return {"error": "service_unavailable", "downloader": downloader_name}
+        instance = service.instance
+        try:
+            if instance.is_inactive():
+                return {"error": "downloader_inactive", "downloader": downloader_name}
+        except Exception:
+            pass
+
+        previous_name = self._active_downloader_name
+        previous_is_qb = self._is_qb
+        self._active_downloader_name = downloader_name
+        self._is_qb = self.downloader_helper.is_downloader(
+            "qbittorrent", service=service
+        )
+        try:
+            torrents, error = instance.get_torrents()
+        finally:
+            self._active_downloader_name = previous_name
+            self._is_qb = previous_is_qb
+        if error:
+            return {"error": str(error), "downloader": downloader_name}
+
+        global_up_limit, global_dl_limit, limit_detail = self.__get_qb_global_limits(
+            service=service
+        )
+        profile = self.__get_downloader_profile(downloader_name)
+        brush_config = self._brush_config
+        configured_up = self.__normalized_limit(
+            self.__profile_setting(
+                profile, "maxupspeed", getattr(brush_config, "maxupspeed", None)
+            )
+        )
+        configured_dl = self.__normalized_limit(
+            self.__profile_setting(
+                profile, "maxdlspeed", getattr(brush_config, "maxdlspeed", None)
+            )
+        )
+        configured_up = configured_up * 1024 if configured_up else None
+        configured_dl = configured_dl * 1024 if configured_dl else None
+        effective_up_limit = (
+            min(value for value in (global_up_limit, configured_up) if value is not None)
+            if global_up_limit is not None or configured_up is not None else None
+        )
+        effective_dl_limit = (
+            min(value for value in (global_dl_limit, configured_dl) if value is not None)
+            if global_dl_limit is not None or configured_dl is not None else None
+        )
+        limit_detail.update({
+            "configured_up_limit": configured_up,
+            "configured_dl_limit": configured_dl,
+            "effective_up_limit": effective_up_limit,
+            "effective_dl_limit": effective_dl_limit,
+        })
+
+        snapshot = {
+            "downloader": downloader_name,
+            "sampled_at": time.time(),
+            "global_total": 0,
+            "global_downloading": 0,
+            "global_queued": 0,
+            "global_paused": 0,
+            "global_checking": 0,
+            "global_seeding": 0,
+            "managed_total": 0,
+            "managed_downloading": 0,
+            "managed_seeding": 0,
+            "managed_uploading": 0,
+            "managed_paused": 0,
+            "managed_queued": 0,
+            "managed_checking": 0,
+            "global_up_speed": 0.0,
+            "global_dl_speed": 0.0,
+            "managed_up_speed": 0.0,
+            "managed_dl_speed": 0.0,
+            "global_up_limit": global_up_limit,
+            "global_dl_limit": global_dl_limit,
+            "effective_up_limit": effective_up_limit,
+            "effective_dl_limit": effective_dl_limit,
+            "managed_seed_size": 0,
+            "limit_detail": limit_detail,
+            "task_limits": [],
+            "error": None,
+        }
+        active_hashes = {
+            self.__normalize_hash(hash_value)
+            for hash_value, task in torrent_tasks.items()
+            if hash_value and isinstance(task, dict) and not task.get("deleted")
+        }
+        for torrent in torrents or []:
+            torrent_hash = self.__get_hash(torrent)
+            if not torrent_hash:
+                continue
+            try:
+                previous_name = self._active_downloader_name
+                previous_is_qb = self._is_qb
+                self._active_downloader_name = downloader_name
+                self._is_qb = self.downloader_helper.is_downloader(
+                    "qbittorrent", service=service
+                )
+                info = self.__get_torrent_info(torrent)
+            finally:
+                self._active_downloader_name = previous_name
+                self._is_qb = previous_is_qb
+            state_bucket = DiagnosticRecorder.diagnostic_state_bucket(
+                info.get("state"),
+                progress=(
+                    float(info.get("downloaded") or 0)
+                    / max(float(info.get("total_size") or 0), 1.0)
+                ),
+                completion_on=info.get("completion_on"),
+                seeding_time=info.get("seeding_time"),
+            )
+            up_speed = float(info.get("upspeed") or 0)
+            dl_speed = float(info.get("dlspeed") or 0)
+            snapshot["global_total"] += 1
+            if state_bucket in {"downloading", "queued", "paused", "checking", "seeding"}:
+                snapshot[f"global_{state_bucket}"] += 1
+            snapshot["global_up_speed"] += up_speed
+            snapshot["global_dl_speed"] += dl_speed
+            is_managed = torrent_hash in active_hashes
+            task_up_limit = self.__normalized_limit(info.get("upload_limit"))
+            task_dl_limit = self.__normalized_limit(info.get("download_limit"))
+            task_effective_up = (
+                task_up_limit if task_up_limit is not None else effective_up_limit
+            )
+            task_effective_dl = (
+                task_dl_limit if task_dl_limit is not None else effective_dl_limit
+            )
+            if is_managed or task_up_limit is not None or task_dl_limit is not None:
+                snapshot["task_limits"].append({
+                    "task_hash": torrent_hash,
+                    "managed": is_managed,
+                    "state": info.get("state"),
+                    "up_limit": task_up_limit,
+                    "dl_limit": task_dl_limit,
+                    "effective_up_limit": task_effective_up,
+                    "effective_dl_limit": task_effective_dl,
+                    "uploaded": info.get("uploaded"),
+                    "downloaded": info.get("downloaded"),
+                })
+            if not is_managed:
+                continue
+            snapshot["managed_total"] += 1
+            if state_bucket in {"downloading", "queued", "paused", "checking", "seeding"}:
+                snapshot[f"managed_{state_bucket}"] += 1
+            if up_speed > 0:
+                snapshot["managed_uploading"] += 1
+            snapshot["managed_up_speed"] += up_speed
+            snapshot["managed_dl_speed"] += dl_speed
+            try:
+                snapshot["managed_seed_size"] += int(info.get("total_size") or 0)
+            except (TypeError, ValueError):
+                pass
+
+        if persist:
+            self.__diagnostic(
+                "record_downloader_resource",
+                downloader_name,
+                snapshot,
+            )
+            for task_limit in snapshot["task_limits"]:
+                if not task_limit.get("managed"):
+                    continue
+                self.__diagnostic(
+                    "record_downloader_torrent_limit",
+                    downloader_name,
+                    task_limit.get("task_hash"),
+                    task_limit,
+                    sampled_at=snapshot["sampled_at"],
+                )
+        return snapshot
+
+    def __refresh_scheduler_runtime_snapshots(self, torrent_tasks=None, force=False):
+        now = time.time()
+        cache = getattr(self, "_scheduler_runtime_snapshots", None)
+        if not force and cache and now - float(cache.get("sampled_at") or 0) < 45:
+            return cache
+        snapshots = {}
+        for name in self.__configured_downloader_names():
+            profile = self.__get_downloader_profile(name)
+            default_name = getattr(self._brush_config, "downloader", None)
+            if not profile.get("enabled") and name != default_name:
+                continue
+            snapshots[name] = self.__collect_downloader_snapshot(
+                downloader_name=name,
+                torrent_tasks=torrent_tasks,
+                persist=False,
+            )
+        cache = {
+            "sampled_at": now,
+            "downloaders": snapshots,
+        }
+        self._scheduler_runtime_snapshots = cache
+        return cache
+
+    def __apply_scheduler_assignment(self, downloader_name):
+        """新任务添加后立即消耗调度快照余量，避免同一轮重复超配。"""
+        cache = getattr(self, "_scheduler_runtime_snapshots", None)
+        if not cache or not downloader_name:
+            return
+        snapshot = (cache.get("downloaders") or {}).get(downloader_name)
+        if not snapshot:
+            return
+        snapshot["managed_total"] = int(snapshot.get("managed_total") or 0) + 1
+        snapshot["managed_downloading"] = int(
+            snapshot.get("managed_downloading") or 0
+        ) + 1
 
     def __record_downloader_efficiency_windows(self, downloader_name, profile=None):
         recorder = self.__diagnostic_recorder_or_none()
@@ -6589,8 +7482,12 @@ class BrushFlowLowFreq(_PluginBase):
         now = time.time()
         profile = profile or self.__get_downloader_profile(downloader_name)
         brush_config = self._brush_config
-        maxupspeed = profile.get("maxupspeed") or getattr(brush_config, "maxupspeed", None)
-        maxdlspeed = profile.get("maxdlspeed") or getattr(brush_config, "maxdlspeed", None)
+        maxupspeed = self.__profile_setting(
+            profile, "maxupspeed", getattr(brush_config, "maxupspeed", None)
+        )
+        maxdlspeed = self.__profile_setting(
+            profile, "maxdlspeed", getattr(brush_config, "maxdlspeed", None)
+        )
         for window_minutes in (5, 15, 60):
             rows = recorder.fetch_rows(
                 """
@@ -6666,6 +7563,11 @@ class BrushFlowLowFreq(_PluginBase):
             self.__log_status("开始执行多下载器刷流任务 ...")
             torrent_tasks: Dict[str, dict] = self.get_data("torrents") or {}
             self.__normalize_task_hash_keys(torrent_tasks)
+            if self._brush_config.dynamic_scheduler_enabled:
+                self.__refresh_scheduler_runtime_snapshots(
+                    torrent_tasks=torrent_tasks,
+                    force=True,
+                )
             statistic_info = self.__get_statistic_info()
 
             site_infos = []
@@ -6702,7 +7604,7 @@ class BrushFlowLowFreq(_PluginBase):
 
         brush_config = self.__get_brush_config()
 
-        if brush_config.multi_downloader_enabled:
+        if brush_config.multi_downloader_enabled or brush_config.dynamic_scheduler_enabled:
             self.__brush_multi()
             return
 
@@ -6818,30 +7720,31 @@ class BrushFlowLowFreq(_PluginBase):
             "release_group": release_group,
         }
 
-    def __evaluate_shadow_scheduler(self, candidate, actual_downloader=None,
-                                    torrent_key=None, task_hash=None,
-                                    torrent_id=None):
-        """
-        只计算影子调度建议，不改变实际下载器。
-        """
-        recorder = self.__diagnostic_recorder_or_none()
-        if not recorder or not candidate:
-            return None
-        started_at = time.time()
-        size_bytes = self.__number_or_none(candidate.get("size")) or 0
-        seeders = max(0, self.__number_or_none(candidate.get("seeders")) or 0)
-        leechers = max(0, self.__number_or_none(candidate.get("leechers")) or 0)
-        publish_age = max(0.0, self.__number_or_none(candidate.get("publish_age_minutes")) or 0.0)
-        free_remaining = self.__number_or_none(candidate.get("free_remaining_minutes"))
-        page_rank = self.__number_or_none(candidate.get("page_rank"))
-        feature = self.__extract_candidate_title_features(candidate.get("title"))
+    @staticmethod
+    def __scheduler_candidate_context(candidate):
+        size_bytes = max(0.0, float(candidate.get("size") or 0))
+        seeders = max(0.0, float(candidate.get("seeders") or 0))
+        leechers = max(0.0, float(candidate.get("leechers") or 0))
+        publish_age = max(0.0, float(candidate.get("publish_age_minutes") or 0))
+        free_remaining = candidate.get("free_remaining_minutes")
+        try:
+            free_remaining = (
+                None if free_remaining is None else max(0.0, float(free_remaining))
+            )
+        except (TypeError, ValueError):
+            free_remaining = None
+        page_rank = max(0.0, float(candidate.get("page_rank") or 0))
+        feature = BrushFlowLowFreq.__extract_candidate_title_features(
+            candidate.get("title")
+        )
         normalized_leechers = min(1.0, leechers / 30.0)
         inverse_seeders = 1.0 / max(seeders + 1.0, 1.0)
         freshness_score = 1.0 / (1.0 + publish_age / 60.0)
-        free_window_score = 1.0
-        if free_remaining is not None:
-            free_window_score = min(1.0, max(0.0, float(free_remaining) / 120.0))
-        page_rank_score = 1.0 / (1.0 + max(0.0, float(page_rank or 0)) / 50.0)
+        free_window_score = (
+            1.0 if free_remaining is None
+            else min(1.0, free_remaining / 120.0)
+        )
+        page_rank_score = 1.0 / (1.0 + page_rank / 50.0)
         early_upload_score = (
             0.45 * normalized_leechers
             + 0.20 * inverse_seeders
@@ -6852,135 +7755,471 @@ class BrushFlowLowFreq(_PluginBase):
         size_gb = size_bytes / 1024 ** 3
         size_curve = min(1.0, max(0.0, size_gb / 40.0))
         total_upload_score = 0.60 * early_upload_score + 0.40 * size_curve
-        predicted_early_upload = early_upload_score * 100 * 1024 * 1024
-        predicted_total_upload = total_upload_score * max(size_bytes, 1)
+        bucket_keys = DiagnosticRecorder.scheduler_bucket_keys(
+            size_bytes=size_bytes,
+            seeders=seeders,
+            leechers=leechers,
+            publish_age_minutes=publish_age,
+            content_type=feature.get("content_type"),
+            resolution=feature.get("resolution"),
+            free_remaining_minutes=free_remaining,
+        )
+        return {
+            "size_bytes": size_bytes,
+            "size_gb": size_gb,
+            "seeders": seeders,
+            "leechers": leechers,
+            "publish_age": publish_age,
+            "free_remaining": free_remaining,
+            "free_status": (
+                "unknown" if free_remaining is None else "deadline_known"
+            ),
+            "page_rank": page_rank,
+            "feature": feature,
+            "early_upload_score": early_upload_score,
+            "total_upload_score": total_upload_score,
+            "bucket_keys": bucket_keys,
+            "candidate_bucket": bucket_keys[0][1],
+        }
+
+    def __scheduler_policy_prior(self, downloader_name, bucket_keys):
+        recorder = self.__diagnostic_recorder_or_none()
+        if not recorder or not bucket_keys:
+            return {}
+        rows_by_key = {}
+        min_samples = max(1, int(self._brush_config.dynamic_scheduler_min_samples or 1))
+        for bucket_type, bucket_key, _specificity in bucket_keys:
+            rows = recorder.fetch_rows(
+                """
+                SELECT * FROM scheduler_policy_state
+                WHERE downloader=? AND policy_version='4.4.0'
+                  AND bucket_type=? AND bucket_key=?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (downloader_name, bucket_type, bucket_key),
+            )
+            if rows:
+                rows_by_key[(bucket_type, bucket_key)] = rows[0]
+        if not rows_by_key:
+            return {}
+        weighted = {
+            "upload_30m_per_gb": 0.0,
+            "total_upload_per_gb": 0.0,
+            "download_seconds": 0.0,
+            "download_weight": 0.0,
+            "success_rate": 0.0,
+            "weight": 0.0,
+            "sample_count": 0.0,
+            "support": 0.0,
+        }
+        for bucket_type, bucket_key, specificity in bucket_keys:
+            row = rows_by_key.get((bucket_type, bucket_key))
+            if not row:
+                continue
+            sample_count = max(
+                0.0,
+                float(
+                    row.get("weighted_sample_count")
+                    or row.get("sample_count")
+                    or 0
+                ),
+            )
+            confidence = min(1.0, sample_count / max(min_samples, 1))
+            weight = max(0.01, specificity * max(0.15, confidence))
+            weighted["upload_30m_per_gb"] += float(
+                row.get("ema_upload_30m_per_gb") or 0
+            ) * weight
+            weighted["total_upload_per_gb"] += float(
+                row.get("ema_total_upload_per_gb") or 0
+            ) * weight
+            if row.get("ema_download_seconds") is not None:
+                weighted["download_seconds"] += float(
+                    row.get("ema_download_seconds") or 0
+                ) * weight
+                weighted["download_weight"] += weight
+            weighted["success_rate"] += float(row.get("ema_success_rate") or 0) * weight
+            weighted["weight"] += weight
+            weighted["sample_count"] += sample_count
+            weighted["support"] = max(weighted["support"], confidence)
+        if weighted["weight"] <= 0:
+            return {}
+        for key in ("upload_30m_per_gb", "total_upload_per_gb", "success_rate"):
+            weighted[key] /= weighted["weight"]
+        if weighted["download_seconds"] > 0:
+            weighted["download_seconds"] /= max(weighted["download_weight"], 0.01)
+        else:
+            weighted["download_seconds"] = None
+        return weighted
+
+    def __scheduler_live_metrics(self, downloader_name, torrent_tasks):
+        cache = self.__refresh_scheduler_runtime_snapshots(torrent_tasks=torrent_tasks)
+        snapshot = (cache.get("downloaders") or {}).get(downloader_name) or {}
+        recorder = self.__diagnostic_recorder_or_none()
+        recent = {}
+        if recorder:
+            rows = recorder.fetch_rows(
+                """
+                SELECT AVG(managed_up_speed) AS managed_up_speed,
+                       AVG(managed_dl_speed) AS managed_dl_speed,
+                       AVG(managed_downloading) AS managed_downloading,
+                       AVG(upload_per_downloading) AS upload_per_downloading
+                FROM downloader_efficiency_samples
+                WHERE downloader=? AND window_minutes IN (5, 15)
+                  AND sampled_at>=?
+                """,
+                (downloader_name, time.time() - 3600),
+            )
+            recent = rows[0] if rows else {}
+        return snapshot, recent
+
+    def __build_scheduler_plan(self, candidate, torrent_tasks=None, force_shadow=False):
         brush_config = self._brush_config
+        if not brush_config or not candidate:
+            return None
+        context = self.__scheduler_candidate_context(candidate)
+        names = self.__configured_downloader_names()
+        if not names and brush_config.downloader:
+            names = [brush_config.downloader]
         scores = {}
         constraints = {}
-        recommended = None
-        selected_score = None
-        for name in self.__configured_downloader_names() or ([brush_config.downloader] if brush_config else []):
+        eligible = []
+        started_at = time.time()
+        for name in names:
             profile = self.__get_downloader_profile(name)
-            rows = recorder.fetch_rows(
-                "SELECT * FROM downloader_resource_samples WHERE downloader=? "
-                "ORDER BY sampled_at DESC LIMIT 1",
-                (name,),
+            enabled = bool(profile.get("enabled", name == brush_config.downloader))
+            maxdlcount = self.__profile_setting(
+                profile, "maxdlcount", brush_config.maxdlcount
             )
-            latest = rows[0] if rows else {}
-            enabled = bool(profile.get("enabled", name == getattr(brush_config, "downloader", None)))
-            maxdlcount = profile.get("maxdlcount") or getattr(brush_config, "maxdlcount", None)
-            maxupspeed = profile.get("maxupspeed") or getattr(brush_config, "maxupspeed", None)
-            maxdlspeed = profile.get("maxdlspeed") or getattr(brush_config, "maxdlspeed", None)
-            managed_downloading = self.__number_or_none(latest.get("managed_downloading")) or 0
-            managed_total = self.__number_or_none(latest.get("managed_total")) or 0
-            managed_seeding = self.__number_or_none(latest.get("managed_seeding")) or 0
-            managed_up_speed = self.__number_or_none(latest.get("managed_up_speed")) or 0
-            managed_dl_speed = self.__number_or_none(latest.get("managed_dl_speed")) or 0
-
-            slot_ok = True
-            if maxdlcount and managed_downloading >= int(maxdlcount):
-                slot_ok = False
-            upload_ok = True
-            if maxupspeed and managed_up_speed >= float(maxupspeed) * 1024:
-                upload_ok = False
-            download_ok = True
-            if maxdlspeed and managed_dl_speed >= float(maxdlspeed) * 1024:
-                download_ok = False
-
+            configured_up = self.__profile_setting(
+                profile, "maxupspeed", brush_config.maxupspeed
+            )
+            configured_dl = self.__profile_setting(
+                profile, "maxdlspeed", brush_config.maxdlspeed
+            )
+            snapshot, recent = self.__scheduler_live_metrics(name, torrent_tasks)
+            error = snapshot.get("error")
+            managed_downloading = float(
+                snapshot.get("managed_downloading")
+                or recent.get("managed_downloading")
+                or 0
+            )
+            managed_total = float(snapshot.get("managed_total") or 0)
+            managed_up_speed = max(
+                float(snapshot.get("managed_up_speed") or 0),
+                float(recent.get("managed_up_speed") or 0),
+            )
+            managed_dl_speed = max(
+                float(snapshot.get("managed_dl_speed") or 0),
+                float(recent.get("managed_dl_speed") or 0),
+            )
+            effective_up_limit = self.__normalized_limit(
+                snapshot.get("effective_up_limit")
+                or (float(configured_up) * 1024 if configured_up else None)
+            )
+            effective_dl_limit = self.__normalized_limit(
+                snapshot.get("effective_dl_limit")
+                or (float(configured_dl) * 1024 if configured_dl else None)
+            )
+            slot_ok = not maxdlcount or managed_downloading < float(maxdlcount)
+            upload_ok = (
+                effective_up_limit is None
+                or managed_up_speed < max(1.0, effective_up_limit * 0.98)
+            )
+            download_ok = (
+                effective_dl_limit is None
+                or managed_dl_speed < max(1.0, effective_dl_limit * 0.98)
+            )
+            hard_ok = enabled and not error and slot_ok and upload_ok and download_ok
             slot_headroom = (
                 max(0.0, 1.0 - managed_downloading / float(maxdlcount))
                 if maxdlcount else 1.0
             )
             upload_headroom = (
-                max(0.0, 1.0 - managed_up_speed / (float(maxupspeed) * 1024))
-                if maxupspeed else 1.0
+                max(0.0, 1.0 - managed_up_speed / max(1.0, effective_up_limit))
+                if effective_up_limit else 1.0
             )
             download_headroom = (
-                max(0.0, 1.0 - managed_dl_speed / (float(maxdlspeed) * 1024))
-                if maxdlspeed else 1.0
+                max(0.0, 1.0 - managed_dl_speed / max(1.0, effective_dl_limit))
+                if effective_dl_limit else 1.0
             )
-            downloader_efficiency = (
-                managed_up_speed / max(managed_downloading, 1)
-                if managed_downloading else managed_up_speed
+            prior = self.__scheduler_policy_prior(
+                name, context["bucket_keys"]
             )
-            efficiency_score = min(1.0, downloader_efficiency / (1024 * 1024))
+            confidence = float(prior.get("support") or 0.0)
+            heuristic_early_per_gb = (
+                2.0 + 18.0 * float(context["early_upload_score"])
+            ) * 1024 ** 2
+            heuristic_total_per_gb = (
+                8.0 + 72.0 * float(context["total_upload_score"])
+            ) * 1024 ** 2
+            if prior:
+                early_per_gb = (
+                    confidence * float(prior.get("upload_30m_per_gb") or 0)
+                    + (1.0 - confidence) * heuristic_early_per_gb
+                )
+                total_per_gb = (
+                    confidence * float(prior.get("total_upload_per_gb") or 0)
+                    + (1.0 - confidence) * heuristic_total_per_gb
+                )
+            else:
+                early_per_gb = heuristic_early_per_gb
+                total_per_gb = heuristic_total_per_gb
+            predicted_early_upload = max(0.0, early_per_gb * context["size_gb"])
+            predicted_total_upload = max(
+                predicted_early_upload, total_per_gb * context["size_gb"]
+            )
+            observed_efficiency = max(
+                float(recent.get("upload_per_downloading") or 0),
+                managed_up_speed / max(managed_downloading, 1.0),
+            )
+            efficiency_factor = min(
+                2.0, max(0.20, observed_efficiency / (512 * 1024))
+            )
+            if observed_efficiency <= 0:
+                efficiency_factor = 0.45 + 0.55 * confidence
             resource_score = (
                 slot_headroom
                 * upload_headroom
                 * download_headroom
-                * efficiency_score
+                * efficiency_factor
             )
-            hard_ok = enabled and slot_ok and upload_ok and download_ok
             if not hard_ok:
                 resource_score = 0.0
-            score = total_upload_score * resource_score
             expected_download_seconds = (
-                size_bytes / max(managed_dl_speed, 512 * 1024)
-                if size_bytes else None
+                prior.get("download_seconds") if prior else None
             )
+            if not expected_download_seconds:
+                throughput = max(
+                    managed_dl_speed,
+                    float(snapshot.get("global_dl_speed") or 0),
+                    512 * 1024,
+                )
+                expected_download_seconds = (
+                    context["size_bytes"] / throughput
+                    if context["size_bytes"] else None
+                )
+            time_factor = 1.0 / (
+                1.0 + max(0.0, float(expected_download_seconds or 0)) / 1800.0
+            )
+            score = (
+                0.65 * predicted_early_upload
+                + 0.35 * predicted_total_upload
+            ) * resource_score * time_factor * (0.35 + 0.65 * confidence)
             scores[name] = {
                 "score": round(score, 6),
                 "resource_score": round(resource_score, 6),
+                "confidence": round(confidence, 6),
+                "sample_count": round(float(prior.get("sample_count") or 0), 3),
                 "slot_headroom": round(slot_headroom, 6),
                 "upload_headroom": round(upload_headroom, 6),
                 "download_headroom": round(download_headroom, 6),
-                "downloader_efficiency": round(downloader_efficiency, 3),
+                "downloader_efficiency": round(observed_efficiency, 3),
                 "expected_download_seconds": (
-                    round(expected_download_seconds, 3)
+                    round(float(expected_download_seconds), 3)
                     if expected_download_seconds is not None else None
                 ),
+                "predicted_early_upload": round(predicted_early_upload, 3),
+                "predicted_total_upload": round(predicted_total_upload, 3),
+                "prior_source": "online" if prior else "heuristic",
+                "managed_total": int(managed_total),
+                "managed_downloading": int(managed_downloading),
+                "managed_up_speed": round(managed_up_speed, 3),
+                "managed_dl_speed": round(managed_dl_speed, 3),
+                "effective_up_limit": effective_up_limit,
+                "effective_dl_limit": effective_dl_limit,
             }
             constraints[name] = {
                 "enabled": enabled,
+                "error": error,
                 "slot_ok": slot_ok,
                 "upload_ok": upload_ok,
                 "download_ok": download_ok,
             }
-            if hard_ok and (selected_score is None or score > selected_score):
-                selected_score = score
-                recommended = name
+            if hard_ok:
+                eligible.append(name)
+        ranked = sorted(
+            eligible,
+            key=lambda name: scores.get(name, {}).get("score", 0.0),
+            reverse=True,
+        )
+        best = ranked[0] if ranked else None
+        chosen = best
+        explored = False
+        exploration_reason = None
+        if (not force_shadow and brush_config.dynamic_scheduler_enabled
+                and len(ranked) > 1
+                and float(brush_config.dynamic_scheduler_exploration_percent or 0) > 0):
+            if random.random() * 100.0 < float(
+                    brush_config.dynamic_scheduler_exploration_percent):
+                chosen = ranked[1]
+                explored = True
+                exploration_reason = "epsilon_greedy_second_best"
+        if not chosen:
+            fallback = self.__resolve_downloader_for_size(
+                context["size_bytes"]
+            )
+            chosen = fallback
+        mode = (
+            "shadow" if force_shadow
+            else "explore" if explored
+            else "scheduler" if chosen == best else "safety_fallback"
+        )
+        reason = (
+            exploration_reason if explored
+            else "online_adaptive_score" if chosen == best and best
+            else "no_eligible_downloader_size_fallback" if not best
+            else "size_fallback"
+        )
+        return {
+            "candidate": candidate,
+            "context": context,
+            "chosen": chosen,
+            "best": best,
+            "exploration": explored,
+            "mode": mode,
+            "reason": reason,
+            "scores": scores,
+            "constraints": constraints,
+            "decision_ms": int((time.time() - started_at) * 1000),
+        }
 
-        self.__record_shadow_decision(
-            candidate_key=str(torrent_key or candidate.get("title") or ""),
+    def __record_scheduler_plan(self, plan, actual_downloader=None, task_hash=None,
+                                torrent_id=None, succeeded=True, decision_reason=None):
+        if not plan:
+            return None
+        context = plan.get("context") or {}
+        selected = plan.get("chosen")
+        feature = context.get("feature") or {}
+        reason = decision_reason or plan.get("reason")
+        if not succeeded:
+            reason = f"{reason};add_failed"
+        return self.__record_shadow_decision(
+            candidate_key=str(
+                plan.get("candidate", {}).get("torrent_key")
+                or plan.get("candidate", {}).get("title")
+                or ""
+            ),
             task_hash=task_hash,
             torrent_id=torrent_id,
             actual_downloader=actual_downloader,
-            recommended_downloader=recommended,
-            candidate_size=size_bytes,
-            source_seeders=seeders,
-            source_leechers=leechers,
-            predicted_upload_score=early_upload_score,
+            recommended_downloader=selected,
+            recommended_before_exploration=plan.get("best"),
+            candidate_size=context.get("size_bytes"),
+            source_seeders=context.get("seeders"),
+            source_leechers=context.get("leechers"),
+            predicted_upload_score=context.get("early_upload_score"),
             selected_resource_score=(
-                scores.get(recommended, {}).get("resource_score") if recommended else None
+                plan.get("scores", {}).get(selected, {}).get("resource_score")
             ),
-            publish_age_minutes=publish_age,
-            free_remaining_minutes=free_remaining,
-            page_rank=page_rank,
+            publish_age_minutes=context.get("publish_age"),
+            free_remaining_minutes=context.get("free_remaining"),
+            page_rank=context.get("page_rank"),
             resolution=feature.get("resolution"),
             content_type=feature.get("content_type"),
             release_group=feature.get("release_group"),
-            early_upload_score=early_upload_score,
-            total_upload_score=total_upload_score,
-            predicted_early_upload=predicted_early_upload,
-            predicted_total_upload=predicted_total_upload,
+            early_upload_score=context.get("early_upload_score"),
+            total_upload_score=context.get("total_upload_score"),
+            predicted_early_upload=(
+                plan.get("scores", {}).get(selected, {}).get("predicted_early_upload")
+            ),
+            predicted_total_upload=(
+                plan.get("scores", {}).get(selected, {}).get("predicted_total_upload")
+            ),
             expected_download_seconds=(
-                scores.get(recommended, {}).get("expected_download_seconds")
-                if recommended else None
+                plan.get("scores", {}).get(selected, {}).get("expected_download_seconds")
             ),
             downloader_efficiency_score=(
-                scores.get(recommended, {}).get("downloader_efficiency")
-                if recommended else None
+                plan.get("scores", {}).get(selected, {}).get("downloader_efficiency")
             ),
             candidate_feature_json=json.dumps({
-                "title": candidate.get("title"),
+                "title": plan.get("candidate", {}).get("title"),
+                "free_status": context.get("free_status"),
+                "candidate_bucket": context.get("candidate_bucket"),
                 **feature,
             }, ensure_ascii=False),
-            hard_constraint=constraints,
-            downloader_scores=scores,
-            decision_reason="shadow_only",
-            decision_ms=int((time.time() - started_at) * 1000),
+            hard_constraint=plan.get("constraints"),
+            downloader_scores=plan.get("scores"),
+            decision_reason=reason,
+            decision_ms=plan.get("decision_ms"),
+            exploration=plan.get("exploration"),
+            policy_version="4.4.0",
+            candidate_bucket=context.get("candidate_bucket"),
+            predicted_confidence=(
+                plan.get("scores", {}).get(selected, {}).get("confidence")
+            ),
+            selection={
+                "best": plan.get("best"),
+                "chosen": selected,
+                "mode": plan.get("mode"),
+                "reason": reason,
+                "exploration": plan.get("exploration"),
+            },
+            executed=bool(succeeded and plan.get("mode") != "shadow"),
+            mode=plan.get("mode") or "scheduler",
         )
-        return recommended
+
+    def __evaluate_shadow_scheduler(self, candidate, actual_downloader=None,
+                                    torrent_key=None, task_hash=None,
+                                    torrent_id=None):
+        """兼容影子诊断入口；调度开启前仍只记录建议。"""
+        if not candidate:
+            return None
+        candidate = dict(candidate)
+        if torrent_key:
+            candidate["torrent_key"] = torrent_key
+        plan = self.__build_scheduler_plan(
+            candidate=candidate,
+            force_shadow=True,
+        )
+        self.__record_scheduler_plan(
+            plan,
+            actual_downloader=actual_downloader,
+            task_hash=task_hash,
+            torrent_id=torrent_id,
+            succeeded=False,
+        )
+        return plan.get("chosen") if plan else None
+
+    def __select_downloader_with_scheduler(self, candidate, torrent_tasks=None):
+        if not self._brush_config.dynamic_scheduler_enabled:
+            return None
+        return self.__build_scheduler_plan(
+            candidate=candidate,
+            torrent_tasks=torrent_tasks,
+            force_shadow=False,
+        )
+
+    def __build_scheduler_candidate(self, torrent, rank_position=None):
+        try:
+            free_remaining = self.__get_free_remaining_minutes(
+                freedate=getattr(torrent, "freedate", None),
+                freedate_diff=getattr(torrent, "freedate_diff", None),
+                title=getattr(torrent, "title", ""),
+                description=getattr(torrent, "description", ""),
+            )
+        except Exception:
+            free_remaining = None
+        return {
+            "size": getattr(torrent, "size", None),
+            "seeders": getattr(torrent, "seeders", None),
+            "leechers": (
+                getattr(torrent, "leechers", None)
+                or getattr(torrent, "peers", None)
+            ),
+            "title": getattr(torrent, "title", ""),
+            "publish_age_minutes": self.__get_pubminutes(
+                getattr(torrent, "pubdate", None)
+            ),
+            "free_remaining_minutes": free_remaining,
+            "page_rank": rank_position,
+            "free_status": (
+                "unknown" if free_remaining is None else "deadline_known"
+            ),
+            "torrent_key": str(
+                getattr(torrent, "page_url", "")
+                or getattr(torrent, "title", "")
+            ),
+        }
 
     def __brush_site_torrents(self, siteid, torrent_tasks: Dict[str, dict], statistic_info: Dict[str, int],
                               subscribe_titles: Set[str], multi: bool = False) -> bool:
@@ -7103,9 +8342,23 @@ class BrushFlowLowFreq(_PluginBase):
                     free_remaining_minutes=free_remaining,
                     rank_position=rank_position,
                 )
+            scheduler_plan = None
+            scheduler_candidate = self.__build_scheduler_candidate(
+                torrent=torrent,
+                rank_position=rank_position,
+            )
             downloader_name = None
             if multi:
-                downloader_name = self.__resolve_downloader_for_size(torrent.size)
+                if brush_config.dynamic_scheduler_enabled:
+                    scheduler_plan = self.__select_downloader_with_scheduler(
+                        candidate=scheduler_candidate,
+                        torrent_tasks=torrent_tasks,
+                    )
+                    downloader_name = (
+                        scheduler_plan.get("chosen") if scheduler_plan else None
+                    )
+                else:
+                    downloader_name = self.__resolve_downloader_for_size(torrent.size)
                 profile_config = self.__build_downloader_profile_config(
                     name=downloader_name,
                     sitename=siteinfo.name
@@ -7186,6 +8439,12 @@ class BrushFlowLowFreq(_PluginBase):
                 hash_string = self.__download(torrent=torrent)
             if not hash_string:
                 logger.warning(f"{torrent.title} 添加刷流任务失败！")
+                if scheduler_plan:
+                    self.__record_scheduler_plan(
+                        scheduler_plan,
+                        actual_downloader=downloader_name,
+                        succeeded=False,
+                    )
                 diagnostic_record_candidate(
                     torrent,
                     decision="added_failed",
@@ -7194,25 +8453,21 @@ class BrushFlowLowFreq(_PluginBase):
                 )
                 continue
             hash_string = self.__normalize_hash(hash_string)
-            self.__evaluate_shadow_scheduler(
-                candidate={
-                    "size": torrent.size,
-                    "seeders": torrent.seeders,
-                    "leechers": getattr(torrent, "leechers", None) or getattr(torrent, "peers", None),
-                    "title": torrent.title,
-                    "publish_age_minutes": self.__get_pubminutes(torrent.pubdate),
-                    "free_remaining_minutes": self.__get_free_remaining_minutes(
-                        freedate=torrent.freedate,
-                        freedate_diff=torrent.freedate_diff,
-                        title=torrent.title,
-                        description=torrent.description,
-                    ),
-                    "page_rank": rank_position,
-                },
-                actual_downloader=downloader_name or brush_config.downloader,
-                torrent_key=str(torrent.page_url or torrent.title),
-                task_hash=hash_string,
-            )
+            if scheduler_plan:
+                self.__record_scheduler_plan(
+                    scheduler_plan,
+                    actual_downloader=downloader_name or brush_config.downloader,
+                    task_hash=hash_string,
+                    succeeded=True,
+                )
+                self.__apply_scheduler_assignment(downloader_name)
+            else:
+                self.__evaluate_shadow_scheduler(
+                    candidate=scheduler_candidate,
+                    actual_downloader=downloader_name or brush_config.downloader,
+                    torrent_key=scheduler_candidate.get("torrent_key"),
+                    task_hash=hash_string,
+                )
             diagnostic_record_candidate(
                 torrent,
                 decision="added",
@@ -7945,10 +9200,12 @@ class BrushFlowLowFreq(_PluginBase):
 
         brush_config = self.__get_brush_config()
 
-        if downloader_name is None and brush_config.multi_downloader_enabled:
+        if downloader_name is None and (
+                brush_config.multi_downloader_enabled or brush_config.dynamic_scheduler_enabled):
             self.__check_multi_downloaders()
             return
-        if downloader_name is None and not brush_config.multi_downloader_enabled:
+        if downloader_name is None and not (
+                brush_config.multi_downloader_enabled or brush_config.dynamic_scheduler_enabled):
             torrent_tasks = self.get_data("torrents") or {}
             has_secondary_tasks = any(
                 isinstance(task, dict)
@@ -8006,6 +9263,38 @@ class BrushFlowLowFreq(_PluginBase):
                 "upload_speed": 0,
                 "download_speed": 0,
             }
+            global_up_limit, global_dl_limit, limit_detail = self.__get_qb_global_limits(
+                service=self.service_info
+            )
+            profile = self.__get_downloader_profile(
+                downloader_name or brush_config.downloader
+            )
+            configured_up_limit = self.__normalized_limit(
+                self.__profile_setting(
+                    profile, "maxupspeed", brush_config.maxupspeed
+                )
+            )
+            configured_dl_limit = self.__normalized_limit(
+                self.__profile_setting(
+                    profile, "maxdlspeed", brush_config.maxdlspeed
+                )
+            )
+            configured_up_limit = configured_up_limit * 1024 if configured_up_limit else None
+            configured_dl_limit = configured_dl_limit * 1024 if configured_dl_limit else None
+            effective_up_limit = (
+                min(value for value in (global_up_limit, configured_up_limit) if value is not None)
+                if global_up_limit is not None or configured_up_limit is not None else None
+            )
+            effective_dl_limit = (
+                min(value for value in (global_dl_limit, configured_dl_limit) if value is not None)
+                if global_dl_limit is not None or configured_dl_limit is not None else None
+            )
+            limit_detail.update({
+                "configured_up_limit": configured_up_limit,
+                "configured_dl_limit": configured_dl_limit,
+                "effective_up_limit": effective_up_limit,
+                "effective_dl_limit": effective_dl_limit,
+            })
             resource_snapshot = {
                 "global_total": 0,
                 "global_downloading": 0,
@@ -8016,13 +9305,23 @@ class BrushFlowLowFreq(_PluginBase):
                 "managed_total": len(active_torrent_tasks),
                 "managed_downloading": 0,
                 "managed_seeding": 0,
+                "managed_uploading": 0,
+                "managed_paused": 0,
+                "managed_queued": 0,
+                "managed_checking": 0,
                 "global_up_speed": 0.0,
                 "global_dl_speed": 0.0,
                 "managed_up_speed": 0.0,
                 "managed_dl_speed": 0.0,
+                "global_up_limit": global_up_limit,
+                "global_dl_limit": global_dl_limit,
+                "effective_up_limit": effective_up_limit,
+                "effective_dl_limit": effective_dl_limit,
                 "managed_seed_size": 0,
+                "limit_detail": limit_detail,
                 "error": error,
             }
+            managed_task_limits = []
             for torrent in seeding_torrents:
                 torrent_hash = self.__get_hash(torrent)
                 if not torrent_hash:
@@ -8050,10 +9349,10 @@ class BrushFlowLowFreq(_PluginBase):
                 resource_snapshot["global_up_speed"] += up_speed
                 resource_snapshot["global_dl_speed"] += dl_speed
                 if torrent_hash in active_torrent_tasks:
-                    if bucket == "downloading":
-                        resource_snapshot["managed_downloading"] += 1
-                    elif bucket == "seeding":
-                        resource_snapshot["managed_seeding"] += 1
+                    if bucket in {"downloading", "queued", "paused", "checking", "seeding"}:
+                        resource_snapshot[f"managed_{bucket}"] += 1
+                    if up_speed > 0:
+                        resource_snapshot["managed_uploading"] += 1
                     resource_snapshot["managed_up_speed"] += up_speed
                     resource_snapshot["managed_dl_speed"] += dl_speed
                     try:
@@ -8066,6 +9365,23 @@ class BrushFlowLowFreq(_PluginBase):
                         diagnostic_snapshot["uploading_count"] += 1
                     diagnostic_snapshot["upload_speed"] += up_speed
                     diagnostic_snapshot["download_speed"] += dl_speed
+                    task_up_limit = self.__normalized_limit(info.get("upload_limit"))
+                    task_dl_limit = self.__normalized_limit(info.get("download_limit"))
+                    managed_task_limits.append({
+                        "task_hash": torrent_hash,
+                        "state": info.get("state"),
+                        "managed": True,
+                        "uploaded": info.get("uploaded"),
+                        "downloaded": info.get("downloaded"),
+                        "up_limit": task_up_limit,
+                        "dl_limit": task_dl_limit,
+                        "effective_up_limit": (
+                            task_up_limit if task_up_limit is not None else effective_up_limit
+                        ),
+                        "effective_dl_limit": (
+                            task_dl_limit if task_dl_limit is not None else effective_dl_limit
+                        ),
+                    })
             self.__diagnostic(
                 "record_downloader_sample",
                 time.time(),
@@ -8077,6 +9393,13 @@ class BrushFlowLowFreq(_PluginBase):
                 downloader_name or brush_config.downloader,
                 resource_snapshot,
             )
+            for task_limit in managed_task_limits:
+                self.__diagnostic(
+                    "record_downloader_torrent_limit",
+                    downloader_name or brush_config.downloader,
+                    task_limit.get("task_hash"),
+                    task_limit,
+                )
             self.__record_downloader_efficiency_windows(
                 downloader_name or brush_config.downloader
             )
@@ -12670,6 +13993,9 @@ class BrushFlowLowFreq(_PluginBase):
             "brushsites": brush_config.brushsites,
             "downloader": brush_config.downloader,
             "multi_downloader_enabled": brush_config.multi_downloader_enabled,
+            "dynamic_scheduler_enabled": brush_config.dynamic_scheduler_enabled,
+            "dynamic_scheduler_exploration_percent": brush_config.dynamic_scheduler_exploration_percent,
+            "dynamic_scheduler_min_samples": brush_config.dynamic_scheduler_min_samples,
             "disksize": brush_config.disksize,
             "freeleech": brush_config.freeleech,
             "hr": brush_config.hr,
@@ -13438,6 +14764,7 @@ class BrushFlowLowFreq(_PluginBase):
             # tracker
             tracker = torrent.get("tracker")
             completion_on = torrent.get("completion_on") or 0
+            upload_limit = torrent.get("up_limit")
             download_limit = torrent.get("dl_limit")
             state = torrent.get("state")
         # TR
@@ -13493,6 +14820,7 @@ class BrushFlowLowFreq(_PluginBase):
             # tracker
             tracker = torrent.get("tracker")
             completion_on = int(torrent.date_done.timestamp()) if torrent.date_done else 0
+            upload_limit = None
             download_limit = None
             state = getattr(torrent, "status", None) or getattr(torrent, "state", None)
 
@@ -13509,6 +14837,7 @@ class BrushFlowLowFreq(_PluginBase):
             "dlspeed": dlspeed,
             "avg_upspeed": avg_upspeed,
             "avg_downspeed": avg_downspeed,
+            "upload_limit": upload_limit,
             "download_limit": download_limit,
             "iatime": iatime,
             "dltime": dltime,
@@ -14015,6 +15344,24 @@ class BrushFlowLowFreq(_PluginBase):
         """
         获取免费剩余分钟数
         """
+        now_ts = time.time()
+        if isinstance(freedate_diff, (int, float)):
+            numeric_diff = float(freedate_diff)
+            if numeric_diff >= 0:
+                # MoviePilot 站点通常提供分钟或秒；极大值按截止时间戳兼容。
+                if numeric_diff > now_ts / 2:
+                    return max(0.0, (numeric_diff - now_ts) / 60)
+                if numeric_diff > 1440:
+                    return numeric_diff / 60
+                return numeric_diff
+        if isinstance(freedate, datetime):
+            return max(0.0, (freedate - datetime.now()).total_seconds() / 60)
+        if isinstance(freedate, (int, float)):
+            timestamp = float(freedate)
+            if timestamp > 0:
+                if timestamp > now_ts / 2:
+                    return max(0.0, (timestamp - now_ts) / 60)
+                return max(0.0, timestamp / 60)
         # 优先使用显式剩余时长字段，避免截止时间时区差异导致误判
         parsed_from_diff = cls.__parse_duration_minutes(freedate_diff or "")
         if parsed_from_diff is not None:

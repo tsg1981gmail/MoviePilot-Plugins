@@ -9,6 +9,7 @@ import threading
 import time
 import types
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -8048,7 +8049,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         """get_api 返回原有 5 个端点与 8 个诊断端点"""
         plugin = self._new_plugin({"enabled": False})
         api_list = plugin.get_api()
-        self.assertEqual(len(api_list), 19)
+        self.assertEqual(len(api_list), 21)
         paths = {ep["path"] for ep in api_list}
         original = {"/summary", "/daily_compare", "/tasks", "/trend", "/qb_tasks"}
         diagnostic = {
@@ -8800,7 +8801,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             meta = recorder.fetch_rows(
                 "SELECT value FROM diagnostic_meta WHERE key='schema_version'"
             )
-            self.assertEqual(meta[0]["value"], "2.2")
+            self.assertEqual(meta[0]["value"], "3.0")
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -8821,7 +8822,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 row["key"]: row["value"]
                 for row in reopened.fetch_rows("SELECT key, value FROM diagnostic_meta")
             }
-            self.assertEqual(meta["schema_version"], "2.2")
+            self.assertEqual(meta["schema_version"], "3.0")
             reopened.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -8852,7 +8853,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 row["key"]: row["value"]
                 for row in recorder.fetch_rows("SELECT key, value FROM diagnostic_meta")
             }
-            self.assertEqual(meta["schema_version"], "2.2")
+            self.assertEqual(meta["schema_version"], "3.0")
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -9290,6 +9291,369 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_diagnostic_v30_schema_and_online_policy_tables(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            tables = {
+                row["name"] for row in recorder.fetch_rows(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            self.assertIn("downloader_torrent_limits", tables)
+            self.assertIn("scheduler_policy_state", tables)
+            self.assertIn("scheduler_learning_events", tables)
+            decision_columns = {
+                row["name"] for row in recorder.fetch_rows(
+                    "PRAGMA table_info(scheduler_shadow_decisions)"
+                )
+            }
+            self.assertIn("exploration", decision_columns)
+            self.assertIn("policy_version", decision_columns)
+            self.assertIn("candidate_bucket", decision_columns)
+            self.assertIn("selection_json", decision_columns)
+            resource_columns = {
+                row["name"] for row in recorder.fetch_rows(
+                    "PRAGMA table_info(downloader_resource_samples)"
+                )
+            }
+            self.assertIn("effective_up_limit", resource_columns)
+            self.assertIn("managed_uploading", resource_columns)
+            self.assertIn("limit_detail_json", resource_columns)
+            meta = {
+                row["key"]: row["value"]
+                for row in recorder.fetch_rows("SELECT key, value FROM diagnostic_meta")
+            }
+            self.assertEqual(meta["schema_version"], "3.0")
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_downloader_snapshot_collects_effective_limits_and_managed_states(self):
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+            "dynamic_scheduler_enabled": True,
+        })
+        prefix = self.module.BrushConfig.downloader_profile_key("QB-1")
+        plugin._brush_config.downloader_profiles["QB-1"] = {
+            "enabled": True,
+            "maxupspeed": 6000,
+            "maxdlspeed": 12000,
+            "maxdlcount": 5,
+        }
+
+        class FakeQbc:
+            def app_preferences(self):
+                return {"up_limit": 5 * 1024 ** 2, "dl_limit": 10 * 1024 ** 2}
+
+        class FakeDownloader:
+            qbc = FakeQbc()
+
+            def is_inactive(self):
+                return False
+
+            def get_torrents(self):
+                return [{
+                    "hash": "hash1",
+                    "name": "managed torrent",
+                    "state": "downloading",
+                    "progress": 0.5,
+                    "total_size": 10 * 1024 ** 3,
+                    "downloaded": 5 * 1024 ** 3,
+                    "uploaded": 100,
+                    "upspeed": 1024,
+                    "dlspeed": 2048,
+                    "up_limit": 1024 * 1024,
+                    "dl_limit": -1,
+                    "completion_on": 0,
+                }], False
+
+        class FakeHelper:
+            def get_configs(self):
+                return {"QB-1": SimpleNamespace(name="QB-1")}
+
+            def get_service(self, name):
+                return SimpleNamespace(
+                    name="qbittorrent",
+                    instance=FakeDownloader(),
+                )
+
+            def is_downloader(self, name, service=None):
+                return name == "qbittorrent"
+
+        plugin.downloader_helper = FakeHelper()
+        snapshot = plugin._BrushFlowLowFreq__collect_downloader_snapshot(
+            "QB-1",
+            torrent_tasks={"hash1": {"deleted": False}},
+        )
+
+        self.assertEqual(snapshot["managed_total"], 1)
+        self.assertEqual(snapshot["managed_downloading"], 1)
+        self.assertEqual(snapshot["managed_uploading"], 1)
+        self.assertEqual(snapshot["global_up_limit"], 5 * 1024 ** 2)
+        self.assertEqual(snapshot["effective_up_limit"], 5 * 1024 ** 2)
+        self.assertEqual(snapshot["effective_dl_limit"], 10 * 1024 ** 2)
+        self.assertEqual(snapshot["task_limits"][0]["up_limit"], 1024 * 1024)
+        self.assertEqual(
+            snapshot["task_limits"][0]["effective_up_limit"],
+            1024 * 1024,
+        )
+
+    def test_diagnostic_record_resource_and_torrent_limits_roundtrip(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            recorder.record_downloader_resource("QB-1", {
+                "managed_total": 2,
+                "managed_downloading": 1,
+                "managed_uploading": 1,
+                "managed_paused": 1,
+                "effective_up_limit": 4096,
+                "effective_dl_limit": 8192,
+                "limit_detail": {"source": "app_preferences"},
+            })
+            recorder.record_downloader_torrent_limit("QB-1", "hash1", {
+                "managed": True,
+                "state": "downloading",
+                "up_limit": 1024,
+                "dl_limit": -1,
+                "effective_up_limit": 1024,
+                "effective_dl_limit": 8192,
+                "raw": {"qbc": True},
+            })
+            recorder.commit()
+            resource = recorder.fetch_rows(
+                "SELECT * FROM downloader_resource_samples"
+            )[0]
+            limits = recorder.fetch_rows(
+                "SELECT * FROM downloader_torrent_limits"
+            )[0]
+            self.assertEqual(resource["managed_uploading"], 1)
+            self.assertEqual(resource["managed_paused"], 1)
+            self.assertEqual(resource["effective_dl_limit"], 8192)
+            self.assertIn("app_preferences", resource["limit_detail_json"])
+            self.assertEqual(limits["task_hash"], "hash1")
+            self.assertEqual(limits["effective_dl_limit"], 8192)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_scheduler_policy_cold_start_changes_downloader_choice(self):
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            plugin = self._new_plugin({
+                "downloader": "QB-1",
+                "multi_downloader_enabled": True,
+                "dynamic_scheduler_enabled": True,
+                "dynamic_scheduler_exploration_percent": 0,
+                "dynamic_scheduler_min_samples": 1,
+            })
+            plugin._brush_config.downloader_profiles = {
+                "QB-1": {"enabled": True, "maxdlcount": 10},
+                "TR-1": {"enabled": True, "maxdlcount": 10},
+            }
+            plugin._BrushFlowLowFreq__configured_downloader_names = (
+                lambda: ["QB-1", "TR-1"]
+            )
+            plugin._scheduler_runtime_snapshots = {
+                "sampled_at": time.time(),
+                "downloaders": {
+                    "QB-1": {
+                        "downloader": "QB-1",
+                        "error": None,
+                        "managed_total": 2,
+                        "managed_downloading": 0,
+                        "managed_up_speed": 1024,
+                        "managed_dl_speed": 0,
+                        "global_dl_speed": 0,
+                        "effective_up_limit": None,
+                        "effective_dl_limit": None,
+                    },
+                    "TR-1": {
+                        "downloader": "TR-1",
+                        "error": None,
+                        "managed_total": 2,
+                        "managed_downloading": 0,
+                        "managed_up_speed": 1024,
+                        "managed_dl_speed": 0,
+                        "global_dl_speed": 0,
+                        "effective_up_limit": None,
+                        "effective_dl_limit": None,
+                    },
+                },
+            }
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            plugin._BrushFlowLowFreq__diagnostic_recorder = recorder
+            base = time.time() - 3600
+            candidate = {
+                "size": 10 * 1024 ** 3,
+                "seeders": 1,
+                "leechers": 20,
+                "title": "Movie.2026.1080p-GROUP",
+                "publish_age_minutes": 5,
+                "free_remaining_minutes": 120,
+                "page_rank": 1,
+                "torrent_key": "details.php?id=policy",
+            }
+            recorder.record_task_added("hash_good", {
+                "site_name": "站点",
+                "title": candidate["title"],
+                "size": candidate["size"],
+                "time": base,
+            })
+            recorder.record_task_sample(
+                "hash_good",
+                base + 1200,
+                "TR-1",
+                {"uploaded": 400 * 1024 ** 2, "downloaded": 5 * 1024 ** 3},
+                {},
+            )
+            recorder.record_task_sample(
+                "hash_good",
+                base + 2400,
+                "TR-1",
+                {"uploaded": 500 * 1024 ** 2, "downloaded": 10 * 1024 ** 3},
+                {},
+            )
+            recorder.record_shadow_decision(
+                candidate_key="details.php?id=policy",
+                actual_downloader="TR-1",
+                recommended_downloader="TR-1",
+                candidate_size=candidate["size"],
+                source_seeders=1,
+                source_leechers=20,
+                publish_age_minutes=5,
+                free_remaining_minutes=120,
+                content_type="movie",
+                resolution="1080p",
+                task_hash="hash_good",
+                executed=True,
+                mode="scheduler",
+            )
+            recorder.record_task_outcome("hash_good")
+            recorder.commit()
+
+            plan = plugin._BrushFlowLowFreq__build_scheduler_plan(
+                candidate=candidate,
+                force_shadow=False,
+            )
+            self.assertEqual(plan["chosen"], "TR-1")
+            self.assertEqual(plan["mode"], "scheduler")
+            self.assertGreater(plan["scores"]["TR-1"]["confidence"], 0)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_scheduler_exploration_records_second_choice(self):
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+            "dynamic_scheduler_enabled": True,
+            "dynamic_scheduler_exploration_percent": 100,
+        })
+        plugin._brush_config.downloader_profiles = {
+            "QB-1": {"enabled": True, "maxdlcount": 10},
+            "TR-1": {"enabled": True, "maxdlcount": 10},
+        }
+        plugin._BrushFlowLowFreq__configured_downloader_names = (
+            lambda: ["QB-1", "TR-1"]
+        )
+        plugin._scheduler_runtime_snapshots = {
+            "sampled_at": time.time(),
+            "downloaders": {
+                name: {
+                    "downloader": name,
+                    "error": None,
+                    "managed_total": 1,
+                    "managed_downloading": 0,
+                    "managed_up_speed": 1024,
+                    "managed_dl_speed": 0,
+                    "global_dl_speed": 0,
+                    "effective_up_limit": None,
+                    "effective_dl_limit": None,
+                }
+                for name in ("QB-1", "TR-1")
+            },
+        }
+        with unittest.mock.patch.object(self.module.random, "random", return_value=0.0):
+            plan = plugin._BrushFlowLowFreq__build_scheduler_plan(
+                candidate={
+                    "size": 10 * 1024 ** 3,
+                    "seeders": 1,
+                    "leechers": 20,
+                    "title": "Movie.2026.1080p-GROUP",
+                    "publish_age_minutes": 5,
+                    "page_rank": 1,
+                },
+                force_shadow=False,
+            )
+        self.assertTrue(plan["exploration"])
+        self.assertEqual(plan["mode"], "explore")
+        self.assertNotEqual(plan["chosen"], plan["best"])
+
+    def test_scheduler_falls_back_when_all_downloaders_have_errors(self):
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+            "dynamic_scheduler_enabled": True,
+        })
+        plugin._brush_config.downloader_profiles = {
+            "QB-1": {"enabled": True},
+            "TR-1": {"enabled": True},
+        }
+        plugin._BrushFlowLowFreq__configured_downloader_names = (
+            lambda: ["QB-1", "TR-1"]
+        )
+        plugin._scheduler_runtime_snapshots = {
+            "sampled_at": time.time(),
+            "downloaders": {
+                name: {
+                    "downloader": name,
+                    "error": "offline",
+                    "managed_total": 0,
+                    "managed_downloading": 0,
+                    "managed_up_speed": 0,
+                    "managed_dl_speed": 0,
+                    "global_dl_speed": 0,
+                }
+                for name in ("QB-1", "TR-1")
+            },
+        }
+        plan = plugin._BrushFlowLowFreq__build_scheduler_plan(
+            candidate={
+                "size": 10 * 1024 ** 3,
+                "title": "Movie.2026.1080p-GROUP",
+            },
+            force_shadow=False,
+        )
+        self.assertEqual(plan["mode"], "safety_fallback")
+        self.assertEqual(plan["chosen"], "QB-1")
+
+    def test_dynamic_scheduler_form_and_api_are_exposed(self):
+        plugin = self.module.BrushFlowLowFreq()
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.downloader_helper = SimpleNamespace(
+            get_configs=lambda: {"QB-1": SimpleNamespace(name="QB-1")}
+        )
+        form, defaults = plugin.get_form()
+        form_text = str(form)
+        self.assertIn("启用在线智能调度", form_text)
+        self.assertFalse(defaults["dynamic_scheduler_enabled"])
+        self.assertEqual(defaults["dynamic_scheduler_exploration_percent"], 10)
+        paths = [item["path"] for item in plugin.get_api()]
+        self.assertIn("/diagnostic/scheduler-policy", paths)
+        self.assertIn("/diagnostic/downloader-torrent-limits", paths)
 
 
 if __name__ == "__main__":
