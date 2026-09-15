@@ -8612,6 +8612,210 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertTrue(any(key.startswith("dlcfg_") and key.endswith("_enabled") for key in defaults))
         self.assertFalse(defaults["multi_downloader_enabled"])
 
+    def test_multi_downloader_bandwidth_utilization_limit_config_and_form(self):
+        """多下载器使用10分钟下载带宽利用率阈值，不再以并发数阻止新增。"""
+        module = self.module
+        prefix = module.BrushConfig.downloader_profile_key("QB-1")
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+            f"{prefix}_enabled": True,
+            f"{prefix}_bandwidth_utilization_limit": "75",
+        })
+        self.assertEqual(
+            plugin._brush_config.downloader_profiles["QB-1"][
+                "bandwidth_utilization_limit"
+            ],
+            75,
+        )
+        self.assertEqual(
+            self._new_plugin({"downloader": "QB-1"})._brush_config.bandwidth_utilization_limit,
+            80,
+        )
+
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.downloader_helper = SimpleNamespace(
+            get_configs=lambda: {"QB-1": SimpleNamespace(name="QB-1")}
+        )
+        form, defaults = plugin.get_form()
+        form_text = str(form)
+        self.assertIn("10分钟平均下载带宽利用率上限（%）", form_text)
+        self.assertIn(f"{prefix}_bandwidth_utilization_limit", defaults)
+        self.assertEqual(
+            defaults[f"{prefix}_bandwidth_utilization_limit"],
+            80,
+        )
+
+    def test_scheduler_routes_to_downloader_below_bandwidth_utilization(self):
+        """达到阈值下载器不参与本轮智能选择，改投未达到阈值的下载器。"""
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+            "dynamic_scheduler_enabled": True,
+            "dynamic_scheduler_exploration_percent": 0,
+        })
+        plugin._brush_config.downloader_profiles = {
+            "QB-1": {
+                "enabled": True,
+                "bandwidth_utilization_limit": 80,
+            },
+            "TR-1": {
+                "enabled": True,
+                "bandwidth_utilization_limit": 80,
+            },
+        }
+        plugin._BrushFlowLowFreq__configured_downloader_names = (
+            lambda: ["QB-1", "TR-1"]
+        )
+        plugin._scheduler_runtime_snapshots = {
+            "sampled_at": time.time(),
+            "downloaders": {
+                "QB-1": {
+                    "downloader": "QB-1",
+                    "error": None,
+                    "managed_total": 5,
+                    "managed_downloading": 5,
+                    "managed_up_speed": 1024,
+                    "managed_dl_speed": 9 * 1024 ** 2,
+                    "effective_up_limit": 10 * 1024 ** 2,
+                    "effective_dl_limit": 10 * 1024 ** 2,
+                },
+                "TR-1": {
+                    "downloader": "TR-1",
+                    "error": None,
+                    "managed_total": 1,
+                    "managed_downloading": 1,
+                    "managed_up_speed": 1024,
+                    "managed_dl_speed": 2 * 1024 ** 2,
+                    "effective_up_limit": 10 * 1024 ** 2,
+                    "effective_dl_limit": 10 * 1024 ** 2,
+                },
+            },
+        }
+        plan = plugin._BrushFlowLowFreq__build_scheduler_plan(
+            candidate={
+                "size": 10 * 1024 ** 3,
+                "seeders": 1,
+                "leechers": 20,
+                "title": "Movie.2026.1080p-GROUP",
+                "publish_age_minutes": 5,
+            },
+            force_shadow=False,
+        )
+        self.assertEqual(plan["chosen"], "TR-1")
+        self.assertTrue(
+            plan["constraints"]["QB-1"]["utilization_ok"] is False
+        )
+        self.assertTrue(
+            plan["constraints"]["TR-1"]["utilization_ok"] is True
+        )
+
+    def test_scheduler_all_downloaders_over_limit_uses_size_rule_and_never_blocks(self):
+        """全部达到阈值时按原大小规则继续添加，不因利用率停止新增。"""
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+            "dynamic_scheduler_enabled": True,
+        })
+        plugin._brush_config.downloader_profiles = {
+            "QB-1": {
+                "enabled": True,
+                "size_max_gb": 40,
+                "bandwidth_utilization_limit": 80,
+            },
+            "TR-1": {
+                "enabled": True,
+                "size_min_gb": 40,
+                "bandwidth_utilization_limit": 80,
+            },
+        }
+        plugin._BrushFlowLowFreq__configured_downloader_names = (
+            lambda: ["QB-1", "TR-1"]
+        )
+        plugin._scheduler_runtime_snapshots = {
+            "sampled_at": time.time(),
+            "downloaders": {
+                name: {
+                    "downloader": name,
+                    "error": None,
+                    "managed_total": 4,
+                    "managed_downloading": 4,
+                    "managed_up_speed": 0,
+                    "managed_dl_speed": 9 * 1024 ** 2,
+                    "effective_up_limit": 10 * 1024 ** 2,
+                    "effective_dl_limit": 10 * 1024 ** 2,
+                }
+                for name in ("QB-1", "TR-1")
+            },
+        }
+        plan = plugin._BrushFlowLowFreq__build_scheduler_plan(
+            candidate={
+                "size": 50 * 1024 ** 3,
+                "title": "Large.Movie.2026.2160p-GROUP",
+            },
+            force_shadow=False,
+        )
+        self.assertEqual(plan["mode"], "utilization_fallback")
+        self.assertEqual(plan["chosen"], "TR-1")
+        self.assertIsNone(plan["best"])
+        self.assertTrue(all(
+            score["resource_score"] == 0
+            for score in plan["scores"].values()
+        ))
+
+    def test_downloader_add_preconditions_do_not_stop_on_bandwidth_utilization(self):
+        """新增任务时不再因最大并发数或瞬时带宽达到上限而拒绝。"""
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "maxdlcount": 1,
+            "maxdlspeed": 1,
+            "maxupspeed": 1,
+        })
+        plugin._BrushFlowLowFreq__get_downloading_count = lambda: 99
+        plugin._BrushFlowLowFreq__get_average_bandwidth = (
+            lambda **kwargs: (10 * 1024 ** 2, 10 * 1024 ** 2)
+        )
+        profile_config = self.module.BrushConfig({
+            "downloader": "QB-1",
+            "maxdlcount": 1,
+            "maxdlspeed": 1,
+            "maxupspeed": 1,
+        })
+        passed, reason = plugin._BrushFlowLowFreq__evaluate_downloader_add_preconditions(
+            profile_config=profile_config,
+            downloader_name="QB-1",
+            add_torrent_size=1,
+        )
+        self.assertTrue(passed)
+        self.assertIsNone(reason)
+
+    def test_downloader_efficiency_windows_include_ten_minutes(self):
+        """带宽利用率使用固定的10分钟滚动窗口。"""
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            plugin = self._new_plugin({
+                "downloader": "QB-1",
+                "multi_downloader_enabled": True,
+                "dynamic_scheduler_enabled": True,
+            })
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            plugin._BrushFlowLowFreq__diagnostic_recorder = recorder
+            plugin._BrushFlowLowFreq__record_downloader_efficiency_windows("QB-1")
+            recorder.commit()
+            windows = {
+                row["window_minutes"]
+                for row in recorder.fetch_rows(
+                    "SELECT DISTINCT window_minutes FROM downloader_efficiency_samples"
+                )
+            }
+            self.assertIn(10, windows)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def test_multi_downloader_check_groups_tasks_by_downloader(self):
         """多下载器检查按任务记录的下载器名称分组，旧任务归默认下载器"""
         plugin = self._new_plugin({

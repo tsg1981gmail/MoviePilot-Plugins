@@ -463,7 +463,7 @@ class DiagnosticRecorder:
             )
             for key, value in {
                 "schema_version": "3.0",
-                "plugin_version": "4.4.0",
+                "plugin_version": "4.4.1",
             }.items():
                 self._conn.execute(
                     """
@@ -1819,6 +1819,7 @@ class BrushConfig:
         "size_min_gb",
         "size_max_gb",
         "maxdlcount",
+        "bandwidth_utilization_limit",
         "maxupspeed",
         "maxdlspeed",
         "disksize",
@@ -1840,6 +1841,14 @@ class BrushConfig:
         self.maxupspeed = self.__parse_number(config.get("maxupspeed"))
         self.maxdlspeed = self.__parse_number(config.get("maxdlspeed"))
         self.maxdlcount = self.__parse_number(config.get("maxdlcount"))
+        bandwidth_utilization_limit = self.__parse_number(
+            config.get("bandwidth_utilization_limit", 80)
+        )
+        if bandwidth_utilization_limit is None:
+            bandwidth_utilization_limit = 80
+        self.bandwidth_utilization_limit = min(
+            100.0, max(0.0, float(bandwidth_utilization_limit))
+        )
         self.include = config.get("include")
         self.exclude = config.get("exclude")
         self.size = config.get("size")
@@ -2425,7 +2434,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.4.0"
+    plugin_version = "4.4.1"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -6102,7 +6111,9 @@ class BrushFlowLowFreq(_PluginBase):
             for field in BrushConfig.DOWNLOADER_PROFILE_FIELDS:
                 if field == "enabled":
                     continue
-                defaults[f"{prefix}_{field}"] = ""
+                defaults[f"{prefix}_{field}"] = (
+                    80 if field == "bandwidth_utilization_limit" else ""
+                )
 
         if not configs:
             return
@@ -6149,19 +6160,23 @@ class BrushFlowLowFreq(_PluginBase):
                 }]
             }
 
-        def number_field(model: str, label: str, placeholder: str = "") -> dict:
+        def number_field(model: str, label: str, placeholder: str = "",
+                         max_value: str = None) -> dict:
+            props = {
+                "model": model,
+                "label": label,
+                "placeholder": placeholder,
+                "type": "number",
+                "min": "0"
+            }
+            if max_value is not None:
+                props["max"] = max_value
             return {
                 "component": "VCol",
                 "props": {"cols": 12, "md": 3},
                 "content": [{
                     "component": "VTextField",
-                    "props": {
-                        "model": model,
-                        "label": label,
-                        "placeholder": placeholder,
-                        "type": "number",
-                        "min": "0"
-                    }
+                    "props": props
                 }]
             }
 
@@ -6202,7 +6217,12 @@ class BrushFlowLowFreq(_PluginBase):
                 {
                     "component": "VRow",
                     "content": [
-                        number_field(f"{prefix}_maxdlcount", "最大同时下载数", "留空沿用默认；0不限制"),
+                        number_field(
+                            f"{prefix}_bandwidth_utilization_limit",
+                            "10分钟平均下载带宽利用率上限（%）",
+                            "建议80；100为不限制",
+                            max_value="100",
+                        ),
                         number_field(f"{prefix}_maxupspeed", "总上传带宽上限（KB/s）", "留空沿用默认；0不限制"),
                         number_field(f"{prefix}_maxdlspeed", "总下载带宽上限（KB/s）", "留空沿用默认；0不限制"),
                     ]
@@ -6233,7 +6253,7 @@ class BrushFlowLowFreq(_PluginBase):
                 number_field(
                     "dynamic_scheduler_exploration_percent",
                     "探索比例（%）",
-                    "建议5-10；0为完全利用"
+                    "建议10-15；0为完全利用"
                 ),
                 number_field(
                     "dynamic_scheduler_min_samples",
@@ -7184,6 +7204,11 @@ class BrushFlowLowFreq(_PluginBase):
                 "maxdlcount": self.__profile_setting(
                     profile, "maxdlcount", brush_config.maxdlcount
                 ),
+                "bandwidth_utilization_limit": self.__profile_setting(
+                    profile,
+                    "bandwidth_utilization_limit",
+                    brush_config.bandwidth_utilization_limit,
+                ),
                 "maxupspeed": self.__profile_setting(
                     profile, "maxupspeed", brush_config.maxupspeed
                 ),
@@ -7205,7 +7230,14 @@ class BrushFlowLowFreq(_PluginBase):
                 "qb_category": self.__profile_setting(
                     profile, "qb_category", brush_config.qb_category
                 ),
-                "raw_json": json.dumps(profile, ensure_ascii=False, default=str),
+                "raw_json": json.dumps({
+                    **profile,
+                    "bandwidth_utilization_limit": self.__profile_setting(
+                        profile,
+                        "bandwidth_utilization_limit",
+                        brush_config.bandwidth_utilization_limit,
+                    ),
+                }, ensure_ascii=False, default=str),
             }
             self.__diagnostic("record_downloader_config", name, data)
         self.__diagnostic("commit")
@@ -7488,7 +7520,7 @@ class BrushFlowLowFreq(_PluginBase):
         maxdlspeed = self.__profile_setting(
             profile, "maxdlspeed", getattr(brush_config, "maxdlspeed", None)
         )
-        for window_minutes in (5, 15, 60):
+        for window_minutes in (5, 10, 15, 60):
             rows = recorder.fetch_rows(
                 """
                 SELECT AVG(managed_total) AS managed_total,
@@ -7859,17 +7891,37 @@ class BrushFlowLowFreq(_PluginBase):
         if recorder:
             rows = recorder.fetch_rows(
                 """
-                SELECT AVG(managed_up_speed) AS managed_up_speed,
-                       AVG(managed_dl_speed) AS managed_dl_speed,
-                       AVG(managed_downloading) AS managed_downloading,
-                       AVG(upload_per_downloading) AS upload_per_downloading
+                SELECT managed_up_speed,
+                       managed_dl_speed,
+                       managed_downloading,
+                       upload_per_downloading
                 FROM downloader_efficiency_samples
-                WHERE downloader=? AND window_minutes IN (5, 15)
+                WHERE downloader=? AND window_minutes=10
                   AND sampled_at>=?
+                ORDER BY sampled_at DESC
+                LIMIT 1
                 """,
                 (downloader_name, time.time() - 3600),
             )
             recent = rows[0] if rows else {}
+            recent["managed_dl_speed_10m"] = recent.get("managed_dl_speed")
+            if recent.get("managed_dl_speed_10m") is None:
+                fallback_rows = recorder.fetch_rows(
+                    """
+                    SELECT AVG(managed_up_speed) AS managed_up_speed,
+                           AVG(managed_dl_speed) AS managed_dl_speed,
+                           AVG(managed_downloading) AS managed_downloading
+                    FROM downloader_resource_samples
+                    WHERE downloader=? AND sampled_at>=?
+                    """,
+                    (downloader_name, time.time() - 600),
+                )
+                fallback = fallback_rows[0] if fallback_rows else {}
+                recent.update({
+                    key: value for key, value in fallback.items()
+                    if value is not None
+                })
+                recent["managed_dl_speed_10m"] = fallback.get("managed_dl_speed")
         return snapshot, recent
 
     def __build_scheduler_plan(self, candidate, torrent_tasks=None, force_shadow=False):
@@ -7887,8 +7939,14 @@ class BrushFlowLowFreq(_PluginBase):
         for name in names:
             profile = self.__get_downloader_profile(name)
             enabled = bool(profile.get("enabled", name == brush_config.downloader))
-            maxdlcount = self.__profile_setting(
-                profile, "maxdlcount", brush_config.maxdlcount
+            bandwidth_utilization_limit = self.__profile_setting(
+                profile,
+                "bandwidth_utilization_limit",
+                brush_config.bandwidth_utilization_limit,
+            )
+            bandwidth_utilization_limit = min(
+                100.0,
+                max(0.0, float(bandwidth_utilization_limit)),
             )
             configured_up = self.__profile_setting(
                 profile, "maxupspeed", brush_config.maxupspeed
@@ -7912,6 +7970,11 @@ class BrushFlowLowFreq(_PluginBase):
                 float(snapshot.get("managed_dl_speed") or 0),
                 float(recent.get("managed_dl_speed") or 0),
             )
+            managed_dl_speed_10m = float(
+                recent.get("managed_dl_speed_10m")
+                if recent.get("managed_dl_speed_10m") is not None
+                else managed_dl_speed
+            )
             effective_up_limit = self.__normalized_limit(
                 snapshot.get("effective_up_limit")
                 or (float(configured_up) * 1024 if configured_up else None)
@@ -7920,26 +7983,33 @@ class BrushFlowLowFreq(_PluginBase):
                 snapshot.get("effective_dl_limit")
                 or (float(configured_dl) * 1024 if configured_dl else None)
             )
-            slot_ok = not maxdlcount or managed_downloading < float(maxdlcount)
-            upload_ok = (
-                effective_up_limit is None
-                or managed_up_speed < max(1.0, effective_up_limit * 0.98)
+            bandwidth_utilization_percent = (
+                min(100.0, managed_dl_speed_10m / effective_dl_limit * 100.0)
+                if effective_dl_limit else 0.0
             )
-            download_ok = (
-                effective_dl_limit is None
-                or managed_dl_speed < max(1.0, effective_dl_limit * 0.98)
+            utilization_ok = (
+                bandwidth_utilization_percent < bandwidth_utilization_limit
             )
-            hard_ok = enabled and not error and slot_ok and upload_ok and download_ok
-            slot_headroom = (
-                max(0.0, 1.0 - managed_downloading / float(maxdlcount))
-                if maxdlcount else 1.0
+            hard_ok = enabled and not error and utilization_ok
+            bandwidth_headroom = (
+                max(
+                    0.0,
+                    (
+                        bandwidth_utilization_limit
+                        - bandwidth_utilization_percent
+                    ) / max(bandwidth_utilization_limit, 0.01),
+                )
+                if bandwidth_utilization_limit > 0 else 0.0
             )
             upload_headroom = (
                 max(0.0, 1.0 - managed_up_speed / max(1.0, effective_up_limit))
                 if effective_up_limit else 1.0
             )
             download_headroom = (
-                max(0.0, 1.0 - managed_dl_speed / max(1.0, effective_dl_limit))
+                max(
+                    0.0,
+                    1.0 - managed_dl_speed_10m / max(1.0, effective_dl_limit),
+                )
                 if effective_dl_limit else 1.0
             )
             prior = self.__scheduler_policy_prior(
@@ -7978,9 +8048,8 @@ class BrushFlowLowFreq(_PluginBase):
             if observed_efficiency <= 0:
                 efficiency_factor = 0.45 + 0.55 * confidence
             resource_score = (
-                slot_headroom
+                bandwidth_headroom
                 * upload_headroom
-                * download_headroom
                 * efficiency_factor
             )
             if not hard_ok:
@@ -7990,7 +8059,7 @@ class BrushFlowLowFreq(_PluginBase):
             )
             if not expected_download_seconds:
                 throughput = max(
-                    managed_dl_speed,
+                    managed_dl_speed_10m,
                     float(snapshot.get("global_dl_speed") or 0),
                     512 * 1024,
                 )
@@ -8010,7 +8079,7 @@ class BrushFlowLowFreq(_PluginBase):
                 "resource_score": round(resource_score, 6),
                 "confidence": round(confidence, 6),
                 "sample_count": round(float(prior.get("sample_count") or 0), 3),
-                "slot_headroom": round(slot_headroom, 6),
+                "bandwidth_headroom": round(bandwidth_headroom, 6),
                 "upload_headroom": round(upload_headroom, 6),
                 "download_headroom": round(download_headroom, 6),
                 "downloader_efficiency": round(observed_efficiency, 3),
@@ -8025,15 +8094,24 @@ class BrushFlowLowFreq(_PluginBase):
                 "managed_downloading": int(managed_downloading),
                 "managed_up_speed": round(managed_up_speed, 3),
                 "managed_dl_speed": round(managed_dl_speed, 3),
+                "managed_dl_speed_10m": round(managed_dl_speed_10m, 3),
+                "bandwidth_utilization_percent": round(
+                    bandwidth_utilization_percent, 3
+                ),
+                "bandwidth_utilization_limit": bandwidth_utilization_limit,
                 "effective_up_limit": effective_up_limit,
                 "effective_dl_limit": effective_dl_limit,
             }
             constraints[name] = {
                 "enabled": enabled,
                 "error": error,
-                "slot_ok": slot_ok,
-                "upload_ok": upload_ok,
-                "download_ok": download_ok,
+                "utilization_ok": utilization_ok,
+                "bandwidth_utilization_percent": round(
+                    bandwidth_utilization_percent, 3
+                ),
+                "bandwidth_utilization_limit": bandwidth_utilization_limit,
+                "managed_dl_speed_10m": round(managed_dl_speed_10m, 3),
+                "effective_dl_limit": effective_dl_limit,
             }
             if hard_ok:
                 eligible.append(name)
@@ -8059,17 +8137,37 @@ class BrushFlowLowFreq(_PluginBase):
                 context["size_bytes"]
             )
             chosen = fallback
-        mode = (
-            "shadow" if force_shadow
-            else "explore" if explored
-            else "scheduler" if chosen == best else "safety_fallback"
+        utilization_fallback = (
+            not force_shadow
+            and best is None
+            and chosen is not None
+            and any(
+                constraint.get("enabled")
+                and not constraint.get("error")
+                and not constraint.get("utilization_ok")
+                for constraint in constraints.values()
+            )
         )
-        reason = (
-            exploration_reason if explored
-            else "online_adaptive_score" if chosen == best and best
-            else "no_eligible_downloader_size_fallback" if not best
-            else "size_fallback"
-        )
+        if force_shadow:
+            mode = "shadow"
+        elif explored:
+            mode = "explore"
+        elif utilization_fallback:
+            mode = "utilization_fallback"
+        elif chosen == best:
+            mode = "scheduler"
+        else:
+            mode = "safety_fallback"
+        if explored:
+            reason = exploration_reason
+        elif utilization_fallback:
+            reason = "all_downloaders_over_bandwidth_limit_size_fallback"
+        elif chosen == best and best:
+            reason = "online_adaptive_score"
+        elif not best:
+            reason = "no_eligible_downloader_size_fallback"
+        else:
+            reason = "size_fallback"
         return {
             "candidate": candidate,
             "context": context,
@@ -8665,33 +8763,7 @@ class BrushFlowLowFreq(_PluginBase):
     def __evaluate_downloader_add_preconditions(self, profile_config: BrushConfig,
                                                 downloader_name: str,
                                                 add_torrent_size: float = 0.0) -> Tuple[bool, Optional[str]]:
-        """多下载器模式下按目标下载器独立额度判断是否允许新增任务。"""
-        maxdlcount = getattr(profile_config, "maxdlcount", None)
-        if maxdlcount:
-            current_count = self.__get_downloading_count()
-            if current_count >= int(maxdlcount):
-                return False, (
-                    f"下载器 {downloader_name} 当前同时下载任务数 {current_count} "
-                    f"已达到最大值 {int(maxdlcount)}，暂时停止新增任务"
-                )
-
-        maxupspeed = getattr(profile_config, "maxupspeed", None)
-        maxdlspeed = getattr(profile_config, "maxdlspeed", None)
-        if maxupspeed or maxdlspeed:
-            avg_upload_speed, avg_download_speed = self.__get_average_bandwidth(sample_count=1, interval=0)
-            if maxupspeed and avg_upload_speed is not None and avg_upload_speed >= float(maxupspeed) * 1024:
-                return False, (
-                    f"下载器 {downloader_name} 当前总上传带宽 "
-                    f"{StringUtils.str_filesize(avg_upload_speed)}，"
-                    f"已达到独立上限 {maxupspeed} KB/s，暂时停止新增任务"
-                )
-            if maxdlspeed and avg_download_speed is not None and avg_download_speed >= float(maxdlspeed) * 1024:
-                return False, (
-                    f"下载器 {downloader_name} 当前总下载带宽 "
-                    f"{StringUtils.str_filesize(avg_download_speed)}，"
-                    f"已达到独立上限 {maxdlspeed} KB/s，暂时停止新增任务"
-                )
-
+        """多下载器模式下只检查保种体积，不再因并发或带宽利用率停止新增。"""
         disksize = getattr(profile_config, "disksize", None)
         if disksize:
             current_size = self.__get_downloader_seeding_size(downloader_name)
