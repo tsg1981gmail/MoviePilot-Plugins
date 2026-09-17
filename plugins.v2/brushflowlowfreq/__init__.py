@@ -35,6 +35,7 @@ from app.schemas.types import EventType
 from app.utils.http import RequestUtils
 from app.utils.string import StringUtils
 import shutil
+import statistics
 from pathlib import Path
 
 lock = threading.RLock()
@@ -390,6 +391,8 @@ class DiagnosticRecorder:
                   ON task_swarm_samples(task_hash, sampled_at);
                 CREATE INDEX IF NOT EXISTS idx_scheduler_shadow_time
                   ON scheduler_shadow_decisions(decided_at);
+                CREATE INDEX IF NOT EXISTS idx_scheduler_downloader_time
+                  ON scheduler_shadow_decisions(actual_downloader, decided_at);
                 CREATE INDEX IF NOT EXISTS idx_task_transfer_hash_time
                   ON task_transfer_events(task_hash, event_at);
                 CREATE INDEX IF NOT EXISTS idx_downloader_efficiency_time
@@ -463,7 +466,7 @@ class DiagnosticRecorder:
             )
             for key, value in {
                 "schema_version": "3.0",
-                "plugin_version": "4.4.1",
+                "plugin_version": "4.4.2",
             }.items():
                 self._conn.execute(
                     """
@@ -2039,6 +2042,9 @@ class BrushConfig:
         self.diagnostic_retention_days = max(1, retention_days)
         self.multi_downloader_enabled = bool(config.get("multi_downloader_enabled", False))
         self.dynamic_scheduler_enabled = bool(config.get("dynamic_scheduler_enabled", False))
+        self.dynamic_scheduler_size_guard_enabled = bool(
+            config.get("dynamic_scheduler_size_guard_enabled", True)
+        )
         self.dynamic_scheduler_exploration_percent = self.__parse_number(
             config.get("dynamic_scheduler_exploration_percent", 10)
         )
@@ -2434,7 +2440,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.4.1"
+    plugin_version = "4.4.2"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -6099,6 +6105,7 @@ class BrushFlowLowFreq(_PluginBase):
         """插入可视化的多下载器大小分配标签页，不暴露JSON配置。"""
         defaults["multi_downloader_enabled"] = False
         defaults["dynamic_scheduler_enabled"] = False
+        defaults["dynamic_scheduler_size_guard_enabled"] = True
         defaults["dynamic_scheduler_exploration_percent"] = 10
         defaults["dynamic_scheduler_min_samples"] = 3
         configs = list(getattr(self.downloader_helper, "get_configs", lambda: {})().values() or [])
@@ -6250,6 +6257,10 @@ class BrushFlowLowFreq(_PluginBase):
                 section_label("新种子下载器调度"),
                 switch("multi_downloader_enabled", "启用多下载器大小分配"),
                 switch("dynamic_scheduler_enabled", "启用在线智能调度"),
+                switch(
+                    "dynamic_scheduler_size_guard_enabled",
+                    "启用原大小分流保护",
+                ),
                 number_field(
                     "dynamic_scheduler_exploration_percent",
                     "探索比例（%）",
@@ -7924,6 +7935,76 @@ class BrushFlowLowFreq(_PluginBase):
                 recent["managed_dl_speed_10m"] = fallback.get("managed_dl_speed")
         return snapshot, recent
 
+    def __scheduler_calibration_factors(self, downloader_name, size_bytes):
+        """按下载器和相近大小，用近期实际/预测比值校准预测和置信度。"""
+        recorder = self.__diagnostic_recorder_or_none()
+        try:
+            size_bytes = float(size_bytes or 0)
+        except (TypeError, ValueError):
+            size_bytes = 0
+        empty = {
+            "early_factor": 1.0,
+            "total_factor": 1.0,
+            "samples": 0,
+            "confidence_factor": 0.0,
+        }
+        if not recorder or size_bytes <= 0:
+            return empty
+        rows = recorder.fetch_rows(
+            """
+            SELECT d.decided_at, d.predicted_early_upload, d.predicted_total_upload,
+                   o.uploaded_at_30m, o.total_uploaded
+            FROM scheduler_shadow_decisions AS d
+            JOIN task_outcome_samples AS o ON o.task_hash=d.task_hash
+            WHERE d.actual_downloader=?
+              AND d.executed=1
+              AND d.decided_at>=?
+              AND d.candidate_size BETWEEN ? AND ?
+            ORDER BY d.decided_at DESC
+            LIMIT 200
+            """,
+            (
+                downloader_name,
+                time.time() - 7 * 86400,
+                size_bytes * 0.5,
+                size_bytes * 1.5,
+            ),
+        )
+        if not rows:
+            return empty
+        early_ratios = []
+        total_ratios = []
+        now = time.time()
+        for row in rows:
+            age_seconds = max(0.0, now - float(row.get("decided_at") or now))
+            if age_seconds >= 1800 and row.get("predicted_early_upload"):
+                early_ratios.append(
+                    max(0.0, float(row.get("uploaded_at_30m") or 0))
+                    / float(row["predicted_early_upload"])
+                )
+            if age_seconds >= 3600 and row.get("predicted_total_upload"):
+                total_ratios.append(
+                    max(0.0, float(row.get("total_uploaded") or 0))
+                    / float(row["predicted_total_upload"])
+                )
+        minimum = max(
+            5,
+            min(20, int(self._brush_config.dynamic_scheduler_min_samples or 5)),
+        )
+        samples = max(len(early_ratios), len(total_ratios))
+
+        def factor(values):
+            if len(values) < minimum:
+                return 1.0
+            return min(2.0, max(0.05, float(statistics.median(values))))
+
+        return {
+            "early_factor": factor(early_ratios),
+            "total_factor": factor(total_ratios),
+            "samples": samples,
+            "confidence_factor": min(1.0, samples / minimum),
+        }
+
     def __build_scheduler_plan(self, candidate, torrent_tasks=None, force_shadow=False):
         brush_config = self._brush_config
         if not brush_config or not candidate:
@@ -8034,10 +8115,22 @@ class BrushFlowLowFreq(_PluginBase):
             else:
                 early_per_gb = heuristic_early_per_gb
                 total_per_gb = heuristic_total_per_gb
-            predicted_early_upload = max(0.0, early_per_gb * context["size_gb"])
-            predicted_total_upload = max(
-                predicted_early_upload, total_per_gb * context["size_gb"]
+            calibration = self.__scheduler_calibration_factors(
+                name, context["size_bytes"]
             )
+            predicted_early_upload = max(
+                0.0,
+                early_per_gb
+                * context["size_gb"]
+                * calibration["early_factor"],
+            )
+            predicted_total_upload = max(
+                predicted_early_upload,
+                total_per_gb
+                * context["size_gb"]
+                * calibration["total_factor"],
+            )
+            confidence *= 0.5 + 0.5 * calibration["confidence_factor"]
             observed_efficiency = max(
                 float(recent.get("upload_per_downloading") or 0),
                 managed_up_speed / max(managed_downloading, 1.0),
@@ -8079,6 +8172,13 @@ class BrushFlowLowFreq(_PluginBase):
                 "resource_score": round(resource_score, 6),
                 "confidence": round(confidence, 6),
                 "sample_count": round(float(prior.get("sample_count") or 0), 3),
+                "calibration_samples": calibration["samples"],
+                "early_calibration_factor": round(
+                    calibration["early_factor"], 6
+                ),
+                "total_calibration_factor": round(
+                    calibration["total_factor"], 6
+                ),
                 "bandwidth_headroom": round(bandwidth_headroom, 6),
                 "upload_headroom": round(upload_headroom, 6),
                 "download_headroom": round(download_headroom, 6),
@@ -8120,33 +8220,76 @@ class BrushFlowLowFreq(_PluginBase):
             key=lambda name: scores.get(name, {}).get("score", 0.0),
             reverse=True,
         )
-        best = ranked[0] if ranked else None
+        score_best = ranked[0] if ranked else None
+        preferred = self.__resolve_downloader_for_size(context["size_bytes"])
+        preferred_constraint = constraints.get(preferred) or {}
+        preferred_eligible = preferred in eligible
+        guard_enabled = bool(
+            brush_config.dynamic_scheduler_size_guard_enabled
+        )
+        if preferred_eligible and guard_enabled:
+            best = preferred
+        elif preferred_eligible:
+            best = score_best or preferred
+        elif ranked:
+            best = score_best
+        else:
+            best = preferred
         chosen = best
         explored = False
         exploration_reason = None
         if (not force_shadow and brush_config.dynamic_scheduler_enabled
                 and len(ranked) > 1
+                and context["size_gb"] < 50
                 and float(brush_config.dynamic_scheduler_exploration_percent or 0) > 0):
             if random.random() * 100.0 < float(
                     brush_config.dynamic_scheduler_exploration_percent):
-                chosen = ranked[1]
-                explored = True
-                exploration_reason = "epsilon_greedy_second_best"
-        if not chosen:
-            fallback = self.__resolve_downloader_for_size(
-                context["size_bytes"]
-            )
-            chosen = fallback
+                alternatives = [
+                    name for name in ranked if name != best
+                ]
+                if alternatives:
+                    chosen = alternatives[0]
+                    explored = True
+                    exploration_reason = "epsilon_greedy_safe_alternate"
         utilization_fallback = (
             not force_shadow
-            and best is None
+            and not ranked
             and chosen is not None
-            and any(
-                constraint.get("enabled")
-                and not constraint.get("error")
-                and not constraint.get("utilization_ok")
-                for constraint in constraints.values()
-            )
+            and preferred_constraint.get("enabled")
+            and not preferred_constraint.get("error")
+            and not preferred_constraint.get("utilization_ok")
+        )
+        utilization_reroute = (
+            not force_shadow
+            and bool(ranked)
+            and preferred is not None
+            and not preferred_eligible
+            and chosen != preferred
+            and preferred_constraint.get("enabled")
+            and not preferred_constraint.get("error")
+            and not preferred_constraint.get("utilization_ok")
+        )
+        safety_reroute = (
+            not force_shadow
+            and bool(ranked)
+            and preferred is not None
+            and not preferred_eligible
+            and chosen != preferred
+            and not utilization_reroute
+        )
+        safety_fallback = (
+            not force_shadow
+            and not ranked
+            and chosen == preferred
+            and not utilization_fallback
+        )
+        size_guard = (
+            not force_shadow
+            and guard_enabled
+            and preferred is not None
+            and chosen == preferred
+            and score_best is not None
+            and score_best != preferred
         )
         if force_shadow:
             mode = "shadow"
@@ -8154,17 +8297,31 @@ class BrushFlowLowFreq(_PluginBase):
             mode = "explore"
         elif utilization_fallback:
             mode = "utilization_fallback"
-        elif chosen == best:
-            mode = "scheduler"
-        else:
+        elif utilization_reroute:
+            mode = "utilization_reroute"
+        elif safety_reroute:
+            mode = "safety_reroute"
+        elif safety_fallback:
             mode = "safety_fallback"
+        elif size_guard:
+            mode = "size_guard"
+        else:
+            mode = "scheduler"
         if explored:
             reason = exploration_reason
         elif utilization_fallback:
             reason = "all_downloaders_over_bandwidth_limit_size_fallback"
-        elif chosen == best and best:
+        elif utilization_reroute:
+            reason = "preferred_downloader_over_bandwidth_limit_reroute"
+        elif safety_reroute:
+            reason = "preferred_downloader_unavailable_reroute"
+        elif safety_fallback:
+            reason = "preferred_downloader_unavailable_size_fallback"
+        elif size_guard:
+            reason = "score_best_blocked_by_size_guard"
+        elif chosen == score_best and score_best:
             reason = "online_adaptive_score"
-        elif not best:
+        elif not ranked:
             reason = "no_eligible_downloader_size_fallback"
         else:
             reason = "size_fallback"
@@ -8173,6 +8330,8 @@ class BrushFlowLowFreq(_PluginBase):
             "context": context,
             "chosen": chosen,
             "best": best,
+            "score_best": score_best,
+            "preferred": preferred,
             "exploration": explored,
             "mode": mode,
             "reason": reason,
@@ -8247,6 +8406,8 @@ class BrushFlowLowFreq(_PluginBase):
             ),
             selection={
                 "best": plan.get("best"),
+                "score_best": plan.get("score_best"),
+                "preferred": plan.get("preferred"),
                 "chosen": selected,
                 "mode": plan.get("mode"),
                 "reason": reason,
@@ -14066,6 +14227,9 @@ class BrushFlowLowFreq(_PluginBase):
             "downloader": brush_config.downloader,
             "multi_downloader_enabled": brush_config.multi_downloader_enabled,
             "dynamic_scheduler_enabled": brush_config.dynamic_scheduler_enabled,
+            "dynamic_scheduler_size_guard_enabled": (
+                brush_config.dynamic_scheduler_size_guard_enabled
+            ),
             "dynamic_scheduler_exploration_percent": brush_config.dynamic_scheduler_exploration_percent,
             "dynamic_scheduler_min_samples": brush_config.dynamic_scheduler_min_samples,
             "disksize": brush_config.disksize,

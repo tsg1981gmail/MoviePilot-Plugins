@@ -8703,6 +8703,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             force_shadow=False,
         )
         self.assertEqual(plan["chosen"], "TR-1")
+        self.assertEqual(plan["mode"], "utilization_reroute")
         self.assertTrue(
             plan["constraints"]["QB-1"]["utilization_ok"] is False
         )
@@ -8757,7 +8758,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         )
         self.assertEqual(plan["mode"], "utilization_fallback")
         self.assertEqual(plan["chosen"], "TR-1")
-        self.assertIsNone(plan["best"])
+        self.assertEqual(plan["best"], "TR-1")
+        self.assertIsNone(plan["score_best"])
         self.assertTrue(all(
             score["resource_score"] == 0
             for score in plan["scores"].values()
@@ -9650,7 +9652,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    def test_scheduler_policy_cold_start_changes_downloader_choice(self):
+    def test_scheduler_size_guard_blocks_score_only_cross_boundary(self):
         temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
         try:
             plugin = self._new_plugin({
@@ -9661,8 +9663,8 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 "dynamic_scheduler_min_samples": 1,
             })
             plugin._brush_config.downloader_profiles = {
-                "QB-1": {"enabled": True, "maxdlcount": 10},
-                "TR-1": {"enabled": True, "maxdlcount": 10},
+                "QB-1": {"enabled": True, "size_max_gb": 40},
+                "TR-1": {"enabled": True, "size_min_gb": 40},
             }
             plugin._BrushFlowLowFreq__configured_downloader_names = (
                 lambda: ["QB-1", "TR-1"]
@@ -9752,9 +9754,19 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 candidate=candidate,
                 force_shadow=False,
             )
+            self.assertEqual(plan["preferred"], "QB-1")
+            self.assertEqual(plan["score_best"], "TR-1")
+            self.assertEqual(plan["chosen"], "QB-1")
+            self.assertEqual(plan["mode"], "size_guard")
+            self.assertGreater(plan["scores"]["TR-1"]["confidence"], 0)
+
+            plugin._brush_config.dynamic_scheduler_size_guard_enabled = False
+            plan = plugin._BrushFlowLowFreq__build_scheduler_plan(
+                candidate=candidate,
+                force_shadow=False,
+            )
             self.assertEqual(plan["chosen"], "TR-1")
             self.assertEqual(plan["mode"], "scheduler")
-            self.assertGreater(plan["scores"]["TR-1"]["confidence"], 0)
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -9806,6 +9818,112 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertEqual(plan["mode"], "explore")
         self.assertNotEqual(plan["chosen"], plan["best"])
 
+    def test_scheduler_calibration_shrinks_recent_overprediction(self):
+        """近期实际收益明显低于预测时，校准因子应同步下调。"""
+        temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
+        try:
+            plugin = self._new_plugin({
+                "downloader": "QB-1",
+                "multi_downloader_enabled": True,
+                "dynamic_scheduler_enabled": True,
+                "dynamic_scheduler_min_samples": 5,
+            })
+            recorder = self.module.DiagnosticRecorder(
+                db_path=str(Path(temp_dir) / "diagnostic.db"),
+                retention_days=30,
+            )
+            plugin._BrushFlowLowFreq__diagnostic_recorder = recorder
+            base = time.time() - 7200
+            for index in range(5):
+                task_hash = f"hash_cal_{index}"
+                recorder.record_task_added(task_hash, {
+                    "site_name": "站点",
+                    "title": f"calibration {index}",
+                    "size": 10 * 1024 ** 3,
+                    "time": base + index,
+                })
+                recorder.record_task_sample(
+                    task_hash,
+                    base + 1200 + index,
+                    "QB-1",
+                    {"uploaded": 10 * 1024 ** 2, "downloaded": 5 * 1024 ** 3},
+                    {},
+                )
+                recorder.record_task_sample(
+                    task_hash,
+                    base + 2400 + index,
+                    "QB-1",
+                    {"uploaded": 20 * 1024 ** 2, "downloaded": 10 * 1024 ** 3},
+                    {},
+                )
+                recorder.record_shadow_decision(
+                    candidate_key=f"candidate-{index}",
+                    actual_downloader="QB-1",
+                    recommended_downloader="QB-1",
+                    candidate_size=10 * 1024 ** 3,
+                    predicted_early_upload=50 * 1024 ** 2,
+                    predicted_total_upload=100 * 1024 ** 2,
+                    task_hash=task_hash,
+                    decided_at=base + index,
+                    executed=True,
+                    mode="scheduler",
+                )
+                recorder.record_task_outcome(task_hash)
+            recorder.commit()
+            factors = plugin._BrushFlowLowFreq__scheduler_calibration_factors(
+                "QB-1", 10 * 1024 ** 3
+            )
+            self.assertEqual(factors["samples"], 5)
+            self.assertAlmostEqual(factors["early_factor"], 0.2, places=2)
+            self.assertAlmostEqual(factors["total_factor"], 0.2, places=2)
+            recorder.close()
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+    def test_scheduler_does_not_explore_large_torrents(self):
+        """50GB及以上任务不参与随机探索，避免大文件跨边界低收益分配。"""
+        plugin = self._new_plugin({
+            "downloader": "QB-1",
+            "multi_downloader_enabled": True,
+            "dynamic_scheduler_enabled": True,
+            "dynamic_scheduler_exploration_percent": 100,
+        })
+        plugin._brush_config.downloader_profiles = {
+            "QB-1": {"enabled": True},
+            "TR-1": {"enabled": True},
+        }
+        plugin._BrushFlowLowFreq__configured_downloader_names = (
+            lambda: ["QB-1", "TR-1"]
+        )
+        plugin._scheduler_runtime_snapshots = {
+            "sampled_at": time.time(),
+            "downloaders": {
+                name: {
+                    "downloader": name,
+                    "error": None,
+                    "managed_total": 0,
+                    "managed_downloading": 0,
+                    "managed_up_speed": 0,
+                    "managed_dl_speed": 0,
+                    "effective_up_limit": 10 * 1024 ** 2,
+                    "effective_dl_limit": 10 * 1024 ** 2,
+                }
+                for name in ("QB-1", "TR-1")
+            },
+        }
+        with unittest.mock.patch.object(self.module.random, "random", return_value=0.0):
+            plan = plugin._BrushFlowLowFreq__build_scheduler_plan(
+                candidate={
+                    "size": 60 * 1024 ** 3,
+                    "seeders": 1,
+                    "leechers": 30,
+                    "title": "Large.Movie.2026.2160p-GROUP",
+                },
+                force_shadow=False,
+            )
+        self.assertFalse(plan["exploration"])
+        self.assertNotEqual(plan["mode"], "explore")
+
     def test_scheduler_falls_back_when_all_downloaders_have_errors(self):
         plugin = self._new_plugin({
             "downloader": "QB-1",
@@ -9854,6 +9972,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         form_text = str(form)
         self.assertIn("启用在线智能调度", form_text)
         self.assertFalse(defaults["dynamic_scheduler_enabled"])
+        self.assertTrue(defaults["dynamic_scheduler_size_guard_enabled"])
         self.assertEqual(defaults["dynamic_scheduler_exploration_percent"], 10)
         paths = [item["path"] for item in plugin.get_api()]
         self.assertIn("/diagnostic/scheduler-policy", paths)
