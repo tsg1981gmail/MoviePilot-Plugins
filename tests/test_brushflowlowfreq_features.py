@@ -8632,6 +8632,18 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
             self._new_plugin({"downloader": "QB-1"})._brush_config.bandwidth_utilization_limit,
             80,
         )
+        self.assertEqual(
+            self.module.BrushConfig({
+                "bandwidth_utilization_window_minutes": 0,
+            }).bandwidth_utilization_window_minutes,
+            1,
+        )
+        self.assertEqual(
+            self.module.BrushConfig({
+                "bandwidth_utilization_window_minutes": 90,
+            }).bandwidth_utilization_window_minutes,
+            60,
+        )
 
         plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
         plugin.downloader_helper = SimpleNamespace(
@@ -8639,12 +8651,14 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         )
         form, defaults = plugin.get_form()
         form_text = str(form)
-        self.assertIn("10分钟平均下载带宽利用率上限（%）", form_text)
+        self.assertIn("平均下载带宽利用率上限（%）", form_text)
+        self.assertIn("平均负载统计窗口（分钟）", form_text)
         self.assertIn(f"{prefix}_bandwidth_utilization_limit", defaults)
         self.assertEqual(
             defaults[f"{prefix}_bandwidth_utilization_limit"],
             80,
         )
+        self.assertEqual(defaults["bandwidth_utilization_window_minutes"], 5)
 
     def test_scheduler_routes_to_downloader_below_bandwidth_utilization(self):
         """达到阈值下载器不参与本轮智能选择，改投未达到阈值的下载器。"""
@@ -8792,13 +8806,14 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         self.assertIsNone(reason)
 
     def test_downloader_efficiency_windows_include_ten_minutes(self):
-        """带宽利用率使用固定的10分钟滚动窗口。"""
+        """带宽利用率同时记录固定诊断窗口和当前可配置窗口。"""
         temp_dir = tempfile.mkdtemp(prefix="brushflow_diag_")
         try:
             plugin = self._new_plugin({
                 "downloader": "QB-1",
                 "multi_downloader_enabled": True,
                 "dynamic_scheduler_enabled": True,
+                "bandwidth_utilization_window_minutes": 7,
             })
             recorder = self.module.DiagnosticRecorder(
                 db_path=str(Path(temp_dir) / "diagnostic.db"),
@@ -8814,6 +8829,7 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
                 )
             }
             self.assertIn(10, windows)
+            self.assertIn(7, windows)
             recorder.close()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)

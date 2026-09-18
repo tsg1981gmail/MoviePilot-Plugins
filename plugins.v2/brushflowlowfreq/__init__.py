@@ -466,7 +466,7 @@ class DiagnosticRecorder:
             )
             for key, value in {
                 "schema_version": "3.0",
-                "plugin_version": "4.4.2",
+                "plugin_version": "4.4.3",
             }.items():
                 self._conn.execute(
                     """
@@ -2045,6 +2045,15 @@ class BrushConfig:
         self.dynamic_scheduler_size_guard_enabled = bool(
             config.get("dynamic_scheduler_size_guard_enabled", True)
         )
+        bandwidth_utilization_window_minutes = self.__parse_number(
+            config.get("bandwidth_utilization_window_minutes", 5)
+        )
+        if bandwidth_utilization_window_minutes is None:
+            bandwidth_utilization_window_minutes = 5
+        self.bandwidth_utilization_window_minutes = max(
+            1,
+            min(60, int(bandwidth_utilization_window_minutes)),
+        )
         self.dynamic_scheduler_exploration_percent = self.__parse_number(
             config.get("dynamic_scheduler_exploration_percent", 10)
         )
@@ -2440,7 +2449,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.4.2"
+    plugin_version = "4.4.3"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -6106,6 +6115,7 @@ class BrushFlowLowFreq(_PluginBase):
         defaults["multi_downloader_enabled"] = False
         defaults["dynamic_scheduler_enabled"] = False
         defaults["dynamic_scheduler_size_guard_enabled"] = True
+        defaults["bandwidth_utilization_window_minutes"] = 5
         defaults["dynamic_scheduler_exploration_percent"] = 10
         defaults["dynamic_scheduler_min_samples"] = 3
         configs = list(getattr(self.downloader_helper, "get_configs", lambda: {})().values() or [])
@@ -6168,13 +6178,13 @@ class BrushFlowLowFreq(_PluginBase):
             }
 
         def number_field(model: str, label: str, placeholder: str = "",
-                         max_value: str = None) -> dict:
+                         min_value: str = "0", max_value: str = None) -> dict:
             props = {
                 "model": model,
                 "label": label,
                 "placeholder": placeholder,
                 "type": "number",
-                "min": "0"
+                "min": min_value
             }
             if max_value is not None:
                 props["max"] = max_value
@@ -6226,7 +6236,7 @@ class BrushFlowLowFreq(_PluginBase):
                     "content": [
                         number_field(
                             f"{prefix}_bandwidth_utilization_limit",
-                            "10分钟平均下载带宽利用率上限（%）",
+                            "平均下载带宽利用率上限（%）",
                             "建议80；100为不限制",
                             max_value="100",
                         ),
@@ -6260,6 +6270,13 @@ class BrushFlowLowFreq(_PluginBase):
                 switch(
                     "dynamic_scheduler_size_guard_enabled",
                     "启用原大小分流保护",
+                ),
+                number_field(
+                    "bandwidth_utilization_window_minutes",
+                    "平均负载统计窗口（分钟）",
+                    "建议5；范围1-60",
+                    min_value="1",
+                    max_value="60",
                 ),
                 number_field(
                     "dynamic_scheduler_exploration_percent",
@@ -7220,6 +7237,9 @@ class BrushFlowLowFreq(_PluginBase):
                     "bandwidth_utilization_limit",
                     brush_config.bandwidth_utilization_limit,
                 ),
+                "bandwidth_utilization_window_minutes": (
+                    brush_config.bandwidth_utilization_window_minutes
+                ),
                 "maxupspeed": self.__profile_setting(
                     profile, "maxupspeed", brush_config.maxupspeed
                 ),
@@ -7531,7 +7551,10 @@ class BrushFlowLowFreq(_PluginBase):
         maxdlspeed = self.__profile_setting(
             profile, "maxdlspeed", getattr(brush_config, "maxdlspeed", None)
         )
-        for window_minutes in (5, 10, 15, 60):
+        configured_window = int(
+            self._brush_config.bandwidth_utilization_window_minutes or 5
+        )
+        for window_minutes in sorted({5, 10, 15, 60, configured_window}):
             rows = recorder.fetch_rows(
                 """
                 SELECT AVG(managed_total) AS managed_total,
@@ -7899,40 +7922,30 @@ class BrushFlowLowFreq(_PluginBase):
         snapshot = (cache.get("downloaders") or {}).get(downloader_name) or {}
         recorder = self.__diagnostic_recorder_or_none()
         recent = {}
+        window_minutes = int(
+            self._brush_config.bandwidth_utilization_window_minutes or 5
+        )
         if recorder:
             rows = recorder.fetch_rows(
                 """
-                SELECT managed_up_speed,
-                       managed_dl_speed,
-                       managed_downloading,
-                       upload_per_downloading
-                FROM downloader_efficiency_samples
-                WHERE downloader=? AND window_minutes=10
-                  AND sampled_at>=?
-                ORDER BY sampled_at DESC
-                LIMIT 1
+                SELECT AVG(managed_up_speed) AS managed_up_speed,
+                       AVG(managed_dl_speed) AS managed_dl_speed,
+                       AVG(managed_downloading) AS managed_downloading,
+                       COUNT(*) AS sample_count
+                FROM downloader_resource_samples
+                WHERE downloader=? AND sampled_at>=?
                 """,
-                (downloader_name, time.time() - 3600),
+                (downloader_name, time.time() - window_minutes * 60),
             )
             recent = rows[0] if rows else {}
-            recent["managed_dl_speed_10m"] = recent.get("managed_dl_speed")
-            if recent.get("managed_dl_speed_10m") is None:
-                fallback_rows = recorder.fetch_rows(
-                    """
-                    SELECT AVG(managed_up_speed) AS managed_up_speed,
-                           AVG(managed_dl_speed) AS managed_dl_speed,
-                           AVG(managed_downloading) AS managed_downloading
-                    FROM downloader_resource_samples
-                    WHERE downloader=? AND sampled_at>=?
-                    """,
-                    (downloader_name, time.time() - 600),
-                )
-                fallback = fallback_rows[0] if fallback_rows else {}
-                recent.update({
-                    key: value for key, value in fallback.items()
-                    if value is not None
-                })
-                recent["managed_dl_speed_10m"] = fallback.get("managed_dl_speed")
+            managed_downloading = float(recent.get("managed_downloading") or 0)
+            managed_up_speed = float(recent.get("managed_up_speed") or 0)
+            recent["upload_per_downloading"] = (
+                managed_up_speed / max(managed_downloading, 1.0)
+                if managed_downloading else managed_up_speed
+            )
+            recent["managed_dl_speed_window"] = recent.get("managed_dl_speed")
+            recent["bandwidth_utilization_window_minutes"] = window_minutes
         return snapshot, recent
 
     def __scheduler_calibration_factors(self, downloader_name, size_bytes):
@@ -8051,10 +8064,15 @@ class BrushFlowLowFreq(_PluginBase):
                 float(snapshot.get("managed_dl_speed") or 0),
                 float(recent.get("managed_dl_speed") or 0),
             )
-            managed_dl_speed_10m = float(
-                recent.get("managed_dl_speed_10m")
-                if recent.get("managed_dl_speed_10m") is not None
+            managed_dl_speed_window = float(
+                recent.get("managed_dl_speed_window")
+                if recent.get("managed_dl_speed_window") is not None
                 else managed_dl_speed
+            )
+            bandwidth_utilization_window_minutes = int(
+                recent.get("bandwidth_utilization_window_minutes")
+                or self._brush_config.bandwidth_utilization_window_minutes
+                or 5
             )
             effective_up_limit = self.__normalized_limit(
                 snapshot.get("effective_up_limit")
@@ -8065,7 +8083,7 @@ class BrushFlowLowFreq(_PluginBase):
                 or (float(configured_dl) * 1024 if configured_dl else None)
             )
             bandwidth_utilization_percent = (
-                min(100.0, managed_dl_speed_10m / effective_dl_limit * 100.0)
+                min(100.0, managed_dl_speed_window / effective_dl_limit * 100.0)
                 if effective_dl_limit else 0.0
             )
             utilization_ok = (
@@ -8089,7 +8107,7 @@ class BrushFlowLowFreq(_PluginBase):
             download_headroom = (
                 max(
                     0.0,
-                    1.0 - managed_dl_speed_10m / max(1.0, effective_dl_limit),
+                    1.0 - managed_dl_speed_window / max(1.0, effective_dl_limit),
                 )
                 if effective_dl_limit else 1.0
             )
@@ -8152,7 +8170,7 @@ class BrushFlowLowFreq(_PluginBase):
             )
             if not expected_download_seconds:
                 throughput = max(
-                    managed_dl_speed_10m,
+                    managed_dl_speed_window,
                     float(snapshot.get("global_dl_speed") or 0),
                     512 * 1024,
                 )
@@ -8194,7 +8212,10 @@ class BrushFlowLowFreq(_PluginBase):
                 "managed_downloading": int(managed_downloading),
                 "managed_up_speed": round(managed_up_speed, 3),
                 "managed_dl_speed": round(managed_dl_speed, 3),
-                "managed_dl_speed_10m": round(managed_dl_speed_10m, 3),
+                "managed_dl_speed_window": round(managed_dl_speed_window, 3),
+                "bandwidth_utilization_window_minutes": (
+                    bandwidth_utilization_window_minutes
+                ),
                 "bandwidth_utilization_percent": round(
                     bandwidth_utilization_percent, 3
                 ),
@@ -8210,7 +8231,10 @@ class BrushFlowLowFreq(_PluginBase):
                     bandwidth_utilization_percent, 3
                 ),
                 "bandwidth_utilization_limit": bandwidth_utilization_limit,
-                "managed_dl_speed_10m": round(managed_dl_speed_10m, 3),
+                "managed_dl_speed_window": round(managed_dl_speed_window, 3),
+                "bandwidth_utilization_window_minutes": (
+                    bandwidth_utilization_window_minutes
+                ),
                 "effective_dl_limit": effective_dl_limit,
             }
             if hard_ok:
@@ -14229,6 +14253,9 @@ class BrushFlowLowFreq(_PluginBase):
             "dynamic_scheduler_enabled": brush_config.dynamic_scheduler_enabled,
             "dynamic_scheduler_size_guard_enabled": (
                 brush_config.dynamic_scheduler_size_guard_enabled
+            ),
+            "bandwidth_utilization_window_minutes": (
+                brush_config.bandwidth_utilization_window_minutes
             ),
             "dynamic_scheduler_exploration_percent": brush_config.dynamic_scheduler_exploration_percent,
             "dynamic_scheduler_min_samples": brush_config.dynamic_scheduler_min_samples,
