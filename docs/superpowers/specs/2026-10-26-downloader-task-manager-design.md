@@ -1,193 +1,269 @@
-# 下载器任务管理插件设计
+# 下载器定时任务管理插件设计
 
 ## 目标
 
-为 MoviePilot v2 提供一个轻量的下载器任务管理插件。插件自动读取
-MoviePilot 设置中所有已启用的 qBittorrent 和 Transmission，在插件数据页按
-下载器展示任务，并支持开始、暂停单个任务以及当前下载器的全部任务。
+插件按下载器配置一次性计划，在指定日期时间对单个下载器的符合条件的任务
+执行全部开始或全部暂停。
+
+插件不展示种子明细，也不要求用户逐个操作任务。
 
 ## 范围
 
 - 插件 ID：`DownloaderTaskManager`
 - 插件目录：`plugins.v2/downloadertaskmanager/`
-- 初始版本：`1.0.0`
+- 新版本：`1.1.0`
 - UI 模式：Vuetify JSON
 - 支持的下载器：qBittorrent、Transmission
-- 不提供删除任务、文件操作、限速、重新校验或跨下载器全局操作
+- 每个已启用下载器可分别设置一个开始时间、一个暂停时间
+- 时间只执行一次
+- 不提供跨下载器统一操作
+- 不提供删除、限速、重新校验或文件操作
 
-## 配置
+## 配置页
 
-配置页包含两个开关：
+插件自动读取 MoviePilot 设置中所有已启用的 qBittorrent 和 Transmission，
+每个下载器显示一组配置：
 
-- `启用插件`：控制插件是否提供任务查询和操作能力。
-- `允许全量操作`：默认关闭。开启后才显示并允许执行当前下载器的全部开始、
-  全部暂停操作。
+- `全部开始时间`：可选，格式为 HTML `datetime-local`。
+- `全部暂停时间`：可选，格式为 HTML `datetime-local`。
 
-插件不保存下载器地址或账号，也不维护下载器白名单。运行时通过
-`DownloaderHelper` 自动读取 MoviePilot 设置中所有已启用且受支持的下载器。
+关闭插件时，所有计划停止检查。
 
-## 数据页
-
-数据页按下载器分组，每个下载器区域包含：
-
-- 下载器名称、类型、连接状态和任务数量。
-- 当前下载器的“全部开始”和“全部暂停”按钮；仅在允许全量操作时显示。
-- 任务表格，列为名称、状态、进度、下载速度、上传速度、分类或标签、操作。
-- 每个任务根据归一化状态显示“开始”或“暂停”按钮。
-- 最近一次操作结果提示。
-
-单个下载器连接或查询失败时，其他下载器区域继续展示。失败信息显示在对应
-下载器区域内。
-
-## 任务数据归一化
-
-qBittorrent 与 Transmission 的原始对象转换为统一任务结构：
-
-- `hash`：任务唯一标识。qBittorrent 读取 `hash`，Transmission 读取
-  `hashString`，统一转为小写；后续开始和暂停操作也只使用该哈希。
-- `name`：任务名称。
-- `status`：归一化状态，只允许 `paused`、`downloading`、`uploading`、
-  `checking`、`queued`、`error`、`unknown`。
-- `state_text`：中文状态。
-- `paused`：是否处于暂停或停止状态。
-- `progress`：0 到 100 的进度。
-- `size`：任务总大小。
-- `download_speed`：字节/秒。
-- `upload_speed`：字节/秒。
-- `category`：分类、目录或标签摘要。
-- `added_at`：添加时间戳，无法获取时为空。
-
-暂停判断兼容 qBittorrent 的 `paused*`、`stopped*` 状态和 Transmission 的
-`stopped` 状态。字段读取必须同时兼容字典对象和 Transmission 属性对象。
-
-状态归一化规则：
-
-- qBittorrent：`paused*`、`stopped*` 映射为 `paused`；下载、元数据和下载队列
-  状态映射为 `downloading`；做种及其队列状态映射为 `uploading`；校验状态映射
-  为 `checking`；错误和文件缺失映射为 `error`。
-- Transmission：`stopped` 映射为 `paused`；`downloading`、
-  `download_pending` 映射为 `downloading`；`seeding`、`seed_pending` 映射为
-  `uploading`；`checking`、`check_pending` 映射为 `checking`；`error` 映射为
-  `error`。
-- 未识别的状态统一为 `unknown`，页面显示“未知”，不猜测暂停状态。
-
-Transmission 的 `progress` 原始值为 0 到 100；qBittorrent 的 `progress`
-原始值为 0 到 1。输出统一为 0 到 100。
-
-任务动作按钮映射：
-
-- `paused`、`error`：显示“开始”。
-- `downloading`、`uploading`、`checking`、`queued`：显示“暂停”。
-- `unknown`：不显示单任务动作按钮，避免猜测安全状态。
-
-## 插件 API
-
-注册一个 Bear 鉴权接口。MoviePilot v2 插件 API 的公开路径为：
+配置字段使用下载器类型和名称计算稳定键：
 
 ```text
-POST /api/v1/plugin/DownloaderTaskManager/action
+sha256(f"{downloader_type}\0{downloader_name}".encode("utf-8")).hexdigest()[:12]
 ```
 
-页面事件使用前端 API 客户端可解析的相对路径：
-`plugin/DownloaderTaskManager/action`。
+字段名：
 
-请求体：
+```text
+schedule_<key>_start_at
+schedule_<key>_pause_at
+```
 
-```json
-{
-  "downloader": "下载器名称",
-  "scope": "task",
-  "action": "start",
-  "hashes": ["任务哈希"]
+插件数据额外保存下载器名称快照：
+
+```text
+schedule_registry = {
+  "<key>": {
+    "name": "下载器名称",
+    "type": "qbittorrent 或 transmission"
+  }
 }
 ```
 
-- `scope` 只允许 `task` 或 `all`。
-- `action` 只允许 `start` 或 `stop`。
-- `scope=task` 必须提供非空 `hashes`。
-- `scope=all` 必须开启“允许全量操作”，后端会重新读取当前下载器全部任务哈希。
-- 下载器必须位于当前已启用、受支持的下载器列表中。
+配置页加载时用当前下载器刷新对应快照，但不删除已有快照。这样下载器暂时禁用、
+离线或从配置中删除后，状态页仍能识别遗留计划并重试。下载器改名后视为新下载器；
+原名称的遗留计划保持为“下载器不存在”，等待原名称重新出现或由后续清理功能处理。
 
-接口始终返回结构化结果：
+同一下载器类型下名称必须唯一。若发现重复的类型和名称组合，插件将该组计划标记为
+配置错误且不执行，避免误操作其他下载器。
 
-```json
-{
-  "success": true,
-  "message": "已开始 3 个任务",
-  "affected": 3
-}
-```
+同一下载器的开始时间和暂停时间不允许相同。发现相同时间时，两个计划都不执行，
+并在状态页显示配置错误，等待用户修改。
 
-操作结果保存到插件数据，数据页重新加载后显示最近结果。
+## 执行规则
 
-数据页按钮使用 MoviePilot `PageRender` 支持的 `events` 结构：
+### 全部开始
 
-```json
-{
-  "events": {
-    "click": {
-      "api": "plugin/DownloaderTaskManager/action",
-      "method": "POST",
-      "params": {
-        "downloader": "下载器名称",
-        "scope": "task",
-        "action": "start",
-        "hashes": ["任务哈希"]
-      }
+只选择同时满足以下条件的任务：
+
+- 归一化状态为 `paused`
+- 进度小于 100%
+
+### 全部暂停
+
+只选择同时满足以下条件的任务：
+
+- 归一化状态为 `downloading`、`checking` 或 `queued`
+- 进度小于 100%
+
+### 永远排除
+
+- 进度大于等于 100% 的任务
+- 做种中和做种队列中的任务
+- 错误状态任务
+- 未知状态任务
+
+### 状态归一化
+
+原始状态先去空白并转为小写，再按下表映射：
+
+| 归一化状态 | qBittorrent | Transmission |
+| --- | --- | --- |
+| `paused` | `pauseddl`、`pausedup`、`stoppeddl`、`stoppedup` | `stopped` |
+| `downloading` | `downloading`、`forceddl`、`metadl`、`forcedmetadl`、`stalleddl` | `downloading`、`download_pending` |
+| `checking` | `checkingdl`、`checkingup`、`checkingresumedata` | `checking`、`check_pending` |
+| `queued` | `queueddl` | `download_wait` |
+| `uploading` | `uploading`、`forcedup`、`stalledup`、`queuedup` | `seeding`、`seed_pending`、`seed_wait` |
+| `error` | `error`、`missingfiles` | `error` |
+| `unknown` | 其他值 | 其他值 |
+
+### 进度归一化
+
+任务完成度统一转为 0 到 100 的百分比后再参与筛选：
+
+- qBittorrent 的 `progress` 原始值为 0 到 1，乘以 100。
+- Transmission 的 `progress` 原始值为 0 到 100，直接使用。
+- 转换后限制在 0 到 100 范围内。
+- 完成判断统一使用归一化后的 `progress_percent >= 100`。
+
+没有符合条件的任务时，视为本次计划执行成功，记录“0 个任务”，并清空对应
+计划时间。
+
+## 调度机制
+
+插件注册一个 MoviePilot 公共服务，每 5 分钟运行一次。
+
+每次运行时：
+
+1. 读取全部当前计划。
+2. 解析下载器名称对应的时间和动作。
+3. 只处理时间小于等于当前时间的计划。
+4. 按 `(计划时间, 稳定键, 动作)` 从早到晚确定性排序。
+5. 查询当前下载器全部任务并归一化。
+6. 过滤出允许执行的任务哈希。
+7. 调用 `start_torrents(ids=hashes)` 或 `stop_torrents(ids=hashes)`。
+8. 成功后清空对应配置时间。
+9. 失败时保留计划，5 分钟后重试。
+
+服务使用线程锁避免两个检查周期重叠。
+
+单个计划失败只记录该计划的结果，不中止本轮后续计划。所有到期计划都会依次尝试；
+失败的单项在下一周期继续重试。
+
+MoviePilot 重启后会重新注册服务，尚未成功执行的过期计划继续检查。
+
+## 时间与时区
+
+- UI 输入格式为 `YYYY-MM-DDTHH:mm`。
+- 同时兼容解析 `YYYY-MM-DD HH:mm`。
+- 使用 MoviePilot `settings.TZ` 时区解释计划时间。
+- 非法时间不执行，并在配置页或状态页显示错误。
+
+## 失败与重试
+
+以下情况保留计划时间并等待下次重试：
+
+- 下载器不存在或未启用
+- 下载器离线
+- 查询任务失败
+- 动作方法返回 `False`
+- 动作方法抛出异常
+
+每次检查更新最近结果，包含：
+
+- 下载器名称
+- 动作
+- 计划时间
+- 实际执行时间
+- 成功或失败
+- 操作任务数
+- 中文结果信息
+
+成功后清空对应计划，并保留最近一次执行结果，避免插件重载后重复执行。
+
+最近结果保存在插件数据：
+
+```text
+schedule_results = {
+  "<key>": {
+    "start": {
+      "scheduled_at": "计划时间",
+      "executed_at": "实际执行时间",
+      "success": true,
+      "affected": 3,
+      "message": "已开始 3 个任务"
+    },
+    "stop": {
+      "scheduled_at": "计划时间",
+      "executed_at": "实际执行时间",
+      "success": false,
+      "affected": 0,
+      "message": "下载器未连接"
     }
   }
 }
 ```
 
-请求字段由 `ids` 改为 `hashes`，避免把下载器内部数字 ID 误当成稳定标识。
+开始和暂停结果分开保存，一个动作不会覆盖另一个动作。`schedule_results` 以稳定键
+保存，不写入种子名称或下载内容。
 
-## 操作流程
+结果只在 `scheduled_at` 与当前配置时间对应时用于页面状态。用户修改计划时间后，
+旧结果保留用于诊断，但不参与新计划的状态判断。
 
-1. 配置页保存启用状态和全量操作开关。
-2. 数据页调用 `DownloaderHelper().get_services()` 获取已启用下载器。
-3. 过滤出 qBittorrent 和 Transmission；未连接、不支持的下载器作为错误区域展示。
-4. 对每个可用下载器调用 `get_torrents()`，归一化并按状态和名称排序。
-5. 单任务操作通过 `start_torrents(ids=[hash])` 或
-   `stop_torrents(ids=[hash])` 执行。
-6. 全量操作读取当前下载器所有任务哈希，再调用同一动作方法。
-7. 动作成功后保存结构化结果；页面刷新展示结果和最新任务状态。
+动作方法只返回布尔值时，`affected` 仅在返回 `True` 时记录本次选择的哈希数量；
+返回 `False` 或抛出异常时记录为 0。无法确认部分成功数量时不做推测。
 
-## 错误处理
+## 状态页
 
-- 未启用插件时拒绝动作请求。
-- 下载器不存在、未启用、未连接或类型不受支持时拒绝动作。
-- 全量操作开关关闭时拒绝 `scope=all`，即使请求绕过页面直接调用 API。
-- 非法动作、非法范围、空任务列表返回失败结果。
-- 下载器方法返回 `False` 或抛出异常时返回失败结果，不中断其他下载器页面加载。
-- 接口对预期业务错误返回 HTTP 200 和 `success=false`，以便页面刷新并展示错误；
-  鉴权失败继续由 MoviePilot 宿主处理。
+状态页不展示种子，只展示：
+
+- 下载器名称和类型
+- 开始计划时间
+- 暂停计划时间
+- 开始计划状态和暂停计划状态
+- 最近动作、结果和操作任务数
+
+开始和暂停分别计算状态：
+
+- 未设置时间且没有结果：无计划
+- 时间在未来：已计划
+- 时间已到但尚未尝试：待执行
+- 时间已到且最近一次尝试失败：等待重试
+- 时间已清空且最近一次尝试成功：已执行
+
+状态优先级从高到低：
+
+1. 插件未启用
+2. 重复下载器或同时间开始/暂停等配置错误
+3. 非法时间或缺失下载器快照
+4. 开始/暂停各自的计划状态
+
+插件未启用时显示启用提示。
+
+## 插件接口
+
+- `get_command()` 返回空列表。
+- `get_api()` 返回空列表。
+- `get_service()` 返回一个 5 分钟间隔的调度服务。
+- 不保留 v1.0.0 的手动任务动作 API。
+
+## 数据兼容
+
+从 v1.0.0 升级时：
+
+- 忽略并删除旧配置 `allow_bulk_actions`。
+- 旧数据 `last_action_result` 不再用于新版页面。
+- 保留插件配置前缀和插件 ID。
 
 ## 测试
 
-使用 pytest 和 MoviePilot 依赖桩覆盖：
-
-- qBittorrent 字典任务归一化。
-- Transmission 属性任务归一化。
-- 单任务开始和暂停分发。
-- 当前下载器全部开始和全部暂停。
-- 全量操作开关关闭时拒绝操作。
-- 不支持、未连接、空任务等错误路径。
-- 页面结构包含按下载器分组、单任务按钮和全量按钮条件。
-- 页面按钮的 `events.click` 使用相对 API 路径、POST 方法和正确动作参数。
-- qBittorrent 与 Transmission 的任务哈希均作为动作请求字段。
-- 插件版本与 `package.v2.json` 一致。
-
-发布前运行：
-
-```bash
-python3 -m py_compile plugins.v2/downloadertaskmanager/__init__.py
-python3 -m pytest tests/test_downloadertaskmanager.py
-git diff --check
-```
+- 解析两种合法日期时间格式，拒绝非法时间。
+- qBittorrent 进度 0.999 与 1.0 分别归一化为 99.9% 和 100%。
+- Transmission 的 99.9 和 100 保持为 99.9% 和 100%。
+- 每个下载器生成稳定配置字段名。
+- 开始只选择已暂停且未完成任务。
+- 暂停只选择下载中、排队、校验且未完成任务。
+- 100%、做种、错误和未知任务永不选择。
+- 无匹配任务时成功并清空计划。
+- 未到时间不执行。
+- 执行成功后清空对应字段并持久化配置。
+- 失败时保留字段、保存结果并在下个周期重试。
+- 开始和暂停结果分别保存，一个动作成功不会覆盖另一个动作的失败记录。
+- 修改计划时间后，旧 `scheduled_at` 的结果不影响新计划状态。
+- 按时间顺序执行多个下载器计划。
+- 同一时间的多个下载器按稳定键确定性排序。
+- 同一下载器的开始和暂停时间相同时拒绝执行并显示配置错误。
+- 重复的类型和名称组合拒绝执行并显示配置错误。
+- MoviePilot 重启后的过期计划仍会检查。
+- 跳过已删除下载器对应的遗留计划，并在下载器恢复后继续执行。
+- 页面只显示计划和结果，不渲染种子列表。
+- 插件版本与 `package.v2.json` 均为 `1.1.0`。
 
 ## 发布
 
-- 在 `package.v2.json` 中新增 `DownloaderTaskManager` 条目。
-- 保留现有 `BrushFlowLowFreq` 条目和版本。
-- 推送 `package.v2.json`、插件目录、测试和设计文档到
-  `tsg1981gmail/MoviePilot-Plugins` 的 `main` 分支。
+- 更新 `package.v2.json` 的 `DownloaderTaskManager` 版本和历史。
+- 更新插件源码、测试、README、规格和实施计划。
+- 推送到 `tsg1981gmail/MoviePilot-Plugins/main`。
