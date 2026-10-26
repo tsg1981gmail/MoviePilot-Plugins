@@ -1,213 +1,419 @@
-from typing import Any, Dict, List, Tuple
+import copy
+import re
+import threading
+from collections import Counter
+from collections.abc import Mapping
+from datetime import datetime
+from typing import Any, Callable, List, Optional
+from zoneinfo import ZoneInfo
 
 from .runtime import (
     SUPPORTED_DOWNLOADERS,
-    get_value,
+    downloader_key,
     normalize_torrent,
+    parse_schedule_time,
+    schedule_field,
+    task_eligible,
 )
 
 
-STATUS_ORDER = {
-    "paused": 0,
-    "downloading": 1,
-    "uploading": 2,
-    "checking": 3,
-    "queued": 4,
-    "error": 5,
-    "unknown": 6,
-}
+PLAN_FIELD_PATTERN = re.compile(
+    r"^schedule_(?P<key>[0-9a-f]{12})_(?P<field>start_at|pause_at)$"
+)
 
 
-def _failure(message: str, affected: int = 0) -> Dict[str, Any]:
-    """构建统一失败结果。"""
+def _result(
+        plan: dict,
+        *,
+        success: bool,
+        affected: int,
+        message: str,
+        executed_at: datetime,
+) -> dict:
+    """构建计划执行结果。"""
     return {
-        "success": False,
-        "message": message,
+        "key": plan["key"],
+        "downloader": plan.get("name") or "",
+        "type": plan.get("type") or "",
+        "action": plan["action"],
+        "scheduled_at": plan["scheduled_text"],
+        "executed_at": executed_at.isoformat(timespec="seconds"),
+        "success": success,
         "affected": affected,
+        "message": message,
     }
 
 
-def _success(message: str, affected: int) -> Dict[str, Any]:
-    """构建统一成功结果。"""
-    return {
-        "success": True,
-        "message": message,
-        "affected": affected,
-    }
+class DownloaderScheduleService:
+    """管理下载器一次性计划并执行到期动作。"""
 
-
-def _downloader_type(service: Any) -> str:
-    """读取服务类型并回退到服务配置类型。"""
-    service_type = get_value(service, "type")
-    if not service_type:
-        config = get_value(service, "config")
-        service_type = get_value(config, "type")
-    return str(service_type or "").strip().lower()
-
-
-def _error_text(error: Any) -> str:
-    """将查询错误转换为可读信息。"""
-    if isinstance(error, str) and error.strip():
-        return error.strip()
-    return ""
-
-
-def _normalize_hashes(values: Any) -> List[str]:
-    """将动作哈希去重、去空白并转为小写。"""
-    if not isinstance(values, (list, tuple, set)):
-        return []
-    hashes = []
-    seen = set()
-    for value in values:
-        torrent_hash = str(value or "").strip().lower()
-        if torrent_hash and torrent_hash not in seen:
-            hashes.append(torrent_hash)
-            seen.add(torrent_hash)
-    return hashes
-
-
-def _query_tasks(instance: Any, downloader_type: str) -> Tuple[List[dict], str]:
-    """查询并归一化下载器任务。"""
-    try:
-        result = instance.get_torrents()
-    except Exception as error:
-        return [], f"获取任务失败：{error}"
-
-    if not isinstance(result, tuple) or len(result) != 2:
-        return [], "获取任务失败：下载器返回格式无效"
-
-    torrents, error = result
-    if error:
-        detail = _error_text(error)
-        return [], f"获取任务失败：{detail}" if detail else "获取任务失败"
-
-    tasks = []
-    for torrent in torrents or []:
-        normalized = normalize_torrent(torrent, downloader_type)
-        if normalized:
-            tasks.append(normalized)
-    tasks.sort(key=lambda task: (
-        STATUS_ORDER.get(task.get("status"), 99),
-        str(task.get("name") or "").lower(),
-    ))
-    return tasks, ""
-
-
-class DownloaderTaskService:
-    """封装下载器任务查询和开始暂停操作。"""
-
-    def __init__(self, helper: Any, allow_bulk_actions: bool = False):
-        """保存下载器帮助类与全量操作开关。"""
+    def __init__(
+            self,
+            helper: Any,
+            config: dict,
+            registry: dict,
+            results: dict,
+            now_fn: Callable[[], datetime],
+            timezone: ZoneInfo,
+            persist_config: Callable[[dict], None],
+            save_registry: Callable[[dict], None],
+            save_results: Callable[[dict], None],
+    ):
+        """保存运行依赖和持久化回调。"""
         self.helper = helper
-        self.allow_bulk_actions = bool(allow_bulk_actions)
+        self.config = config
+        self.registry = registry if isinstance(registry, dict) else {}
+        self.results = results if isinstance(results, dict) else {}
+        self.now_fn = now_fn
+        self.timezone = timezone
+        self.persist_config = persist_config
+        self.save_registry = save_registry
+        self.save_results = save_results
+        self.lock = threading.RLock()
+        self._duplicate_keys = set()
 
-    def list_views(self) -> List[dict]:
-        """返回所有已启用下载器的任务视图。"""
-        services = self.helper.get_services() or {}
+    def _now(self) -> datetime:
+        """返回带时区的当前时间。"""
+        now = self.now_fn()
+        if now.tzinfo is None:
+            return now.replace(tzinfo=self.timezone)
+        return now.astimezone(self.timezone)
 
-        views = []
-        for service_key, service in services.items():
-            name = str(get_value(service, "name", default=service_key) or service_key)
-            downloader_type = _downloader_type(service)
-            view = {
+    def refresh_registry(self, services: Optional[Mapping] = None) -> dict:
+        """刷新当前下载器名称快照。"""
+        services = services if services is not None else self.helper.get_services()
+        services = services or {}
+        pairs = Counter()
+        current_keys = set()
+
+        if isinstance(services, Mapping):
+            iterable = services.items()
+        else:
+            iterable = ((None, service) for service in services)
+
+        for service_key, service in iterable:
+            name = str(getattr(service, "name", "") or service_key or "").strip()
+            downloader_type = str(getattr(service, "type", "") or "").strip().lower()
+            if not name or downloader_type not in SUPPORTED_DOWNLOADERS:
+                continue
+            pair = (downloader_type, name)
+            pairs[pair] += 1
+            key = downloader_key(downloader_type, name)
+            current_keys.add(key)
+            self.registry[key] = {
                 "name": name,
-                "type": downloader_type or "unknown",
-                "available": False,
-                "error": "",
-                "tasks": [],
+                "type": downloader_type,
             }
-            if downloader_type not in SUPPORTED_DOWNLOADERS:
-                view["error"] = f"不支持的下载器类型：{downloader_type or 'unknown'}"
-                views.append(view)
+
+        self._duplicate_keys = {
+            downloader_key(downloader_type, name)
+            for (downloader_type, name), count in pairs.items()
+            if count > 1
+        }
+        self.save_registry(self.registry)
+        return self.registry
+
+    def list_plans(self) -> List[dict]:
+        """列出合法、冲突和遗留计划。"""
+        plans = []
+        for field, raw_value in self.config.items():
+            if not isinstance(field, str):
                 continue
-
-            instance = get_value(service, "instance")
-            if not instance:
-                view["error"] = "下载器实例不可用"
-                views.append(view)
+            match = PLAN_FIELD_PATTERN.match(field)
+            if not match:
                 continue
-            try:
-                inactive = bool(instance.is_inactive())
-            except Exception as error:
-                view["error"] = f"检查下载器状态失败：{error}"
-                views.append(view)
+            if not str(raw_value or "").strip():
                 continue
-            if inactive:
-                view["error"] = "下载器未连接"
-                views.append(view)
-                continue
+            key = match.group("key")
+            action = "start" if match.group("field") == "start_at" else "stop"
+            snapshot = self.registry.get(key) or {}
+            name = str(snapshot.get("name") or "")
+            downloader_type = str(snapshot.get("type") or "").lower()
+            scheduled_at = parse_schedule_time(raw_value, self.timezone)
+            error = ""
+            if not snapshot:
+                error = "缺少下载器快照"
+            elif downloader_type not in SUPPORTED_DOWNLOADERS:
+                error = "下载器类型不受支持"
+            elif key in self._duplicate_keys:
+                error = "存在重复的下载器类型和名称"
+            elif scheduled_at is None:
+                error = "计划时间格式无效"
 
-            tasks, query_error = _query_tasks(instance, downloader_type)
-            if query_error:
-                view["error"] = query_error
-                views.append(view)
-                continue
+            plans.append({
+                "key": key,
+                "name": name,
+                "type": downloader_type,
+                "action": action,
+                "field": field,
+                "raw_value": str(raw_value or ""),
+                "scheduled_at": scheduled_at,
+                "scheduled_text": (
+                    scheduled_at.strftime("%Y-%m-%dT%H:%M")
+                    if scheduled_at else str(raw_value or "")
+                ),
+                "error": error,
+            })
 
-            view["available"] = True
-            view["tasks"] = tasks
-            views.append(view)
-        return views
+        by_key = {}
+        for plan in plans:
+            by_key.setdefault(plan["key"], []).append(plan)
+        for key_plans in by_key.values():
+            start = next(
+                (plan for plan in key_plans if plan["action"] == "start"),
+                None,
+            )
+            stop = next(
+                (plan for plan in key_plans if plan["action"] == "stop"),
+                None,
+            )
+            if (
+                    start
+                    and stop
+                    and start["scheduled_at"]
+                    and start["scheduled_at"] == stop["scheduled_at"]
+            ):
+                start["error"] = "开始和暂停时间不能相同"
+                stop["error"] = "开始和暂停时间不能相同"
 
-    def execute(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """校验动作请求并执行单任务或当前下载器全量动作。"""
-        if not isinstance(payload, dict):
-            return _failure("请求格式无效")
+        plans.sort(key=lambda plan: (
+            plan["scheduled_at"] or datetime.max.replace(tzinfo=self.timezone),
+            plan["key"],
+            plan["action"],
+        ))
+        return plans
 
-        downloader = str(payload.get("downloader") or "").strip()
-        scope = str(payload.get("scope") or "").strip().lower()
-        action = str(payload.get("action") or "").strip().lower()
+    def due_plans(self, now: Optional[datetime] = None) -> List[dict]:
+        """返回到期且合法的计划。"""
+        now = now or self._now()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=self.timezone)
+        else:
+            now = now.astimezone(self.timezone)
+        return [
+            plan for plan in self.list_plans()
+            if not plan["error"]
+            and plan["scheduled_at"]
+            and plan["scheduled_at"] <= now
+            and not self._already_completed(plan)
+        ]
 
-        if not downloader:
-            return _failure("缺少下载器名称")
-        if scope not in {"task", "all"}:
-            return _failure("不支持的操作范围")
-        if action not in {"start", "stop"}:
-            return _failure("不支持的任务动作")
-        if scope == "all" and not self.allow_bulk_actions:
-            return _failure("全量操作未开启")
+    def execute_plan(self, plan: dict) -> dict:
+        """执行单个计划并返回结构化结果。"""
+        executed_at = self._now()
+        if plan.get("error"):
+            result = _result(
+                plan,
+                success=False,
+                affected=0,
+                message=plan["error"],
+                executed_at=executed_at,
+            )
+            self._store_result(result)
+            return result
 
         try:
-            service = self.helper.get_service(downloader)
+            service = self.helper.get_service(plan["name"])
         except Exception as error:
-            return _failure(f"获取下载器失败：{error}")
+            service = None
+            service_error = str(error)
+        else:
+            service_error = ""
         if not service:
-            return _failure(f"下载器不存在或未启用：{downloader}")
+            result = _result(
+                plan,
+                success=False,
+                affected=0,
+                message=f"下载器不存在或未启用：{service_error or plan['name']}",
+                executed_at=executed_at,
+            )
+            self._store_result(result)
+            return result
 
-        downloader_type = _downloader_type(service)
-        if downloader_type not in SUPPORTED_DOWNLOADERS:
-            return _failure(f"不支持的下载器类型：{downloader_type or 'unknown'}")
+        current_type = str(getattr(service, "type", "") or "").lower()
+        if current_type != plan["type"]:
+            result = _result(
+                plan,
+                success=False,
+                affected=0,
+                message="下载器类型与计划快照不一致",
+                executed_at=executed_at,
+            )
+            self._store_result(result)
+            return result
 
-        instance = get_value(service, "instance")
-        if not instance:
-            return _failure("下载器实例不可用")
+        instance = getattr(service, "instance", None)
+        if instance is None:
+            result = _result(
+                plan,
+                success=False,
+                affected=0,
+                message="下载器实例不可用",
+                executed_at=executed_at,
+            )
+            self._store_result(result)
+            return result
+
         try:
             if instance.is_inactive():
-                return _failure("下载器未连接")
+                result = _result(
+                    plan,
+                    success=False,
+                    affected=0,
+                    message="下载器未连接",
+                    executed_at=executed_at,
+                )
+                self._store_result(result)
+                return result
+            query_result = instance.get_torrents()
         except Exception as error:
-            return _failure(f"检查下载器状态失败：{error}")
+            result = _result(
+                plan,
+                success=False,
+                affected=0,
+                message=f"查询任务失败：{error}",
+                executed_at=executed_at,
+            )
+            self._store_result(result)
+            return result
 
-        if scope == "task":
-            hashes = _normalize_hashes(payload.get("hashes"))
-            if not hashes:
-                return _failure("请选择要操作的任务")
-        else:
-            tasks, query_error = _query_tasks(instance, downloader_type)
-            if query_error:
-                return _failure(query_error)
-            hashes = [task["hash"] for task in tasks]
-            if not hashes:
-                return _failure("当前下载器没有可操作的任务")
+        if not isinstance(query_result, tuple) or len(query_result) != 2:
+            result = _result(
+                plan,
+                success=False,
+                affected=0,
+                message="查询任务失败：下载器返回格式无效",
+                executed_at=executed_at,
+            )
+            self._store_result(result)
+            return result
 
-        method_name = "start_torrents" if action == "start" else "stop_torrents"
+        torrents, query_error = query_result
+        if query_error:
+            result = _result(
+                plan,
+                success=False,
+                affected=0,
+                message="查询任务失败",
+                executed_at=executed_at,
+            )
+            self._store_result(result)
+            return result
+
+        hashes = []
+        seen = set()
+        for torrent in torrents or []:
+            normalized = normalize_torrent(torrent, plan["type"])
+            if (
+                    normalized
+                    and task_eligible(normalized, plan["action"])
+                    and normalized["hash"] not in seen
+            ):
+                hashes.append(normalized["hash"])
+                seen.add(normalized["hash"])
+
+        if not hashes:
+            result = _result(
+                plan,
+                success=True,
+                affected=0,
+                message="已执行，0 个任务",
+                executed_at=executed_at,
+            )
+            self._complete_plan(plan, result)
+            return result
+
+        method_name = (
+            "start_torrents" if plan["action"] == "start"
+            else "stop_torrents"
+        )
         method = getattr(instance, method_name, None)
         if not callable(method):
-            return _failure(f"下载器不支持 {method_name}")
+            result = _result(
+                plan,
+                success=False,
+                affected=0,
+                message=f"下载器不支持 {method_name}",
+                executed_at=executed_at,
+            )
+            self._store_result(result)
+            return result
+
         try:
             succeeded = bool(method(ids=hashes))
         except Exception as error:
-            return _failure(f"执行任务动作失败：{error}")
-        if not succeeded:
-            return _failure("下载器执行任务动作失败")
+            result = _result(
+                plan,
+                success=False,
+                affected=0,
+                message=f"执行任务动作失败：{error}",
+                executed_at=executed_at,
+            )
+            self._store_result(result)
+            return result
 
-        action_text = "开始" if action == "start" else "暂停"
-        return _success(f"已{action_text} {len(hashes)} 个任务", len(hashes))
+        if not succeeded:
+            result = _result(
+                plan,
+                success=False,
+                affected=0,
+                message="下载器执行任务动作失败",
+                executed_at=executed_at,
+            )
+            self._store_result(result)
+            return result
+
+        action_text = "开始" if plan["action"] == "start" else "暂停"
+        result = _result(
+            plan,
+            success=True,
+            affected=len(hashes),
+            message=f"已{action_text} {len(hashes)} 个任务",
+            executed_at=executed_at,
+        )
+        self._complete_plan(plan, result)
+        return result
+
+    def run_due(self, now: Optional[datetime] = None) -> List[dict]:
+        """依次执行所有到期计划。"""
+        with self.lock:
+            results = []
+            for plan in self.due_plans(now=now):
+                results.append(self.execute_plan(plan))
+            return results
+
+    def _store_result(self, result: dict) -> None:
+        """按下载器和动作保存结果。"""
+        key_results = self.results.setdefault(result["key"], {})
+        key_results[result["action"]] = copy.deepcopy(result)
+        try:
+            self.save_results(self.results)
+        except Exception:
+            pass
+
+    def _complete_plan(self, plan: dict, result: dict) -> None:
+        """持久化成功结果并清空计划字段。"""
+        field = plan["field"]
+        old_value = self.config.get(field)
+        self._store_result(result)
+        self.config.pop(field, None)
+        try:
+            self.persist_config(self.config)
+        except Exception as error:
+            if old_value is not None:
+                self.config[field] = old_value
+            result["message"] = (
+                f"{result['message']}；计划字段清理失败：{error}"
+            )
+            self._store_result(result)
+
+    def _already_completed(self, plan: dict) -> bool:
+        """判断当前计划时间是否已有成功执行结果。"""
+        result = (
+            (self.results.get(plan["key"]) or {})
+            .get(plan["action"]) or {}
+        )
+        return bool(
+            result.get("success")
+            and result.get("scheduled_at") == plan["scheduled_text"]
+        )
