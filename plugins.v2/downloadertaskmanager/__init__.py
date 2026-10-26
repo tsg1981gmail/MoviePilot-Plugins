@@ -1,18 +1,22 @@
-from typing import Any, Dict, List, Optional, Tuple
+import copy
+from datetime import datetime
+from typing import Any, Dict, List, Tuple
+from zoneinfo import ZoneInfo
 
 from app.helper.downloader import DownloaderHelper
 from app.plugins import _PluginBase
 
-from .service import DownloaderTaskService
+from .runtime import SUPPORTED_DOWNLOADERS, downloader_key, schedule_field
+from .service import DownloaderScheduleService
 
 
 class DownloaderTaskManager(_PluginBase):
-    """MoviePilot 下载器任务管理插件。"""
+    """按下载器执行一次性定时开始或暂停。"""
 
-    plugin_name = "下载器任务管理"
-    plugin_desc = "管理已启用下载器的单个任务和当前下载器全部任务的开始与暂停。"
+    plugin_name = "下载器定时任务"
+    plugin_desc = "按下载器在指定时间全部开始或暂停未完成的下载任务。"
     plugin_icon = "Qbittorrent_A.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "tsg1981gmail"
     author_url = "https://github.com/tsg1981gmail"
     plugin_config_prefix = "downloadertaskmanager_"
@@ -21,22 +25,48 @@ class DownloaderTaskManager(_PluginBase):
     auth_level = 1
 
     def __init__(self):
-        """初始化插件运行状态。"""
+        """初始化插件状态。"""
         super().__init__()
         self._enabled = False
-        self._allow_bulk_actions = False
-        self._service: Optional[DownloaderTaskService] = None
+        self._config = {}
+        self._timezone = ZoneInfo("Asia/Shanghai")
+        self._schedule_service = None
 
     def init_plugin(self, config: dict = None) -> None:
-        """读取配置并初始化下载器任务服务。"""
-        config = config or {}
+        """初始化计划服务并迁移旧配置。"""
+        config = copy.deepcopy(config or {})
+        migrated = "allow_bulk_actions" in config
+        config.pop("allow_bulk_actions", None)
+        self._config = config
         self._enabled = bool(config.get("enabled"))
-        self._allow_bulk_actions = bool(config.get("allow_bulk_actions"))
+        self._timezone = self._resolve_timezone()
+
+        registry = self.get_data("schedule_registry") or {}
+        results = self.get_data("schedule_results") or {}
         helper = DownloaderHelper()
-        self._service = DownloaderTaskService(
+        self._schedule_service = DownloaderScheduleService(
             helper=helper,
-            allow_bulk_actions=self._allow_bulk_actions,
+            config=self._config,
+            registry=registry,
+            results=results,
+            now_fn=lambda: datetime.now(self._timezone),
+            timezone=self._timezone,
+            persist_config=self._persist_config,
+            save_registry=lambda value: self.save_data(
+                "schedule_registry",
+                value,
+            ),
+            save_results=lambda value: self.save_data(
+                "schedule_results",
+                value,
+            ),
         )
+        try:
+            self._schedule_service.refresh_registry()
+        except Exception:
+            pass
+        if migrated:
+            self._persist_config(self._config)
 
     def get_state(self) -> bool:
         """返回插件启用状态。"""
@@ -44,353 +74,306 @@ class DownloaderTaskManager(_PluginBase):
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
-        """不注册远程命令。"""
+        """不注册手动远程命令。"""
         return []
 
     def get_api(self) -> List[Dict[str, Any]]:
-        """注册 Bear 鉴权的任务动作接口。"""
-        return [
-            {
-                "path": "/action",
-                "endpoint": self.action,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "开始或暂停下载器任务",
-                "description": "支持单个任务和当前下载器的全部任务。",
-            }
-        ]
+        """不注册手动任务 API。"""
+        return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
-        """返回启用与全量操作配置表单。"""
-        form = [
-            {
-                "component": "VForm",
-                "content": [
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "enabled",
-                                            "label": "启用插件",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "allow_bulk_actions",
-                                            "label": "允许全量操作",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    }
-                ],
-            }
-        ]
-        defaults = {
-            "enabled": False,
-            "allow_bulk_actions": False,
-        }
-        return form, defaults
-
-    def get_page(self) -> List[dict]:
-        """返回按下载器分组的任务管理页面。"""
-        content = []
-        last_result = self.get_data("last_action_result")
-        if isinstance(last_result, dict) and last_result.get("message"):
-            content.append({
-                "component": "VAlert",
-                "props": {
-                    "type": "success" if last_result.get("success") else "error",
-                    "variant": "tonal",
-                    "text": str(last_result.get("message")),
-                },
-            })
-
-        if not self._enabled:
-            content.append({
-                "component": "VAlert",
-                "props": {
-                    "type": "info",
-                    "variant": "tonal",
-                    "text": "插件未启用，请先在配置中启用。",
-                },
-            })
-            return content
-
-        views = []
-        if self._service:
-            try:
-                views = self._service.list_views()
-            except Exception as error:
-                content.append({
-                    "component": "VAlert",
-                    "props": {
-                        "type": "error",
-                        "variant": "tonal",
-                        "text": f"获取下载器列表失败：{error}",
-                    },
-                })
-                return content
-        if not views:
-            content.append({
-                "component": "VAlert",
-                "props": {
-                    "type": "info",
-                    "variant": "tonal",
-                    "text": "没有已启用的 qBittorrent 或 Transmission 下载器。",
-                },
-            })
-            return content
-
-        content.extend(self._build_downloader_card(view) for view in views)
-        return content
-
-    def action(self, payload: dict) -> Dict[str, Any]:
-        """执行任务开始或暂停并保存最近动作结果。"""
-        if not self._enabled:
-            result = {
-                "success": False,
-                "message": "插件未启用",
-                "affected": 0,
-            }
-        elif not self._service:
-            result = {
-                "success": False,
-                "message": "下载器服务未初始化",
-                "affected": 0,
-            }
-        else:
-            try:
-                result = self._service.execute(payload)
-            except Exception as error:
-                result = {
-                    "success": False,
-                    "message": f"执行任务动作失败：{error}",
-                    "affected": 0,
-                }
-
-        self.save_data("last_action_result", result)
-        return result
-
-    def stop_service(self) -> None:
-        """插件没有后台服务，无需清理资源。"""
-        self._service = None
-
-    def _build_button(
-            self,
-            text: str,
-            action: str,
-            downloader: str,
-            hashes: Optional[List[str]] = None,
-            scope: str = "task",
-    ) -> dict:
-        """构建带插件 API 点击事件的 Vuetify 按钮。"""
-        params = {
-            "downloader": downloader,
-            "scope": scope,
-            "action": action,
-        }
-        if hashes:
-            params["hashes"] = hashes
-        return {
-            "component": "VBtn",
-            "props": {
-                "size": "small",
-                "variant": "tonal",
-                "color": "primary" if action == "start" else "warning",
-                "prepend-icon": "mdi-play" if action == "start" else "mdi-pause",
-            },
-            "events": {
-                "click": {
-                    "api": f"plugin/{self.__class__.__name__}/action",
-                    "method": "POST",
-                    "params": params,
-                }
-            },
-            "text": text,
-        }
-
-    def _build_downloader_card(self, view: dict) -> dict:
-        """构建单个下载器任务卡片。"""
-        name = str(view.get("name") or "")
-        downloader_type = str(view.get("type") or "")
-        tasks = view.get("tasks") or []
-        header_content = [{
-            "component": "div",
-            "props": {"class": "text-subtitle-1 font-weight-medium"},
-            "text": f"{name} · {self._type_text(downloader_type)} · {len(tasks)} 个任务",
-        }]
-
-        if view.get("available") and self._allow_bulk_actions and tasks:
-            header_content.append({
-                "component": "div",
-                "props": {"class": "d-flex flex-wrap ga-2 mt-2"},
-                "content": [
-                    self._build_button("全部开始", "start", name, scope="all"),
-                    self._build_button("全部暂停", "stop", name, scope="all"),
-                ],
-            })
-
+        """返回每个下载器的开始和暂停时间配置。"""
         content = [{
-            "component": "VCardText",
-            "content": header_content,
+            "component": "VSwitch",
+            "props": {
+                "model": "enabled",
+                "label": "启用插件",
+            },
         }]
-        if not view.get("available"):
+        defaults = {
+            "enabled": bool(self._config.get("enabled")),
+        }
+        services = {}
+        try:
+            services = self._schedule_service.helper.get_services() or {}
+        except Exception as error:
             content.append({
                 "component": "VAlert",
                 "props": {
                     "type": "error",
                     "variant": "tonal",
-                    "text": str(view.get("error") or "下载器不可用"),
+                    "text": f"获取下载器列表失败：{error}",
                 },
             })
-        elif tasks:
-            content.append(self._build_task_table(name, tasks))
-        else:
+
+        seen_keys = set()
+        for service_key, service in services.items():
+            name = str(getattr(service, "name", "") or service_key or "").strip()
+            downloader_type = str(
+                getattr(service, "type", "") or ""
+            ).strip().lower()
+            if not name or downloader_type not in SUPPORTED_DOWNLOADERS:
+                continue
+            key = downloader_key(downloader_type, name)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            start_field = schedule_field(key, "start")
+            stop_field = schedule_field(key, "stop")
+            defaults[start_field] = str(self._config.get(start_field) or "")
+            defaults[stop_field] = str(self._config.get(stop_field) or "")
             content.append({
-                "component": "VCardText",
-                "props": {"class": "text-medium-emphasis"},
-                "text": "暂无任务",
+                "component": "VCard",
+                "props": {"variant": "outlined", "class": "mt-3"},
+                "content": [{
+                    "component": "VCardText",
+                    "content": [
+                        {
+                            "component": "div",
+                            "props": {
+                                "class": "text-subtitle-1 font-weight-medium mb-2"
+                            },
+                            "text": f"{name} · {self._type_text(downloader_type)}",
+                        },
+                        {
+                            "component": "VRow",
+                            "content": [
+                                self._date_field(
+                                    start_field,
+                                    "全部开始时间",
+                                ),
+                                self._date_field(
+                                    stop_field,
+                                    "全部暂停时间",
+                                ),
+                            ],
+                        },
+                    ],
+                }],
             })
 
+        for field, value in self._config.items():
+            if (
+                    isinstance(field, str)
+                    and field.startswith("schedule_")
+                    and (field.endswith("_start_at") or field.endswith("_pause_at"))
+            ):
+                defaults.setdefault(field, str(value or ""))
+
+        return [{
+            "component": "VForm",
+            "content": content,
+        }], defaults
+
+    def get_page(self) -> List[dict]:
+        """返回不带种子明细的计划状态页。"""
+        if not self._enabled:
+            return [{
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "text": "插件未启用",
+                },
+            }]
+
+        try:
+            plans = self._schedule_service.list_plans()
+        except Exception as error:
+            return [{
+                "component": "VAlert",
+                "props": {
+                    "type": "error",
+                    "variant": "tonal",
+                    "text": f"读取定时计划失败：{error}",
+                },
+            }]
+
+        rows = []
+        now = datetime.now(self._timezone)
+        configured = {(plan["key"], plan["action"]) for plan in plans}
+        for plan in plans:
+            rows.append(self._plan_card(plan, now))
+
+        for key, action_results in self._schedule_service.results.items():
+            if not isinstance(action_results, dict):
+                continue
+            for action, result in action_results.items():
+                if (key, action) in configured:
+                    continue
+                if not isinstance(result, dict) or not result.get("success"):
+                    continue
+                snapshot = self._schedule_service.registry.get(key) or {}
+                rows.append(self._result_card(key, action, result, snapshot))
+
+        if not rows:
+            return [{
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "text": "暂无定时计划",
+                },
+            }]
+        return rows
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        """注册每 5 分钟运行的计划检查服务。"""
+        if not self._enabled:
+            return []
+        return [{
+            "id": "DownloaderTaskManagerSchedules",
+            "name": "下载器定时任务检查",
+            "trigger": "interval",
+            "func": self.check_schedules,
+            "kwargs": {"seconds": 300},
+        }]
+
+    def check_schedules(self) -> List[dict]:
+        """执行所有到期计划。"""
+        if not self._enabled or not self._schedule_service:
+            return []
+        return self._schedule_service.run_due()
+
+    def stop_service(self) -> None:
+        """停止插件时释放服务引用。"""
+        self._schedule_service = None
+
+    def _persist_config(self, config: dict) -> None:
+        """保存插件配置。"""
+        self._config = config
+        self.update_config(self._config)
+
+    @staticmethod
+    def _resolve_timezone() -> ZoneInfo:
+        """解析 MoviePilot 配置时区。"""
+        try:
+            from app.core.config import settings
+            timezone_name = str(getattr(settings, "TZ", "") or "")
+        except Exception:
+            timezone_name = ""
+        try:
+            return ZoneInfo(timezone_name or "Asia/Shanghai")
+        except Exception:
+            return ZoneInfo("Asia/Shanghai")
+
+    @staticmethod
+    def _date_field(model: str, label: str) -> dict:
+        """构建本地日期时间输入框。"""
+        return {
+            "component": "VCol",
+            "props": {"cols": 12, "md": 6},
+            "content": [{
+                "component": "VTextField",
+                "props": {
+                    "model": model,
+                    "label": label,
+                    "type": "datetime-local",
+                },
+            }],
+        }
+
+    def _plan_card(self, plan: dict, now: datetime) -> dict:
+        """构建单个计划状态卡片。"""
+        if plan["error"]:
+            color = "error"
+            status = f"配置错误：{plan['error']}"
+        elif plan["scheduled_at"] and plan["scheduled_at"] > now:
+            color = "info"
+            status = "已计划"
+        else:
+            result = self._matching_result(plan)
+            if result and not result.get("success"):
+                color = "warning"
+                status = "等待重试"
+            elif result and result.get("success"):
+                color = "success"
+                status = "已执行"
+            else:
+                color = "info"
+                status = "待执行"
+
+        action_text = "全部开始" if plan["action"] == "start" else "全部暂停"
+        title = f"{plan.get('name') or '未知下载器'} · {action_text}"
+        lines = [
+            f"计划时间：{plan.get('scheduled_at') or plan.get('raw_value') or '-'}",
+            f"状态：{status}",
+        ]
+        result = self._matching_result(plan)
+        if result:
+            lines.append(
+                f"最近结果：{result.get('message') or '-'}，"
+                f"{result.get('affected', 0)} 个任务"
+            )
         return {
             "component": "VCard",
             "props": {"variant": "outlined", "class": "mb-3"},
-            "content": content,
+            "content": [{
+                "component": "VCardText",
+                "content": [
+                    {
+                        "component": "div",
+                        "props": {"class": "text-subtitle-1 font-weight-medium"},
+                        "text": title,
+                    },
+                    {
+                        "component": "VAlert",
+                        "props": {
+                            "type": color,
+                            "variant": "tonal",
+                            "class": "mt-2",
+                            "text": "\n".join(lines),
+                        },
+                    },
+                ],
+            }],
         }
 
-    def _build_task_table(self, downloader: str, tasks: List[dict]) -> dict:
-        """构建单个下载器的任务表格。"""
-        headers = [
-            "名称",
-            "状态",
-            "进度",
-            "下载速度",
-            "上传速度",
-            "分类/标签",
-            "操作",
-        ]
+    def _matching_result(self, plan: dict) -> dict:
+        """读取与当前计划时间匹配的结果。"""
+        result = (
+            (self._schedule_service.results.get(plan["key"]) or {})
+            .get(plan["action"]) or {}
+        )
+        if result.get("scheduled_at") != plan["scheduled_text"]:
+            return {}
+        return result
+
+    def _result_card(
+            self,
+            key: str,
+            action: str,
+            result: dict,
+            snapshot: dict,
+    ) -> dict:
+        """构建已成功清理计划的执行结果卡片。"""
+        action_text = "全部开始" if action == "start" else "全部暂停"
+        name = snapshot.get("name") or result.get("downloader") or "未知下载器"
         return {
-            "component": "VTable",
-            "props": {"hover": True, "density": "compact"},
-            "content": [
-                {
-                    "component": "thead",
-                    "content": [{
-                        "component": "tr",
-                        "content": [
-                            {
-                                "component": "th",
-                                "props": {"class": "text-start"},
-                                "text": header,
-                            }
-                            for header in headers
-                        ],
-                    }],
-                },
-                {
-                    "component": "tbody",
-                    "content": [
-                        self._build_task_row(downloader, task)
-                        for task in tasks
-                    ],
-                },
-            ],
+            "component": "VCard",
+            "props": {"variant": "outlined", "class": "mb-3"},
+            "content": [{
+                "component": "VCardText",
+                "content": [{
+                    "component": "VAlert",
+                    "props": {
+                        "type": "success",
+                        "variant": "tonal",
+                        "text": (
+                            f"{name} · {action_text} · 已执行\n"
+                            f"计划时间：{result.get('scheduled_at') or '-'}\n"
+                            f"结果：{result.get('message') or '-'}，"
+                            f"{result.get('affected', 0)} 个任务"
+                        ),
+                    },
+                }],
+            }],
         }
-
-    def _build_task_row(self, downloader: str, task: dict) -> dict:
-        """构建单个任务表格行。"""
-        status = str(task.get("status") or "unknown")
-        action = self._task_action(status)
-        action_content = []
-        if action:
-            action_content.append(
-                self._build_button(
-                    "开始" if action == "start" else "暂停",
-                    action,
-                    downloader,
-                    hashes=[str(task.get("hash") or "")],
-                )
-            )
-        return {
-            "component": "tr",
-            "content": [
-                {
-                    "component": "td",
-                    "props": {"class": "text-body-2"},
-                    "text": str(task.get("name") or task.get("hash") or ""),
-                },
-                {
-                    "component": "td",
-                    "text": str(task.get("state_text") or "未知"),
-                },
-                {
-                    "component": "td",
-                    "text": f"{float(task.get('progress') or 0):.1f}%",
-                },
-                {
-                    "component": "td",
-                    "text": self._format_speed(task.get("download_speed")),
-                },
-                {
-                    "component": "td",
-                    "text": self._format_speed(task.get("upload_speed")),
-                },
-                {
-                    "component": "td",
-                    "text": str(task.get("category") or ""),
-                },
-                {
-                    "component": "td",
-                    "content": action_content,
-                    "text": "" if action_content else "无",
-                },
-            ],
-        }
-
-    @staticmethod
-    def _task_action(status: str) -> Optional[str]:
-        """根据归一化状态返回任务动作。"""
-        if status in {"paused", "error"}:
-            return "start"
-        if status in {"downloading", "uploading", "checking", "queued"}:
-            return "stop"
-        return None
 
     @staticmethod
     def _type_text(downloader_type: str) -> str:
-        """返回下载器类型展示文本。"""
+        """返回下载器类型名称。"""
         return {
             "qbittorrent": "qBittorrent",
             "transmission": "Transmission",
         }.get(downloader_type, downloader_type or "未知类型")
-
-    @staticmethod
-    def _format_speed(value: Any) -> str:
-        """将字节速度格式化为可读文本。"""
-        try:
-            speed = float(value or 0)
-        except (TypeError, ValueError):
-            speed = 0.0
-        units = ("B/s", "KB/s", "MB/s", "GB/s")
-        unit_index = 0
-        while speed >= 1024 and unit_index < len(units) - 1:
-            speed /= 1024
-            unit_index += 1
-        if unit_index == 0:
-            return f"{int(speed)} {units[unit_index]}"
-        return f"{speed:.1f} {units[unit_index]}"
