@@ -1,13 +1,19 @@
+import copy
 import json
-import inspect
 import sys
+import threading
+import time
 import types
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "plugins.v2"))
+TZ = ZoneInfo("Asia/Shanghai")
+NOW = datetime(2026, 10, 27, 10, 0, tzinfo=TZ)
 
 
 def _install_module(name):
@@ -23,22 +29,22 @@ class _PluginBase:
     def __init__(self):
         """初始化内存数据存储。"""
         self.saved_data = {}
-        self.updated_config = None
-
-    def save_data(self, key, value, plugin_id=None):
-        """保存测试数据。"""
-        self.saved_data[key] = value
-
-    def get_data(self, key=None, plugin_id=None):
-        """读取测试数据。"""
-        if key is None:
-            return self.saved_data
-        return self.saved_data.get(key)
+        self.updated_config = {}
 
     def update_config(self, config, plugin_id=None):
-        """记录插件配置。"""
-        self.updated_config = config
+        """保存配置。"""
+        self.updated_config = copy.deepcopy(config)
         return True
+
+    def save_data(self, key, value, plugin_id=None):
+        """保存数据。"""
+        self.saved_data[key] = copy.deepcopy(value)
+
+    def get_data(self, key=None, plugin_id=None):
+        """读取数据。"""
+        if key is None:
+            return copy.deepcopy(self.saved_data)
+        return copy.deepcopy(self.saved_data.get(key))
 
 
 class _DownloaderHelper:
@@ -47,6 +53,10 @@ class _DownloaderHelper:
     def get_services(self):
         """返回空服务映射。"""
         return {}
+
+    def get_service(self, name):
+        """返回空下载器。"""
+        return None
 
 
 app_module = _install_module("app")
@@ -60,78 +70,20 @@ app_module.plugins = plugins_module
 
 import downloadertaskmanager
 from downloadertaskmanager import DownloaderTaskManager
-from downloadertaskmanager.runtime import normalize_status, normalize_torrent
-from downloadertaskmanager.service import DownloaderTaskService
-
-
-class FakeDownloaderInstance:
-    """模拟 MoviePilot 下载器实例。"""
-
-    def __init__(self, torrents=None, inactive=False, query_error=None, action_error=None):
-        """保存模拟任务、连接状态和异常配置。"""
-        self.torrents = list(torrents or [])
-        self.inactive = inactive
-        self.query_error = query_error
-        self.action_error = action_error
-        self.started = []
-        self.stopped = []
-
-    def is_inactive(self):
-        """返回模拟连接状态。"""
-        return self.inactive
-
-    def get_torrents(self):
-        """返回模拟任务列表和查询状态。"""
-        if self.query_error is not None:
-            if isinstance(self.query_error, Exception):
-                raise self.query_error
-            return [], self.query_error
-        return list(self.torrents), False
-
-    def start_torrents(self, ids):
-        """记录开始任务请求。"""
-        if self.action_error is not None:
-            raise self.action_error
-        self.started.append(list(ids))
-        return True
-
-    def stop_torrents(self, ids):
-        """记录暂停任务请求。"""
-        if self.action_error is not None:
-            raise self.action_error
-        self.stopped.append(list(ids))
-        return True
-
-
-class FakeDownloaderService:
-    """模拟 MoviePilot 服务信息。"""
-
-    def __init__(self, name, downloader_type, instance):
-        """保存服务名称、类型和实例。"""
-        self.name = name
-        self.type = downloader_type
-        self.config = None
-        self.instance = instance
-
-
-class FakeDownloaderHelper:
-    """模拟 DownloaderHelper。"""
-
-    def __init__(self, services):
-        """保存服务映射。"""
-        self.services = services
-
-    def get_services(self):
-        """返回全部模拟服务。"""
-        return self.services
-
-    def get_service(self, name):
-        """按名称返回模拟服务。"""
-        return self.services.get(name)
+from downloadertaskmanager.runtime import (
+    downloader_key,
+    normalize_progress,
+    normalize_status,
+    normalize_torrent,
+    parse_schedule_time,
+    schedule_field,
+    task_eligible,
+)
+from downloadertaskmanager.service import DownloaderScheduleService
 
 
 def _walk_components(node):
-    """递归遍历页面组件节点。"""
+    """递归遍历页面组件。"""
     if isinstance(node, list):
         for item in node:
             yield from _walk_components(item)
@@ -142,590 +94,658 @@ def _walk_components(node):
     yield from _walk_components(node.get("content") or [])
 
 
-def _button_events(page):
-    """提取页面按钮文本和点击事件。"""
-    events = []
-    for node in _walk_components(page):
-        if node.get("component") != "VBtn":
-            continue
-        event = (node.get("events") or {}).get("click")
-        if event:
-            events.append((str(node.get("text") or ""), event))
-    return events
-
-
 def _component_text(node):
-    """读取组件的直接文本或 text 属性。"""
-    return str(node.get("text") or (node.get("props") or {}).get("text") or "")
+    """读取组件节点中的文本。"""
+    props = node.get("props") or {}
+    return str(node.get("text") or props.get("text") or "")
 
 
-class DownloaderRuntimeTests(unittest.TestCase):
-    """验证下载器任务字段归一化。"""
+class RuntimeTests(unittest.TestCase):
+    """验证调度运行时纯函数。"""
 
-    def test_normalize_qbittorrent_torrent(self):
-        """将 qBittorrent 字典任务转换为统一结构。"""
-        torrent = {
-            "hash": "ABCDEF",
-            "name": "qb-task",
-            "state": "pausedDL",
-            "progress": 0.5,
-            "size": 1024,
-            "dlspeed": 100,
-            "upspeed": 20,
-            "category": "电影",
-            "added_on": 100,
-        }
+    KEY = "c70ff5f613c1"
 
-        result = normalize_torrent(torrent, "qbittorrent")
+    def test_downloader_key_and_fields_are_stable(self):
+        """稳定键和字段名匹配规格算法。"""
+        self.assertEqual(
+            self.KEY,
+            downloader_key("qbittorrent", "QB"),
+        )
+        self.assertNotEqual(
+            downloader_key("qbittorrent", "QB"),
+            downloader_key("transmission", "QB"),
+        )
+        self.assertEqual(
+            f"schedule_{self.KEY}_start_at",
+            schedule_field(self.KEY, "start"),
+        )
+        self.assertEqual(
+            f"schedule_{self.KEY}_pause_at",
+            schedule_field(self.KEY, "stop"),
+        )
 
-        self.assertEqual("abcdef", result["hash"])
-        self.assertEqual("qb-task", result["name"])
-        self.assertEqual("paused", result["status"])
-        self.assertEqual("已暂停", result["state_text"])
-        self.assertTrue(result["paused"])
-        self.assertEqual(50.0, result["progress"])
-        self.assertEqual(1024, result["size"])
-        self.assertEqual(100, result["download_speed"])
-        self.assertEqual(20, result["upload_speed"])
-        self.assertEqual("电影", result["category"])
-        self.assertEqual(100, result["added_at"])
+    def test_parse_schedule_time(self):
+        """解析两种本地时间格式并拒绝非法值。"""
+        first = parse_schedule_time("2026-10-27T02:00", TZ)
+        second = parse_schedule_time("2026-10-27 02:00", TZ)
 
-    def test_normalize_transmission_torrent(self):
-        """将 Transmission 属性任务转换为统一结构。"""
-        torrent = type("Torrent", (), {
-            "hashString": "FEDCBA",
-            "name": "tr-task",
-            "status": "downloading",
-            "progress": 25.0,
-            "total_size": 2048,
-            "rateDownload": 200,
-            "rateUpload": 30,
-            "download_dir": "/downloads",
-            "labels": ["刷流", "电影"],
-            "date_added": None,
-        })()
+        self.assertEqual(first, second)
+        self.assertEqual(first.utcoffset(), timedelta(hours=8))
+        self.assertIsNone(parse_schedule_time("bad", TZ))
+        self.assertIsNone(parse_schedule_time("", TZ))
 
-        result = normalize_torrent(torrent, "transmission")
+    def test_progress_normalization(self):
+        """按下载器类型归一化并限制进度。"""
+        self.assertEqual(99.9, normalize_progress(0.999, "qbittorrent"))
+        self.assertEqual(100.0, normalize_progress(1.0, "qbittorrent"))
+        self.assertEqual(99.9, normalize_progress(99.9, "transmission"))
+        self.assertEqual(100.0, normalize_progress(100.0, "transmission"))
+        self.assertLess(
+            normalize_progress(0.9999, "qbittorrent"),
+            100.0,
+        )
+        self.assertEqual(0.0, normalize_progress(-1, "transmission"))
+        self.assertEqual(100.0, normalize_progress(101, "transmission"))
+        self.assertEqual(0.0, normalize_progress("bad", "transmission"))
 
-        self.assertEqual("fedcba", result["hash"])
-        self.assertEqual("tr-task", result["name"])
-        self.assertEqual("downloading", result["status"])
-        self.assertEqual("下载中", result["state_text"])
-        self.assertFalse(result["paused"])
-        self.assertEqual(25.0, result["progress"])
-        self.assertEqual(2048, result["size"])
-        self.assertEqual(200, result["download_speed"])
-        self.assertEqual(30, result["upload_speed"])
-        self.assertEqual("刷流,电影", result["category"])
-        self.assertIsNone(result["added_at"])
+    def test_status_matrix(self):
+        """覆盖 qBittorrent 与 Transmission 状态映射。"""
+        cases = [
+            ("pausedDL", "qbittorrent", "paused"),
+            ("stoppedUP", "qbittorrent", "paused"),
+            ("forcedMetaDL", "qbittorrent", "downloading"),
+            ("checkingResumeData", "qbittorrent", "checking"),
+            ("queuedDL", "qbittorrent", "queued"),
+            ("queuedUP", "qbittorrent", "uploading"),
+            ("missingFiles", "qbittorrent", "error"),
+            ("stopped", "transmission", "paused"),
+            ("download_pending", "transmission", "downloading"),
+            ("check_pending", "transmission", "checking"),
+            ("download_wait", "transmission", "queued"),
+            ("seed_pending", "transmission", "uploading"),
+            ("error", "transmission", "error"),
+            ("mystery", "transmission", "unknown"),
+        ]
 
-    def test_transmission_status_matrix(self):
-        """覆盖 Transmission 全部文档状态。"""
-        cases = {
-            "stopped": "paused",
-            "downloading": "downloading",
-            "download_pending": "downloading",
-            "seeding": "uploading",
-            "seed_pending": "uploading",
-            "checking": "checking",
-            "check_pending": "checking",
-            "error": "error",
-        }
-
-        for raw_status, expected in cases.items():
-            with self.subTest(raw_status=raw_status):
+        for raw, downloader_type, expected in cases:
+            with self.subTest(raw=raw, downloader_type=downloader_type):
                 self.assertEqual(
                     expected,
-                    normalize_status(raw_status, "transmission"),
+                    normalize_status(raw, downloader_type),
                 )
 
-    def test_unknown_status_is_not_guessed(self):
-        """未知状态归为 unknown 且不标记为暂停。"""
-        self.assertEqual("unknown", normalize_status("mystery", "qbittorrent"))
-        self.assertEqual("unknown", normalize_status("mystery", "transmission"))
-
-        result = normalize_torrent({
-            "hash": "abc",
-            "name": "unknown",
-            "state": "mystery",
-            "progress": 0,
-        }, "qbittorrent")
-
-        self.assertEqual("unknown", result["status"])
-        self.assertEqual("未知", result["state_text"])
-        self.assertFalse(result["paused"])
-
-    def test_error_status_and_state_text_are_normalized(self):
-        """错误状态归为 error 并显示中文。"""
-        self.assertEqual("error", normalize_status("missingFiles", "qbittorrent"))
-        self.assertEqual("error", normalize_status("error", "transmission"))
-
-        result = normalize_torrent({
-            "hash": "abc",
-            "name": "errored",
-            "state": "missingFiles",
-            "progress": 0,
-        }, "qbittorrent")
-
-        self.assertEqual("error", result["status"])
-        self.assertEqual("错误", result["state_text"])
-
-    def test_invalid_hash_returns_none(self):
-        """缺失或空白哈希的任务不进入页面。"""
-        self.assertIsNone(normalize_torrent({"hash": "  "}, "qbittorrent"))
-        self.assertIsNone(normalize_torrent({}, "transmission"))
-
-
-class DownloaderTaskServiceTests(unittest.TestCase):
-    """验证下载器发现和任务动作编排。"""
-
-    @staticmethod
-    def _qb_torrent(torrent_hash="abcdef", state="pausedDL"):
-        """构造 qBittorrent 测试任务。"""
-        return {
-            "hash": torrent_hash,
-            "name": "task",
-            "state": state,
+    def test_normalize_torrent_and_eligibility(self):
+        """开始只选暂停任务，暂停只选未完成的活动任务。"""
+        paused = normalize_torrent({
+            "hash": "ABC",
+            "state": "pausedDL",
             "progress": 0.5,
-            "size": 1024,
+        }, "qbittorrent")
+        downloading = normalize_torrent({
+            "hash": "DEF",
+            "state": "downloading",
+            "progress": 0.25,
+        }, "qbittorrent")
+        seeding = normalize_torrent({
+            "hash": "GHI",
+            "state": "uploading",
+            "progress": 1.0,
+        }, "qbittorrent")
+        transmission = normalize_torrent(type("Torrent", (), {
+            "hashString": "JKL",
+            "status": "download_pending",
+            "progress": 40.0,
+        })(), "transmission")
+
+        self.assertTrue(task_eligible(paused, "start"))
+        self.assertFalse(task_eligible(paused, "stop"))
+        self.assertTrue(task_eligible(downloading, "stop"))
+        self.assertFalse(task_eligible(seeding, "start"))
+        self.assertFalse(task_eligible(seeding, "stop"))
+        self.assertTrue(task_eligible(transmission, "stop"))
+        self.assertFalse(task_eligible(transmission, "start"))
+
+
+class FakeInstance:
+    """模拟下载器实例。"""
+
+    def __init__(self, torrents=None, inactive=False, query_error=False,
+                 action_result=True, action_error=None, delay=0):
+        """保存测试状态。"""
+        self.torrents = list(torrents or [])
+        self.inactive = inactive
+        self.query_error = query_error
+        self.action_result = action_result
+        self.action_error = action_error
+        self.delay = delay
+        self.started = []
+        self.stopped = []
+
+    def is_inactive(self):
+        """返回连接状态。"""
+        return self.inactive
+
+    def get_torrents(self):
+        """返回任务列表和是否失败。"""
+        if isinstance(self.query_error, Exception):
+            raise self.query_error
+        return copy.deepcopy(self.torrents), bool(self.query_error)
+
+    def start_torrents(self, ids):
+        """记录开始请求。"""
+        if self.delay:
+            time.sleep(self.delay)
+        if self.action_error:
+            raise self.action_error
+        self.started.append(list(ids))
+        return self.action_result
+
+    def stop_torrents(self, ids):
+        """记录暂停请求。"""
+        if self.action_error:
+            raise self.action_error
+        self.stopped.append(list(ids))
+        return self.action_result
+
+
+class FakeService:
+    """模拟 MoviePilot ServiceInfo。"""
+
+    def __init__(self, name, service_type, instance):
+        """保存服务信息。"""
+        self.name = name
+        self.type = service_type
+        self.instance = instance
+
+
+class FakeHelper:
+    """模拟 DownloaderHelper。"""
+
+    def __init__(self, services=None):
+        """保存服务映射。"""
+        self.services = services or {}
+
+    def get_services(self):
+        """返回服务映射。"""
+        return self.services
+
+    def get_service(self, name):
+        """按名称返回服务。"""
+        return self.services.get(name)
+
+
+class ScheduleServiceTests(unittest.TestCase):
+    """验证一次性计划注册、排序和执行。"""
+
+    KEY = "c70ff5f613c1"
+
+    def _new_service(self, config, instance, now=NOW, invalidate=False):
+        """构造计划服务。"""
+        helper = FakeHelper({
+            "QB": FakeService("QB", "qbittorrent", instance),
+        })
+        self.config = copy.deepcopy(config)
+        self.config_snapshots = []
+        self.registry_snapshots = []
+        self.result_snapshots = []
+        service = DownloaderScheduleService(
+            helper=helper,
+            config=self.config,
+            registry={},
+            results={},
+            now_fn=lambda: now,
+            timezone=TZ,
+            persist_config=self._persist_config,
+            save_registry=self._save_registry,
+            save_results=self._save_results,
+        )
+        service.refresh_registry()
+        if invalidate:
+            service.helper.services["QB"].instance.inactive = True
+        return service
+
+    def _persist_config(self, config):
+        """记录配置持久化。"""
+        self.config_snapshots.append(copy.deepcopy(config))
+
+    def _save_registry(self, registry):
+        """记录注册表持久化。"""
+        self.registry_snapshots.append(copy.deepcopy(registry))
+
+    def _save_results(self, results):
+        """记录结果持久化。"""
+        self.result_snapshots.append(copy.deepcopy(results))
+
+    def test_registry_refresh_preserves_old_snapshots(self):
+        """刷新注册表保留旧下载器快照。"""
+        service = self._new_service({}, FakeInstance())
+        service.registry["old"] = {"name": "Old", "type": "transmission"}
+
+        registry = service.refresh_registry()
+
+        self.assertIn(self.KEY, registry)
+        self.assertIn("old", registry)
+        self.assertEqual("QB", registry[self.KEY]["name"])
+
+    def test_duplicate_type_and_name_is_config_error(self):
+        """重复下载器名称和类型时计划不执行。"""
+        helper = FakeHelper({
+            "A": FakeService("QB", "qbittorrent", FakeInstance()),
+            "B": FakeService("QB", "qbittorrent", FakeInstance()),
+        })
+        config = {
+            schedule_field(self.KEY, "start"): "2026-10-27T09:00",
         }
+        service = DownloaderScheduleService(
+            helper=helper,
+            config=config,
+            registry={},
+            results={},
+            now_fn=lambda: NOW,
+            timezone=TZ,
+            persist_config=lambda value: None,
+            save_registry=lambda value: None,
+            save_results=lambda value: None,
+        )
+        service.refresh_registry()
 
-    def _service(self, instance=None, allow_bulk=True, downloader_type="qbittorrent"):
-        """构造带一个下载器的服务层。"""
-        instance = instance or FakeDownloaderInstance([self._qb_torrent()])
-        helper = FakeDownloaderHelper({
-            "QB": FakeDownloaderService("QB", downloader_type, instance),
-        })
-        return DownloaderTaskService(helper, allow_bulk_actions=allow_bulk), instance
+        plans = service.list_plans()
 
-    def test_list_views_normalizes_tasks_and_keeps_error_views(self):
-        """列出任务，同时保留未连接和不支持的下载器。"""
-        inactive = FakeDownloaderInstance([self._qb_torrent()], inactive=True)
-        unsupported = FakeDownloaderInstance([self._qb_torrent()])
-        broken = FakeDownloaderInstance(query_error=True)
-        helper = FakeDownloaderHelper({
-            "QB": FakeDownloaderService("QB", "qbittorrent", inactive),
-            "TR": FakeDownloaderService("TR", "transmission", broken),
-            "RT": FakeDownloaderService("RT", "rtorrent", unsupported),
-        })
-        service = DownloaderTaskService(helper, allow_bulk_actions=True)
+        self.assertTrue(plans[0]["error"])
+        self.assertIn("重复", plans[0]["error"])
+        self.assertEqual([], service.due_plans())
 
-        views = {view["name"]: view for view in service.list_views()}
+    def test_list_plans_and_due_sorting(self):
+        """计划和到期列表使用 start/stop 动作并稳定排序。"""
+        start = "2026-10-27T09:00"
+        stop = "2026-10-27T11:00"
+        service = self._new_service({
+            schedule_field(self.KEY, "start"): start,
+            schedule_field(self.KEY, "stop"): stop,
+        }, FakeInstance())
 
-        self.assertFalse(views["QB"]["available"])
-        self.assertTrue(views["QB"]["error"])
-        self.assertFalse(views["TR"]["available"])
-        self.assertTrue(views["TR"]["error"])
-        self.assertFalse(views["RT"]["available"])
-        self.assertIn("不支持", views["RT"]["error"])
-        self.assertEqual([], views["RT"]["tasks"])
+        plans = service.list_plans()
+        due = service.due_plans()
 
-    def test_list_views_filters_invalid_tasks_and_catches_exception(self):
-        """正常任务保留，无效任务过滤，查询异常只影响当前下载器。"""
-        instance = FakeDownloaderInstance([
-            self._qb_torrent("ABCDEF"),
-            {"hash": " ", "name": "invalid"},
+        self.assertEqual({"start", "stop"}, {plan["action"] for plan in plans})
+        self.assertEqual(["start"], [plan["action"] for plan in due])
+        self.assertEqual("QB", due[0]["name"])
+
+    def test_empty_schedule_fields_mean_no_plan(self):
+        """空时间字段表示未设置，不产生配置错误。"""
+        service = self._new_service({
+            schedule_field(self.KEY, "start"): "",
+            schedule_field(self.KEY, "stop"): "",
+        }, FakeInstance())
+
+        self.assertEqual([], service.list_plans())
+        self.assertEqual([], service.due_plans())
+
+    def test_same_time_and_missing_snapshot_are_config_errors(self):
+        """同时间和缺失快照产生配置错误。"""
+        same = "2026-10-27T09:00"
+        missing_field = schedule_field("abcdef123456", "start")
+        service = self._new_service({
+            schedule_field(self.KEY, "start"): same,
+            schedule_field(self.KEY, "stop"): same,
+            missing_field: same,
+        }, FakeInstance())
+
+        plans = service.list_plans()
+
+        self.assertTrue(all(plan["error"] for plan in plans))
+        self.assertTrue(any("相同" in plan["error"] for plan in plans))
+        self.assertTrue(any("快照" in plan["error"] for plan in plans))
+
+    def test_execute_start_only_selects_paused_incomplete(self):
+        """开始计划只启动暂停且未完成任务。"""
+        instance = FakeInstance([
+            {"hash": "A", "state": "pausedDL", "progress": 0.5},
+            {"hash": "B", "state": "pausedUP", "progress": 1.0},
+            {"hash": "C", "state": "downloading", "progress": 0.5},
         ])
-        throwing = FakeDownloaderInstance(query_error=RuntimeError("connection failed"))
-        helper = FakeDownloaderHelper({
-            "QB": FakeDownloaderService("QB", "qbittorrent", instance),
-            "QB2": FakeDownloaderService("QB2", "qbittorrent", throwing),
-        })
-        service = DownloaderTaskService(helper, allow_bulk_actions=True)
+        service = self._new_service({
+            schedule_field(self.KEY, "start"): "2026-10-27T09:00",
+        }, instance)
 
-        views = {view["name"]: view for view in service.list_views()}
-
-        self.assertTrue(views["QB"]["available"])
-        self.assertEqual(["abcdef"], [task["hash"] for task in views["QB"]["tasks"]])
-        self.assertFalse(views["QB2"]["available"])
-        self.assertIn("connection failed", views["QB2"]["error"])
-
-    def test_execute_starts_and_stops_single_task(self):
-        """单任务开始和暂停使用去重后的哈希。"""
-        service, instance = self._service()
-
-        started = service.execute({
-            "downloader": "QB",
-            "scope": "task",
-            "action": "start",
-            "hashes": [" ABCDEF ", "abcdef"],
-        })
-        stopped = service.execute({
-            "downloader": "QB",
-            "scope": "task",
-            "action": "stop",
-            "hashes": ["ABCDEF"],
-        })
-
-        self.assertTrue(started["success"])
-        self.assertEqual(1, started["affected"])
-        self.assertEqual([["abcdef"]], instance.started)
-        self.assertTrue(stopped["success"])
-        self.assertEqual([["abcdef"]], instance.stopped)
-
-    def test_execute_all_uses_current_downloader_hashes(self):
-        """全量操作读取当前下载器全部有效任务。"""
-        instance = FakeDownloaderInstance([
-            self._qb_torrent("one"),
-            self._qb_torrent("two"),
-            {"hash": " "},
-        ])
-        service, _ = self._service(instance=instance)
-
-        result = service.execute({
-            "downloader": "QB",
-            "scope": "all",
-            "action": "start",
-        })
+        result = service.run_due()[0]
 
         self.assertTrue(result["success"])
+        self.assertEqual(1, result["affected"])
+        self.assertEqual([["a"]], instance.started)
+        self.assertNotIn(schedule_field(self.KEY, "start"), self.config)
+
+    def test_execute_stop_only_selects_active_incomplete(self):
+        """暂停计划只停止活动且未完成任务。"""
+        instance = FakeInstance([
+            {"hash": "A", "state": "downloading", "progress": 0.5},
+            {"hash": "B", "state": "queuedDL", "progress": 0.2},
+            {"hash": "C", "state": "uploading", "progress": 1.0},
+            {"hash": "D", "state": "pausedDL", "progress": 0.5},
+        ])
+        service = self._new_service({
+            schedule_field(self.KEY, "stop"): "2026-10-27T09:00",
+        }, instance)
+
+        result = service.run_due()[0]
+
+        self.assertTrue(result["success"])
+        self.assertEqual(["a", "b"], instance.stopped[0])
         self.assertEqual(2, result["affected"])
-        self.assertEqual([["one", "two"]], instance.started)
 
-    def test_execute_all_requires_bulk_option(self):
-        """未开启全量操作时拒绝全部任务动作。"""
-        service, instance = self._service(allow_bulk=False)
+    def test_zero_candidates_succeeds_and_clears(self):
+        """没有候选任务时成功并清空计划。"""
+        service = self._new_service({
+            schedule_field(self.KEY, "start"): "2026-10-27T09:00",
+        }, FakeInstance([
+            {"hash": "A", "state": "uploading", "progress": 1.0},
+        ]))
 
-        result = service.execute({
-            "downloader": "QB",
-            "scope": "all",
-            "action": "stop",
-        })
+        result = service.run_due()[0]
 
-        self.assertFalse(result["success"])
+        self.assertTrue(result["success"])
         self.assertEqual(0, result["affected"])
-        self.assertEqual([], instance.stopped)
+        self.assertNotIn(schedule_field(self.KEY, "start"), self.config)
 
-    def test_execute_all_rejects_empty_query_error_and_exception(self):
-        """全量操作拒绝空列表、查询错误和查询异常。"""
-        empty_service, empty_instance = self._service(
-            instance=FakeDownloaderInstance([])
+    def test_failure_keeps_plan_and_retries(self):
+        """失败保留计划，下一周期继续尝试。"""
+        instance = FakeInstance(
+            [{"hash": "A", "state": "pausedDL", "progress": 0.5}],
+            inactive=True,
         )
-        error_service, error_instance = self._service(
-            instance=FakeDownloaderInstance(query_error=True)
-        )
-        throw_service, throw_instance = self._service(
-            instance=FakeDownloaderInstance(query_error=RuntimeError("query failed"))
-        )
-        payload = {"downloader": "QB", "scope": "all", "action": "start"}
+        service = self._new_service({
+            schedule_field(self.KEY, "start"): "2026-10-27T09:00",
+        }, instance)
 
-        for service, instance in (
-            (empty_service, empty_instance),
-            (error_service, error_instance),
-            (throw_service, throw_instance),
+        first = service.run_due()[0]
+        self.assertFalse(first["success"])
+        self.assertIn(schedule_field(self.KEY, "start"), self.config)
+        service.helper.services["QB"].instance.inactive = False
+        second = service.run_due()[0]
+
+        self.assertTrue(second["success"])
+        self.assertNotIn(schedule_field(self.KEY, "start"), self.config)
+
+    def test_action_false_and_exception_keep_plan(self):
+        """动作 False 和异常都保留计划。"""
+        for instance in (
+            FakeInstance(
+                [{"hash": "A", "state": "pausedDL", "progress": 0.5}],
+                action_result=False,
+            ),
+            FakeInstance(
+                [{"hash": "A", "state": "pausedDL", "progress": 0.5}],
+                action_error=RuntimeError("boom"),
+            ),
         ):
-            result = service.execute(payload)
+            service = self._new_service({
+                schedule_field(self.KEY, "start"): "2026-10-27T09:00",
+            }, instance)
+            result = service.run_due()[0]
             self.assertFalse(result["success"])
-            self.assertEqual(0, result["affected"])
-            self.assertEqual([], instance.started)
+            self.assertIn(schedule_field(self.KEY, "start"), self.config)
 
-    def test_execute_rejects_invalid_payloads_and_downloaders(self):
-        """拒绝非法字段、未知下载器、不支持类型和未连接实例。"""
-        inactive = FakeDownloaderInstance([], inactive=True)
-        inactive_helper = FakeDownloaderHelper({
-            "QB": FakeDownloaderService("QB", "qbittorrent", inactive),
+    def test_results_are_stored_per_action(self):
+        """开始和暂停结果独立保存。"""
+        instance = FakeInstance([
+            {"hash": "A", "state": "pausedDL", "progress": 0.5},
+            {"hash": "B", "state": "downloading", "progress": 0.5},
+        ])
+        service = self._new_service({
+            schedule_field(self.KEY, "start"): "2026-10-27T09:00",
+            schedule_field(self.KEY, "stop"): "2026-10-27T08:00",
+        }, instance)
+
+        results = service.run_due()
+
+        self.assertEqual(2, len(results))
+        self.assertIn("start", service.results[self.KEY])
+        self.assertIn("stop", service.results[self.KEY])
+        self.assertEqual(["b"], instance.stopped[0])
+        self.assertEqual([["a"]], instance.started)
+
+    def test_run_due_is_serialized_by_lock(self):
+        """重叠 run_due 调用不会同时执行。"""
+        service = self._new_service({
+            schedule_field(self.KEY, "start"): "2026-10-27T09:00",
+        }, FakeInstance(
+            [{"hash": "A", "state": "pausedDL", "progress": 0.5}],
+            delay=0.05,
+        ))
+        original_execute = service.execute_plan
+        active = []
+        max_active = []
+
+        def tracked_execute(plan):
+            active.append(1)
+            max_active.append(len(active))
+            try:
+                return original_execute(plan)
+            finally:
+                active.pop()
+
+        service.execute_plan = tracked_execute
+        threads = [threading.Thread(target=service.run_due) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(1, max(max_active))
+
+    def test_result_save_failure_does_not_block_other_plans(self):
+        """单个结果持久化失败不阻止后续计划执行。"""
+        key2 = downloader_key("qbittorrent", "QB2")
+        instance1 = FakeInstance([
+            {"hash": "A", "state": "pausedDL", "progress": 0.5},
+        ])
+        instance2 = FakeInstance([
+            {"hash": "B", "state": "pausedDL", "progress": 0.5},
+        ])
+        helper = FakeHelper({
+            "QB": FakeService("QB", "qbittorrent", instance1),
+            "QB2": FakeService("QB2", "qbittorrent", instance2),
         })
-        inactive_service = DownloaderTaskService(inactive_helper, allow_bulk_actions=True)
-
-        cases = [
-            ({}, "QB"),
-            ({"downloader": "missing", "scope": "task", "action": "start", "hashes": ["a"]}, ""),
-            ({"downloader": "QB", "scope": "bad", "action": "start", "hashes": ["a"]}, "QB"),
-            ({"downloader": "QB", "scope": "task", "action": "bad", "hashes": ["a"]}, "QB"),
-            ({"downloader": "QB", "scope": "task", "action": "start", "hashes": []}, "QB"),
-        ]
-        service, _ = self._service()
-
-        for payload, downloader in cases:
-            target = inactive_service if downloader == "" else service
-            result = target.execute(payload)
-            self.assertFalse(result["success"])
-            self.assertEqual(0, result["affected"])
-
-        unsupported_service, _ = self._service(downloader_type="rtorrent")
-        unsupported = unsupported_service.execute({
-            "downloader": "QB",
-            "scope": "task",
-            "action": "start",
-            "hashes": ["a"],
-        })
-        unavailable = inactive_service.execute({
-            "downloader": "QB",
-            "scope": "task",
-            "action": "start",
-            "hashes": ["a"],
-        })
-
-        self.assertFalse(unsupported["success"])
-        self.assertFalse(unavailable["success"])
-
-    def test_execute_handles_false_and_exception_from_action(self):
-        """动作返回 False 或抛异常时返回失败结果。"""
-        false_instance = FakeDownloaderInstance([self._qb_torrent()])
-        false_instance.start_torrents = lambda ids: False
-        false_service, _ = self._service(instance=false_instance)
-
-        throw_instance = FakeDownloaderInstance(
-            [self._qb_torrent()],
-            action_error=RuntimeError("action failed"),
+        config = {
+            schedule_field(self.KEY, "start"): "2026-10-27T08:00",
+            schedule_field(key2, "start"): "2026-10-27T09:00",
+        }
+        registry = {
+            self.KEY: {"name": "QB", "type": "qbittorrent"},
+            key2: {"name": "QB2", "type": "qbittorrent"},
+        }
+        service = DownloaderScheduleService(
+            helper=helper,
+            config=config,
+            registry=registry,
+            results={},
+            now_fn=lambda: NOW,
+            timezone=TZ,
+            persist_config=lambda value: None,
+            save_registry=lambda value: None,
+            save_results=lambda value: (_ for _ in ()).throw(
+                RuntimeError("result storage failed")
+            ),
         )
-        throw_service, _ = self._service(instance=throw_instance)
 
-        payload = {
-            "downloader": "QB",
-            "scope": "task",
-            "action": "start",
-            "hashes": ["abcdef"],
+        results = service.run_due()
+
+        self.assertEqual(2, len(results))
+        self.assertEqual([["a"]], instance1.started)
+        self.assertEqual([["b"]], instance2.started)
+
+    def test_successful_action_does_not_retry_when_config_save_fails(self):
+        """已执行成功的计划不会因配置清理失败而重复执行。"""
+        instance = FakeInstance([
+            {"hash": "A", "state": "pausedDL", "progress": 0.5},
+        ])
+        config = {
+            schedule_field(self.KEY, "start"): "2026-10-27T08:00",
         }
 
-        self.assertFalse(false_service.execute(payload)["success"])
-        failed = throw_service.execute(payload)
-        self.assertFalse(failed["success"])
-        self.assertIn("action failed", failed["message"])
+        def fail_persist(value):
+            """模拟配置持久化失败。"""
+            raise RuntimeError("config storage failed")
+
+        service = DownloaderScheduleService(
+            helper=FakeHelper({
+                "QB": FakeService("QB", "qbittorrent", instance),
+            }),
+            config=config,
+            registry={
+                self.KEY: {"name": "QB", "type": "qbittorrent"},
+            },
+            results={},
+            now_fn=lambda: NOW,
+            timezone=TZ,
+            persist_config=fail_persist,
+            save_registry=lambda value: None,
+            save_results=lambda value: None,
+        )
+
+        first = service.run_due()
+        second = service.run_due()
+
+        self.assertTrue(first[0]["success"])
+        self.assertEqual([], second)
+        self.assertEqual([["a"]], instance.started)
+        self.assertIn(schedule_field(self.KEY, "start"), config)
 
 
-class DownloaderTaskManagerPluginTests(unittest.TestCase):
-    """验证 MoviePilot 插件配置、页面和 API 契约。"""
+class PluginTests(unittest.TestCase):
+    """验证动态配置页、状态页和 MoviePilot 服务。"""
+
+    KEY = "c70ff5f613c1"
 
     def setUp(self):
-        """安装可配置下载器帮助类。"""
+        """安装下载器帮助类桩。"""
         self.original_helper = downloadertaskmanager.DownloaderHelper
-        self.helper = FakeDownloaderHelper({})
+        self.instance = FakeInstance([
+            {"hash": "A", "state": "pausedDL", "progress": 0.5},
+        ])
+        self.helper = FakeHelper({
+            "QB": FakeService("QB", "qbittorrent", self.instance),
+        })
         downloadertaskmanager.DownloaderHelper = lambda: self.helper
 
     def tearDown(self):
         """恢复下载器帮助类。"""
         downloadertaskmanager.DownloaderHelper = self.original_helper
 
-    @staticmethod
-    def _raw_qb(torrent_hash, state, name=None):
-        """构造页面测试任务。"""
-        return {
-            "hash": torrent_hash,
-            "name": name or torrent_hash,
-            "state": state,
-            "progress": 0.5,
-            "size": 1024 * 1024,
-            "dlspeed": 1024,
-            "upspeed": 2048,
-            "category": "电影",
-        }
-
-    def _enabled_plugin(self, allow_bulk=True):
-        """构造已启用插件。"""
+    def _plugin(self, config=None, enabled=True):
+        """构造插件。"""
         plugin = DownloaderTaskManager()
         plugin.init_plugin({
-            "enabled": True,
-            "allow_bulk_actions": allow_bulk,
+            "enabled": enabled,
+            **(config or {}),
         })
         return plugin
 
-    def test_form_defaults_and_api_contract(self):
-        """配置默认值和动作 API 契约正确。"""
-        plugin = DownloaderTaskManager()
+    def test_version_form_and_removed_api(self):
+        """版本、动态配置字段和接口移除符合规格。"""
+        plugin = self._plugin({
+            schedule_field(self.KEY, "start"): "2000-01-01T00:00",
+        })
         form, defaults = plugin.get_form()
-        api = plugin.get_api()
+        components = list(_walk_components(form))
+        date_fields = [
+            node for node in components
+            if node.get("component") == "VTextField"
+            and (node.get("props") or {}).get("type") == "datetime-local"
+        ]
 
-        self.assertFalse(defaults["enabled"])
-        self.assertFalse(defaults["allow_bulk_actions"])
-        self.assertGreater(len(form), 0)
-        self.assertEqual("/action", api[0]["path"])
-        self.assertEqual(["POST"], api[0]["methods"])
-        self.assertEqual("bear", api[0]["auth"])
+        self.assertEqual("1.1.0", plugin.plugin_version)
+        self.assertEqual(2, len(date_fields))
+        self.assertIn(schedule_field(self.KEY, "start"), defaults)
+        self.assertEqual([], plugin.get_api())
+        self.assertEqual([], plugin.get_command())
 
-    def test_disabled_plugin_rejects_action_and_shows_prompt(self):
-        """禁用插件时拒绝动作且不调用下载器。"""
-        plugin = DownloaderTaskManager()
-        plugin.init_plugin({"enabled": False, "allow_bulk_actions": False})
-        plugin._service = type("ExplodingService", (), {
-            "execute": lambda self, payload: self.fail("不应调用下载器"),
-        })()
+    def test_form_keeps_legacy_schedule_defaults(self):
+        """隐藏的遗留计划保留在表单默认值中。"""
+        legacy_key = downloader_key("transmission", "Missing")
+        legacy_field = schedule_field(legacy_key, "start")
+        plugin = self._plugin({
+            legacy_field: "2026-10-27T09:00",
+        })
 
-        result = plugin.action({
-            "downloader": "QB",
-            "scope": "task",
-            "action": "start",
-            "hashes": ["abc"],
+        _, defaults = plugin.get_form()
+
+        self.assertEqual("2026-10-27T09:00", defaults[legacy_field])
+
+    def test_service_registration_and_check(self):
+        """启用时注册五分钟检查服务。"""
+        plugin = self._plugin()
+        services = plugin.get_service()
+        called = []
+        plugin._schedule_service.run_due = lambda: called.append(True)
+
+        plugin.check_schedules()
+
+        self.assertEqual(1, len(services))
+        self.assertEqual("interval", services[0]["trigger"])
+        self.assertEqual(300, services[0]["kwargs"]["seconds"])
+        self.assertEqual([True], called)
+        self.assertEqual([], self._plugin(enabled=False).get_service())
+
+    def test_page_has_no_torrent_rows_and_shows_plan_status(self):
+        """状态页不显示种子，只显示计划和结果。"""
+        plugin = self._plugin({
+            schedule_field(self.KEY, "start"): "2099-10-27T11:00",
         })
         page = plugin.get_page()
-        alerts = [
-            node for node in _walk_components(page)
-            if node.get("component") == "VAlert"
-        ]
+        components = list(_walk_components(page))
+        text = "\n".join(_component_text(node) for node in components)
 
-        self.assertFalse(result["success"])
-        self.assertEqual(result, plugin.saved_data["last_action_result"])
-        self.assertTrue(any("未启用" in _component_text(alert) for alert in alerts))
-
-    def test_page_renders_all_task_action_states(self):
-        """七种状态按固定规则显示任务按钮。"""
-        tasks = [
-            self._raw_qb("paused", "pausedDL"),
-            self._raw_qb("error", "missingFiles"),
-            self._raw_qb("downloading", "downloading"),
-            self._raw_qb("uploading", "uploading"),
-            self._raw_qb("checking", "checking"),
-            self._raw_qb("queued", "queuedDL"),
-            self._raw_qb("unknown", "mystery"),
-        ]
-        instance = FakeDownloaderInstance(tasks)
-        self.helper.services = {
-            "QB": FakeDownloaderService("QB", "qbittorrent", instance),
-        }
-        plugin = self._enabled_plugin(allow_bulk=True)
-
-        page = plugin.get_page()
-        buttons = _button_events(page)
-        task_actions = {
-            event["params"]["hashes"][0]: text
-            for text, event in buttons
-            if event.get("params", {}).get("hashes")
-        }
-
-        self.assertEqual("开始", task_actions["paused"])
-        self.assertEqual("开始", task_actions["error"])
-        self.assertEqual("暂停", task_actions["downloading"])
-        self.assertEqual("暂停", task_actions["uploading"])
-        self.assertEqual("暂停", task_actions["checking"])
-        self.assertEqual("暂停", task_actions["queued"])
-        self.assertNotIn("unknown", task_actions)
-        self.assertIn("全部开始", [text for text, _ in buttons])
-        self.assertIn("全部暂停", [text for text, _ in buttons])
-
-        for _, event in buttons:
-            self.assertEqual(
-                "plugin/DownloaderTaskManager/action",
-                event["api"],
-            )
-            self.assertEqual("POST", event["method"])
-
-    def test_page_hides_bulk_buttons_when_disabled(self):
-        """未开启全量操作时不显示全量按钮。"""
-        instance = FakeDownloaderInstance([self._raw_qb("abc", "pausedDL")])
-        self.helper.services = {
-            "QB": FakeDownloaderService("QB", "qbittorrent", instance),
-        }
-        plugin = self._enabled_plugin(allow_bulk=False)
-
-        texts = [text for text, _ in _button_events(plugin.get_page())]
-
-        self.assertNotIn("全部开始", texts)
-        self.assertNotIn("全部暂停", texts)
-
-    def test_action_result_is_persisted_and_rendered(self):
-        """动作结果持久化并在页面显示。"""
-        plugin = self._enabled_plugin()
-        result = {
-            "success": True,
-            "message": "已开始 1 个任务",
-            "affected": 1,
-        }
-        plugin._service = type("FakeService", (), {
-            "list_views": lambda self: [],
-            "execute": lambda self, payload: result,
-        })()
-
-        returned = plugin.action({
-            "downloader": "QB",
-            "scope": "task",
-            "action": "start",
-            "hashes": ["abc"],
-        })
-        page = plugin.get_page()
-        alerts = [
-            node for node in _walk_components(page)
-            if node.get("component") == "VAlert"
-        ]
-
-        self.assertEqual(result, returned)
-        self.assertEqual(result, plugin.saved_data["last_action_result"])
-        self.assertTrue(any(_component_text(alert) == result["message"] for alert in alerts))
-
-    def test_page_shows_downloader_discovery_error(self):
-        """下载器枚举异常显示为全局错误而非空配置。"""
-        class BrokenHelper:
-            """模拟下载器枚举失败。"""
-
-            def get_services(self):
-                """抛出服务发现异常。"""
-                raise RuntimeError("service discovery failed")
-
-        downloadertaskmanager.DownloaderHelper = BrokenHelper
-        plugin = self._enabled_plugin()
-        page = plugin.get_page()
-        alerts = [
-            node for node in _walk_components(page)
-            if node.get("component") == "VAlert"
-        ]
-
-        self.assertTrue(any(
-            "获取下载器列表失败" in _component_text(alert)
-            and "service discovery failed" in _component_text(alert)
-            for alert in alerts
+        self.assertFalse(any(
+            node.get("component") == "VTable"
+            for node in components
         ))
+        self.assertNotIn("task-name", text)
+        self.assertIn("QB", text)
+        self.assertIn("已计划", text)
 
-    def test_api_endpoint_accepts_payload_mapping(self):
-        """动态 API 端点保留 payload 请求体参数。"""
-        plugin = DownloaderTaskManager()
-        api = plugin.get_api()[0]
-        signature = inspect.signature(api["endpoint"])
+    def test_disabled_page_and_legacy_migration(self):
+        """禁用提示和旧配置迁移生效。"""
+        plugin = self._plugin({
+            "allow_bulk_actions": True,
+        }, enabled=False)
+        page = plugin.get_page()
+        text = "\n".join(
+            _component_text(node)
+            for node in _walk_components(page)
+        )
 
-        self.assertEqual(plugin.action, api["endpoint"])
-        self.assertIn("payload", signature.parameters)
+        self.assertNotIn("allow_bulk_actions", plugin.updated_config)
+        self.assertIn("插件未启用", text)
+
+    def test_schedule_registry_and_results_persist(self):
+        """注册表和结果写入插件数据。"""
+        plugin = self._plugin({
+            schedule_field(self.KEY, "start"): "2000-01-01T00:00",
+        })
+        plugin.check_schedules()
+
+        self.assertIn(self.KEY, plugin.saved_data["schedule_registry"])
+        self.assertIn("start", plugin.saved_data["schedule_results"][self.KEY])
 
 
-class DownloaderTaskManagerPackageTests(unittest.TestCase):
-    """验证插件市场元数据和说明文档。"""
+class PackageTests(unittest.TestCase):
+    """验证市场元数据和文档。"""
 
-    def test_package_metadata_matches_plugin(self):
-        """包索引保留旧插件并同步新插件版本信息。"""
+    def test_package_and_readme(self):
+        """版本保持同步且 README 描述定时功能。"""
         package = json.loads((ROOT / "package.v2.json").read_text(encoding="utf-8"))
         metadata = package["DownloaderTaskManager"]
+        readme = (ROOT / "plugins.v2" / "downloadertaskmanager" / "README.md").read_text(
+            encoding="utf-8"
+        )
 
+        self.assertEqual("1.1.0", metadata["version"])
+        self.assertEqual(DownloaderTaskManager.plugin_version, metadata["version"])
+        self.assertIn("v1.1.0", metadata["history"])
         self.assertIn("BrushFlowLowFreq", package)
-        self.assertEqual("1.0.0", metadata["version"])
-        self.assertEqual("下载器任务管理", metadata["name"])
-        self.assertEqual("下载管理,Qbittorrent,Transmission", metadata["labels"])
-        self.assertEqual(">=2.12.0,<3", metadata["system_version"])
-        self.assertEqual(
-            DownloaderTaskManager.plugin_version,
-            metadata["version"],
-        )
-
-    def test_plugin_readme_exists(self):
-        """插件目录包含使用说明。"""
-        readme = ROOT / "plugins.v2" / "downloadertaskmanager" / "README.md"
-        self.assertTrue(readme.is_file())
-        self.assertIn("全量操作", readme.read_text(encoding="utf-8"))
-
-    def test_action_route_with_fastapi_when_available(self):
-        """宿主安装 FastAPI 时验证动态 API 的 JSON 请求体。"""
-        try:
-            from fastapi import FastAPI
-            from fastapi.testclient import TestClient
-        except ImportError:
-            self.skipTest("FastAPI 未安装")
-
-        plugin = DownloaderTaskManager()
-        api = plugin.get_api()[0]
-        app = FastAPI()
-        app.add_api_route(
-            api["path"],
-            api["endpoint"],
-            methods=api["methods"],
-        )
-        client = TestClient(app)
-
-        response = client.post(api["path"], json={
-            "downloader": "QB",
-            "scope": "task",
-            "action": "start",
-            "hashes": ["abc"],
-        })
-
-        self.assertEqual(200, response.status_code)
-        self.assertFalse(response.json()["success"])
-        self.assertEqual("插件未启用", response.json()["message"])
+        self.assertIn("一次", readme)
+        self.assertIn("不展示种子", readme)
 
 
 if __name__ == "__main__":
