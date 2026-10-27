@@ -658,7 +658,7 @@ class PluginTests(unittest.TestCase):
             and (node.get("props") or {}).get("type") == "datetime-local"
         ]
 
-        self.assertEqual("1.1.1", plugin.plugin_version)
+        self.assertEqual("1.1.2", plugin.plugin_version)
         self.assertEqual(2, len(date_fields))
         self.assertIn(schedule_field(self.KEY, "start"), defaults)
         self.assertEqual([], plugin.get_api())
@@ -677,22 +677,51 @@ class PluginTests(unittest.TestCase):
         self.assertEqual("2026-10-27T09:00", defaults[legacy_field])
 
     def test_service_registration_and_check(self):
-        """启用时注册快速检查服务并立即运行一次。"""
-        plugin = self._plugin()
+        """计划注册为精确 date 服务，并保留五分钟重试服务。"""
+        plugin = self._plugin({
+            schedule_field(self.KEY, "start"): "2099-10-27T09:00",
+        })
         services = plugin.get_service()
         called = []
-        plugin._schedule_service.run_due = lambda: called.append(True)
+        plugin._schedule_service.retry_due = lambda: called.append(True)
 
-        plugin.check_schedules()
+        plugin.check_retries()
 
-        self.assertEqual(1, len(services))
-        self.assertEqual("interval", services[0]["trigger"])
-        self.assertEqual(5, services[0]["kwargs"]["seconds"])
-        self.assertTrue(services[0]["kwargs"]["coalesce"])
-        self.assertEqual(1, services[0]["kwargs"]["max_instances"])
-        self.assertIsInstance(services[0]["kwargs"]["next_run_time"], datetime)
+        date_services = [
+            service for service in services
+            if service["trigger"] == "date"
+        ]
+        retry_services = [
+            service for service in services
+            if service["trigger"] == "interval"
+        ]
+        self.assertEqual(1, len(date_services))
+        self.assertEqual(1, len(retry_services))
+        self.assertEqual(30, retry_services[0]["kwargs"]["seconds"])
+        self.assertIsInstance(
+            date_services[0]["kwargs"]["run_date"],
+            datetime,
+        )
+        self.assertEqual(
+            "2099-10-27T09:00",
+            plugin._schedule_service.list_plans()[0]["scheduled_text"],
+        )
         self.assertEqual([True], called)
         self.assertEqual([], self._plugin(enabled=False).get_service())
+
+    def test_date_service_executes_bound_plan(self):
+        """date 服务直接执行对应下载器和动作。"""
+        plugin = self._plugin({
+            schedule_field(self.KEY, "start"): "2000-01-01T00:00",
+        })
+        service = next(
+            item for item in plugin.get_service()
+            if item["trigger"] == "date"
+        )
+
+        service["func"](job_id="scheduler-job")
+
+        self.assertEqual([["a"]], self.instance.started)
 
     def test_page_has_no_torrent_rows_and_shows_plan_status(self):
         """状态页不显示种子，只显示计划和结果。"""
@@ -747,7 +776,7 @@ class PackageTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertEqual("1.1.1", metadata["version"])
+        self.assertEqual("1.1.2", metadata["version"])
         self.assertEqual(DownloaderTaskManager.plugin_version, metadata["version"])
         self.assertIn("v1.1.0", metadata["history"])
         self.assertIn("BrushFlowLowFreq", package)
