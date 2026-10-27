@@ -218,7 +218,7 @@ class DownloaderTaskManager(_PluginBase):
         return rows
 
     def get_service(self) -> List[Dict[str, Any]]:
-        """注册每 5 分钟运行的计划检查服务。"""
+        """注册每 5 秒运行的计划检查服务。"""
         if not self._enabled:
             return []
         return [{
