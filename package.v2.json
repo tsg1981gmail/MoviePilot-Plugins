@@ -114,12 +114,13 @@
     "name": "下载器定时任务",
     "description": "按下载器配置一次性时间，自动全部开始或暂停未完成的下载任务。",
     "labels": "下载管理,Qbittorrent,Transmission",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Qbittorrent_A.png",
     "author": "tsg1981gmail",
     "level": 1,
     "system_version": ">=2.12.0,<3",
     "history": {
+      "v1.1.2": "初始执行改为精确 date 调度，到点直接触发；失败计划仍等待5分钟后重试",
       "v1.1.1": "定时检查缩短至5秒并立即执行首次检查，失败仍每5分钟重试，修复计划到点后明显延迟",
       "v1.1.0": "改为按下载器一次性定时全部开始或暂停，仅处理未完成下载任务，失败每5分钟重试",
       "v1.0.0": "初始版本：按下载器展示任务，支持单任务及当前下载器全部任务的开始与暂停"
