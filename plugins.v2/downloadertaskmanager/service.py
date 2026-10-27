@@ -3,7 +3,7 @@ import re
 import threading
 from collections import Counter
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -20,6 +20,7 @@ from .runtime import (
 PLAN_FIELD_PATTERN = re.compile(
     r"^schedule_(?P<key>[0-9a-f]{12})_(?P<field>start_at|pause_at)$"
 )
+RETRY_INTERVAL = timedelta(minutes=5)
 
 
 def _result(
@@ -196,6 +197,7 @@ class DownloaderScheduleService:
             and plan["scheduled_at"]
             and plan["scheduled_at"] <= now
             and not self._already_completed(plan)
+            and not self._retry_waiting(plan, now)
         ]
 
     def execute_plan(self, plan: dict) -> dict:
@@ -417,3 +419,23 @@ class DownloaderScheduleService:
             result.get("success")
             and result.get("scheduled_at") == plan["scheduled_text"]
         )
+
+    def _retry_waiting(self, plan: dict, now: datetime) -> bool:
+        """判断失败计划是否仍在五分钟重试等待期。"""
+        result = (
+            (self.results.get(plan["key"]) or {})
+            .get(plan["action"]) or {}
+        )
+        if (
+                not result
+                or result.get("success")
+                or result.get("scheduled_at") != plan["scheduled_text"]
+        ):
+            return False
+        try:
+            executed_at = datetime.fromisoformat(str(result.get("executed_at")))
+        except (TypeError, ValueError):
+            return False
+        if executed_at.tzinfo is None:
+            executed_at = executed_at.replace(tzinfo=self.timezone)
+        return now < executed_at + RETRY_INTERVAL
