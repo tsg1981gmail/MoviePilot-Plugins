@@ -1,5 +1,6 @@
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
+from functools import partial
 from typing import Any, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
@@ -16,7 +17,7 @@ class DownloaderTaskManager(_PluginBase):
     plugin_name = "下载器定时任务"
     plugin_desc = "按下载器在指定时间全部开始或暂停未完成的下载任务。"
     plugin_icon = "Qbittorrent_A.png"
-    plugin_version = "1.1.1"
+    plugin_version = "1.1.2"
     plugin_author = "tsg1981gmail"
     author_url = "https://github.com/tsg1981gmail"
     plugin_config_prefix = "downloadertaskmanager_"
@@ -218,28 +219,81 @@ class DownloaderTaskManager(_PluginBase):
         return rows
 
     def get_service(self) -> List[Dict[str, Any]]:
-        """注册每 5 秒运行的计划检查服务。"""
+        """为每个计划注册精确 date 服务并保留重试服务。"""
         if not self._enabled:
             return []
-        return [{
-            "id": "DownloaderTaskManagerSchedules",
-            "name": "下载器定时任务检查",
+        now = datetime.now(self._timezone)
+        services = []
+        try:
+            plans = self._schedule_service.list_plans()
+        except Exception:
+            plans = []
+        for plan in plans:
+            if plan["error"]:
+                continue
+            run_at = self._schedule_service.next_run_at(plan, now=now)
+            if not run_at:
+                continue
+            action_text = "全部开始" if plan["action"] == "start" else "全部暂停"
+            services.append({
+                "id": f"Plan_{plan['key']}_{plan['action']}",
+                "name": f"{plan.get('name') or '未知下载器'} {action_text}",
+                "trigger": "date",
+                "func": partial(
+                    self._execute_scheduled_plan,
+                    plan["key"],
+                    plan["action"],
+                    plan["scheduled_text"],
+                ),
+                "kwargs": {
+                    "run_date": run_at,
+                    "coalesce": True,
+                    "max_instances": 1,
+                    "misfire_grace_time": 60,
+                },
+            })
+        services.append({
+            "id": "RetryFailedSchedules",
+            "name": "下载器定时任务失败重试",
             "trigger": "interval",
-            "func": self.check_schedules,
+            "func": self.check_retries,
             "kwargs": {
-                "seconds": 5,
-                "next_run_time": datetime.now(self._timezone),
+                "seconds": 30,
+                "next_run_time": now + timedelta(seconds=30),
                 "coalesce": True,
                 "max_instances": 1,
                 "misfire_grace_time": 60,
             },
-        }]
+        })
+        return services
 
-    def check_schedules(self) -> List[dict]:
-        """执行所有到期计划。"""
+    def check_schedules(self, **kwargs) -> List[dict]:
+        """兜底执行所有到期计划。"""
         if not self._enabled or not self._schedule_service:
             return []
         return self._schedule_service.run_due()
+
+    def check_retries(self, **kwargs) -> List[dict]:
+        """执行达到五分钟等待期的失败计划。"""
+        if not self._enabled or not self._schedule_service:
+            return []
+        return self._schedule_service.retry_due()
+
+    def _execute_scheduled_plan(
+            self,
+            key: str,
+            action: str,
+            scheduled_text: str,
+            **kwargs,
+    ) -> Any:
+        """执行 date 服务绑定的单个计划。"""
+        if not self._enabled or not self._schedule_service:
+            return None
+        return self._schedule_service.execute_identity(
+            key,
+            action,
+            scheduled_text,
+        )
 
     def stop_service(self) -> None:
         """停止插件时释放服务引用。"""
