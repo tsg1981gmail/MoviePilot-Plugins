@@ -11,7 +11,7 @@
 
 - 插件 ID：`DownloaderTaskManager`
 - 插件目录：`plugins.v2/downloadertaskmanager/`
-- 新版本：`1.1.0`
+- 新版本：`1.1.1`
 - UI 模式：Vuetify JSON
 - 支持的下载器：qBittorrent、Transmission
 - 每个已启用下载器可分别设置一个开始时间、一个暂停时间
@@ -114,7 +114,7 @@ schedule_registry = {
 
 ## 调度机制
 
-插件注册一个 MoviePilot 公共服务，每 5 分钟运行一次。
+插件注册一个 MoviePilot 公共服务，每 5 秒运行一次，并在注册后立即检查。
 
 每次运行时：
 
@@ -126,7 +126,7 @@ schedule_registry = {
 6. 过滤出允许执行的任务哈希。
 7. 调用 `start_torrents(ids=hashes)` 或 `stop_torrents(ids=hashes)`。
 8. 成功后清空对应配置时间。
-9. 失败时保留计划，5 分钟后重试。
+9. 失败时保留计划，距上次失败 5 分钟后重试。
 
 服务使用线程锁避免两个检查周期重叠。
 
@@ -227,7 +227,7 @@ schedule_results = {
 
 - `get_command()` 返回空列表。
 - `get_api()` 返回空列表。
-- `get_service()` 返回一个 5 分钟间隔的调度服务。
+- `get_service()` 返回一个 5 秒间隔的调度服务，注册后立即运行。
 - 不保留 v1.0.0 的手动任务动作 API。
 
 ## 数据兼容
@@ -260,7 +260,7 @@ schedule_results = {
 - MoviePilot 重启后的过期计划仍会检查。
 - 跳过已删除下载器对应的遗留计划，并在下载器恢复后继续执行。
 - 页面只显示计划和结果，不渲染种子列表。
-- 插件版本与 `package.v2.json` 均为 `1.1.0`。
+- 插件版本与 `package.v2.json` 均为 `1.1.1`。
 
 ## 发布
 
