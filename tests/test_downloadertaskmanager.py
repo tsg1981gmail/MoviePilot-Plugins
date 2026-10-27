@@ -288,12 +288,13 @@ class ScheduleServiceTests(unittest.TestCase):
         self.config_snapshots = []
         self.registry_snapshots = []
         self.result_snapshots = []
+        self.now_value = now
         service = DownloaderScheduleService(
             helper=helper,
             config=self.config,
             registry={},
             results={},
-            now_fn=lambda: now,
+            now_fn=lambda: self.now_value,
             timezone=TZ,
             persist_config=self._persist_config,
             save_registry=self._save_registry,
@@ -461,6 +462,9 @@ class ScheduleServiceTests(unittest.TestCase):
         self.assertFalse(first["success"])
         self.assertIn(schedule_field(self.KEY, "start"), self.config)
         service.helper.services["QB"].instance.inactive = False
+        self.now_value = NOW + timedelta(minutes=4)
+        self.assertEqual([], service.run_due())
+        self.now_value = NOW + timedelta(minutes=5)
         second = service.run_due()[0]
 
         self.assertTrue(second["success"])
@@ -654,7 +658,7 @@ class PluginTests(unittest.TestCase):
             and (node.get("props") or {}).get("type") == "datetime-local"
         ]
 
-        self.assertEqual("1.1.0", plugin.plugin_version)
+        self.assertEqual("1.1.1", plugin.plugin_version)
         self.assertEqual(2, len(date_fields))
         self.assertIn(schedule_field(self.KEY, "start"), defaults)
         self.assertEqual([], plugin.get_api())
@@ -673,7 +677,7 @@ class PluginTests(unittest.TestCase):
         self.assertEqual("2026-10-27T09:00", defaults[legacy_field])
 
     def test_service_registration_and_check(self):
-        """启用时注册五分钟检查服务。"""
+        """启用时注册快速检查服务并立即运行一次。"""
         plugin = self._plugin()
         services = plugin.get_service()
         called = []
@@ -683,7 +687,10 @@ class PluginTests(unittest.TestCase):
 
         self.assertEqual(1, len(services))
         self.assertEqual("interval", services[0]["trigger"])
-        self.assertEqual(300, services[0]["kwargs"]["seconds"])
+        self.assertEqual(5, services[0]["kwargs"]["seconds"])
+        self.assertTrue(services[0]["kwargs"]["coalesce"])
+        self.assertEqual(1, services[0]["kwargs"]["max_instances"])
+        self.assertIsInstance(services[0]["kwargs"]["next_run_time"], datetime)
         self.assertEqual([True], called)
         self.assertEqual([], self._plugin(enabled=False).get_service())
 
@@ -740,7 +747,7 @@ class PackageTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertEqual("1.1.0", metadata["version"])
+        self.assertEqual("1.1.1", metadata["version"])
         self.assertEqual(DownloaderTaskManager.plugin_version, metadata["version"])
         self.assertIn("v1.1.0", metadata["history"])
         self.assertIn("BrushFlowLowFreq", package)
