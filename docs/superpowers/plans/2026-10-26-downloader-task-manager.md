@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 将 `DownloaderTaskManager` 升级到 1.1.0，按下载器配置一次性全部开始或暂停时间，只处理未完成的下载任务。
+**Goal:** 将 `DownloaderTaskManager` 升级到 1.1.1，按下载器配置一次性全部开始或暂停时间，只处理未完成的下载任务。
 
-**Architecture:** `runtime.py` 负责时间、键、进度、状态和候选任务过滤；`service.py` 负责计划注册表、到期计划排序、下载器调用和重试结果；`__init__.py` 负责动态配置页、状态页和每 5 分钟一次的 MoviePilot 服务。v1.0.0 的种子列表和手动动作 API 全部移除。
+**Architecture:** `runtime.py` 负责时间、键、进度、状态和候选任务过滤；`service.py` 负责计划注册表、到期计划排序、下载器调用和重试结果；`__init__.py` 负责动态配置页、状态页和每 5 秒一次的 MoviePilot 服务。v1.0.0 的种子列表和手动动作 API 全部移除。
 
 **Tech Stack:** Python 3、MoviePilot v2 `_PluginBase`、`DownloaderHelper`、`zoneinfo`、Vuetify JSON、pytest。
 
@@ -263,7 +263,7 @@ git commit -m "feat: schedule downloader bulk actions"
 
 覆盖：
 
-- `plugin_version == "1.1.0"`。
+- `plugin_version == "1.1.1"`。
 - 配置页为每个受支持下载器生成开始和暂停 `VTextField`，类型为 `datetime-local`。
 - 未启用时页面显示提示。
 - 状态页不出现任务表格或种子名称。
@@ -272,7 +272,7 @@ git commit -m "feat: schedule downloader bulk actions"
 - 配置错误优先级高于普通计划状态。
 - `get_api()` 返回 `[]`。
 - `get_command()` 返回 `[]`。
-- `get_service()` 仅在启用时返回一个 `interval` 300 秒服务。
+- `get_service()` 仅在启用时返回一个 `interval` 5 秒服务，并立即运行一次。
 - `check_schedules()` 调用计划服务。
 - `init_plugin()` 删除旧配置 `allow_bulk_actions` 并忽略 `last_action_result`。
 
@@ -289,7 +289,7 @@ Expected: FAIL，插件仍暴露 v1.0.0 配置、数据页或 API。
 插件元数据：
 
 ```python
-plugin_version = "1.1.0"
+plugin_version = "1.1.1"
 ```
 
 配置页：
@@ -311,7 +311,7 @@ def init_plugin(self, config=None):
     """初始化计划服务并迁移旧配置。"""
 
 def get_service(self):
-    """注册每 5 分钟运行的计划检查服务。"""
+    """注册每 5 秒运行的计划检查服务。"""
 
 def check_schedules(self):
     """执行所有到期计划。"""
@@ -359,7 +359,7 @@ git commit -m "feat: add one-time downloader schedules"
 
 ---
 
-### Task 4: 1.1.0 元数据与文档
+### Task 4: 1.1.1 元数据与文档
 
 **Files:**
 - Modify: `package.v2.json`
@@ -370,9 +370,9 @@ git commit -m "feat: add one-time downloader schedules"
 
 验证：
 
-- 包索引版本为 `1.1.0`。
+- 包索引版本为 `1.1.1`。
 - 包版本等于类版本。
-- `history["v1.1.0"]` 描述一次性定时调度。
+- `history["v1.1.1"]` 描述快速检查修复。
 - `BrushFlowLowFreq` 条目仍存在。
 - README 说明每个下载器独立时间、只操作未完成任务、5 分钟重试和无种子列表。
 
@@ -390,9 +390,9 @@ Expected: FAIL，包索引仍为 `1.0.0`。
 
 ```json
 {
-  "version": "1.1.0",
+  "version": "1.1.1",
   "history": {
-    "v1.1.0": "改为按下载器一次性定时全部开始或暂停，仅处理未完成下载任务，失败每5分钟重试"
+    "v1.1.1": "定时检查缩短至5秒并立即执行首次检查，失败仍每5分钟重试，修复计划到点后明显延迟"
   }
 }
 ```
@@ -416,12 +416,12 @@ Expected: PASS。
 
 ```bash
 git add package.v2.json plugins.v2/downloadertaskmanager/README.md tests/test_downloadertaskmanager.py
-git commit -m "docs: release downloader schedules 1.1.0"
+git commit -m "docs: release downloader schedules 1.1.1"
 ```
 
 ---
 
-### Task 5: 回归验证和发布 1.1.0
+### Task 5: 回归验证和发布 1.1.1
 
 **Files:**
 - Modify: local code only if verification exposes a defect
@@ -483,10 +483,10 @@ GH_TOKEN=$(gh auth token) python3 /tmp/publish_plugin.py push \
   --local-repo . \
   --package-version v2 \
   --branch main \
-  --message "Publish DownloaderTaskManager v1.1.0"
+  --message "Publish DownloaderTaskManager v1.1.1"
 ```
 
-Expected: `success: true`，远端版本 `1.1.0`。
+Expected: `success: true`，远端版本 `1.1.1`。
 
 - [ ] **Step 5: 同步测试和文档**
 
