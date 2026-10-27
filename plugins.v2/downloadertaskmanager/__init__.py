@@ -16,7 +16,7 @@ class DownloaderTaskManager(_PluginBase):
     plugin_name = "下载器定时任务"
     plugin_desc = "按下载器在指定时间全部开始或暂停未完成的下载任务。"
     plugin_icon = "Qbittorrent_A.png"
-    plugin_version = "1.1.0"
+    plugin_version = "1.1.1"
     plugin_author = "tsg1981gmail"
     author_url = "https://github.com/tsg1981gmail"
     plugin_config_prefix = "downloadertaskmanager_"
@@ -226,7 +226,13 @@ class DownloaderTaskManager(_PluginBase):
             "name": "下载器定时任务检查",
             "trigger": "interval",
             "func": self.check_schedules,
-            "kwargs": {"seconds": 300},
+            "kwargs": {
+                "seconds": 5,
+                "next_run_time": datetime.now(self._timezone),
+                "coalesce": True,
+                "max_instances": 1,
+                "misfire_grace_time": 60,
+            },
         }]
 
     def check_schedules(self) -> List[dict]:
