@@ -186,11 +186,7 @@ class DownloaderScheduleService:
 
     def due_plans(self, now: Optional[datetime] = None) -> List[dict]:
         """返回到期且合法的计划。"""
-        now = now or self._now()
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=self.timezone)
-        else:
-            now = now.astimezone(self.timezone)
+        now = self._normalize_now(now)
         return [
             plan for plan in self.list_plans()
             if not plan["error"]
@@ -199,6 +195,74 @@ class DownloaderScheduleService:
             and not self._already_completed(plan)
             and not self._retry_waiting(plan, now)
         ]
+
+    def retry_due(self, now: Optional[datetime] = None) -> List[dict]:
+        """只执行达到五分钟等待期的失败计划。"""
+        with self.lock:
+            now = self._normalize_now(now)
+            results = []
+            for plan in self.list_plans():
+                if plan["error"] or not plan["scheduled_at"]:
+                    continue
+                result = self._plan_result(plan)
+                if (
+                        not result
+                        or result.get("success")
+                        or result.get("scheduled_at") != plan["scheduled_text"]
+                        or self._retry_waiting(plan, now)
+                ):
+                    continue
+                results.append(self.execute_plan(plan))
+            return results
+
+    def next_run_at(
+            self,
+            plan: dict,
+            now: Optional[datetime] = None,
+    ) -> Optional[datetime]:
+        """计算计划应注册的一次性执行时间。"""
+        now = self._normalize_now(now)
+        result = self._plan_result(plan)
+        if result.get("success") and result.get(
+                "scheduled_at"
+        ) == plan["scheduled_text"]:
+            return None
+        if result and result.get("scheduled_at") == plan["scheduled_text"]:
+            try:
+                retry_at = datetime.fromisoformat(
+                    str(result.get("executed_at"))
+                )
+            except (TypeError, ValueError):
+                retry_at = now
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=self.timezone)
+            retry_at += RETRY_INTERVAL
+            return retry_at if retry_at > now else now + timedelta(seconds=1)
+        scheduled_at = plan["scheduled_at"]
+        return (
+            scheduled_at
+            if scheduled_at and scheduled_at > now
+            else now + timedelta(seconds=1)
+        )
+
+    def execute_identity(
+            self,
+            key: str,
+            action: str,
+            scheduled_text: str,
+    ) -> Optional[dict]:
+        """执行与稳定键绑定的当前计划。"""
+        with self.lock:
+            for plan in self.list_plans():
+                if (
+                        plan["key"] == key
+                        and plan["action"] == action
+                        and plan["scheduled_text"] == scheduled_text
+                        and not plan["error"]
+                        and not self._already_completed(plan)
+                ):
+                    return self.execute_plan(plan)
+        return None
 
     def execute_plan(self, plan: dict) -> dict:
         """执行单个计划并返回结构化结果。"""
@@ -411,10 +475,7 @@ class DownloaderScheduleService:
 
     def _already_completed(self, plan: dict) -> bool:
         """判断当前计划时间是否已有成功执行结果。"""
-        result = (
-            (self.results.get(plan["key"]) or {})
-            .get(plan["action"]) or {}
-        )
+        result = self._plan_result(plan)
         return bool(
             result.get("success")
             and result.get("scheduled_at") == plan["scheduled_text"]
@@ -422,10 +483,7 @@ class DownloaderScheduleService:
 
     def _retry_waiting(self, plan: dict, now: datetime) -> bool:
         """判断失败计划是否仍在五分钟重试等待期。"""
-        result = (
-            (self.results.get(plan["key"]) or {})
-            .get(plan["action"]) or {}
-        )
+        result = self._plan_result(plan)
         if (
                 not result
                 or result.get("success")
@@ -439,3 +497,17 @@ class DownloaderScheduleService:
         if executed_at.tzinfo is None:
             executed_at = executed_at.replace(tzinfo=self.timezone)
         return now < executed_at + RETRY_INTERVAL
+
+    def _plan_result(self, plan: dict) -> dict:
+        """读取计划当前动作的最近结果。"""
+        return (
+            (self.results.get(plan["key"]) or {})
+            .get(plan["action"]) or {}
+        )
+
+    def _normalize_now(self, now: Optional[datetime]) -> datetime:
+        """将当前时间转换为插件时区。"""
+        now = now or self._now()
+        if now.tzinfo is None:
+            return now.replace(tzinfo=self.timezone)
+        return now.astimezone(self.timezone)
