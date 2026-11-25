@@ -36,13 +36,28 @@ except ImportError:
     normalize_title = _module.normalize_title
 
 
+def _fnv_log(level: str, message: str) -> None:
+    """把 MoviePilot 日志对象适配成核心逻辑需要的可调用日志函数。"""
+    text = str(message)
+    lv = str(level or "INFO").upper()
+    try:
+        if lv in ("ERROR", "CRITICAL", "FATAL"):
+            logger.error(text)
+        elif lv in ("WARN", "WARNING"):
+            logger.warning(text)
+        else:
+            logger.info(text)
+    except Exception:
+        pass
+
+
 class FnVsync(_PluginBase):
     """飞牛影视双 NAS 播放记录同步。"""
 
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -333,9 +348,9 @@ class FnVsync(_PluginBase):
             logger.error("飞牛双机同步：两台 NAS 的地址、账号、密码必须填写完整")
             return None, None
         client_a = FnClient(self._host_a, self._user_a, self._pass_a,
-                            self._code_a, logger=logger)
+                            self._code_a, logger=_fnv_log)
         client_b = FnClient(self._host_b, self._user_b, self._pass_b,
-                            self._code_b, logger=logger)
+                            self._code_b, logger=_fnv_log)
         if not client_a.login():
             logger.error(f"飞牛双机同步：NAS A 登录失败 - {client_a.last_error}")
             client_a.close()
@@ -358,7 +373,7 @@ class FnVsync(_PluginBase):
                     return None
 
                 baseline = self.get_data("baseline") or {}
-                matcher = MediaMatcher(logger=logger)
+                matcher = MediaMatcher(logger=_fnv_log)
                 direction = self._direction
                 # 单向模式下，把对端客户端传成同一实例由引擎策略处理：
                 # 这里通过替换 _apply 目标实现更稳妥，简化为按方向决定是否允许写入
@@ -366,7 +381,7 @@ class FnVsync(_PluginBase):
                     client_a, client_b, matcher, baseline,
                     sync_watched=self._sync_watched,
                     conflict_strategy=self._conflict,
-                    logger=logger,
+                    logger=_fnv_log,
                 )
 
                 if direction != "both":

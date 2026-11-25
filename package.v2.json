@@ -130,11 +130,12 @@
     "name": "飞牛播放记录同步插件",
     "description": "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向、IMDb/TMDB/标题年份匹配。",
     "labels": "飞牛,影视,同步",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Moviepilot_A.png",
     "author": "田树刚",
     "level": 1,
     "history": {
+      "v1.0.3": "修复 LoggerManager 不可调用导致的同步异常",
       "v1.0.2": "新增「立即运行一次」开关，勾选保存后马上同步一次并自动恢复定时运行",
       "v1.0.1": "修复配置表单返回结构，插件设置页可正常显示 NAS 地址与账号密码",
       "v1.0.0": "首版：双 NAS 播放进度与已看完标记双向同步，基线驱动避免互相覆盖"
