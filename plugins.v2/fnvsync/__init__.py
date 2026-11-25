@@ -7,9 +7,10 @@
 
 import json
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.log import logger
@@ -41,7 +42,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.1"
+    plugin_version = "1.0.2"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -49,6 +50,7 @@ class FnVsync(_PluginBase):
     auth_level = 1
 
     _enabled = False
+    _run_now = False
     _last_result: Optional[dict] = None
     _last_time = ""
     _history: List[dict] = []
@@ -72,6 +74,7 @@ class FnVsync(_PluginBase):
     def init_plugin(self, config: dict = None):
         config = config or {}
         self._enabled = bool(config.get("enabled"))
+        self._run_now = bool(config.get("run_now"))
         self._host_a = config.get("host_a") or ""
         self._user_a = config.get("user_a") or ""
         self._pass_a = config.get("pass_a") or ""
@@ -129,6 +132,16 @@ class FnVsync(_PluginBase):
     def get_service(self) -> List[Dict[str, Any]]:
         if not self._enabled:
             return []
+        if self._run_now:
+            return [
+                {
+                    "id": "FnVsync.Once",
+                    "name": "飞牛播放记录同步插件（立即运行一次）",
+                    "trigger": DateTrigger(run_date=datetime.now() + timedelta(seconds=3)),
+                    "func": self._run_once,
+                    "kwargs": {},
+                }
+            ]
         return [
             {
                 "id": "FnVsync.Sync",
@@ -138,6 +151,17 @@ class FnVsync(_PluginBase):
                 "kwargs": {},
             }
         ]
+
+    def _run_once(self) -> None:
+        """立即运行一次后，自动关闭一次性开关，恢复按间隔定时运行。"""
+        try:
+            self.sync()
+        finally:
+            self._run_now = False
+            try:
+                self.update_config({"run_now": False})
+            except Exception as exc:
+                logger.error(f"飞牛播放记录同步：关闭立即运行开关失败 - {exc}")
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         def field(model: str, label: str, cols: int = 6, password: bool = False):
@@ -170,14 +194,26 @@ class FnVsync(_PluginBase):
                 "content": [
                     {
                         "component": "VRow",
-                        "content": [{
-                            "component": "VCol",
-                            "props": {"cols": 12},
-                            "content": [{
-                                "component": "VSwitch",
-                                "props": {"model": "enabled", "label": "启用插件"},
-                            }],
-                        }],
+                        "content": [
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "enabled", "label": "启用插件"},
+                                }],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "run_now",
+                                              "label": "立即运行一次",
+                                              "hint": "勾选并保存后马上同步一次，之后自动恢复按间隔运行"},
+                                }],
+                            },
+                        ],
                     },
                     {
                         "component": "VDivider",
@@ -243,6 +279,7 @@ class FnVsync(_PluginBase):
             }
         ], {
             "enabled": False,
+            "run_now": False,
             "host_a": "", "user_a": "", "pass_a": "", "code_a": "",
             "host_b": "", "user_b": "", "pass_b": "", "code_b": "",
             "direction": "both", "conflict": "keep", "sync_watched": True,
