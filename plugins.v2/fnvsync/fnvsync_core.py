@@ -334,6 +334,36 @@ class FnClient:
             return []
         return [self._to_state(row) for row in data if row.get("guid")]
 
+    def get_children(self, parent_guid: str, page_size: int = 200,
+                     max_pages: int = 10) -> List[MediaState]:
+        """按父级标识取下一层：剧集取到季，季取到分集，目录取到里面的影片。"""
+        if not parent_guid:
+            return []
+        rows: List[MediaState] = []
+        seen = set()
+        for page in range(1, max_pages + 1):
+            data = self.request("/item/list", "POST", {
+                "tags": {},
+                "sort_type": "ASC",
+                "sort_column": "create_time",
+                "page": page,
+                "page_size": page_size,
+                "parent_guid": parent_guid,
+            })
+            if not isinstance(data, dict):
+                break
+            batch = data.get("list") or []
+            total = int(data.get("total") or data.get("total_count") or 0)
+            for row in batch:
+                guid = row.get("guid")
+                if not guid or guid in seen:
+                    continue
+                seen.add(guid)
+                rows.append(self._to_state(row))
+            if len(rows) >= total or not batch:
+                break
+        return rows
+
     def _to_state(self, row: dict) -> MediaState:
         raw_type = str(row.get("type") or "").lower()
         trim_id = str(row.get("trim_id") or "")
@@ -547,69 +577,125 @@ class SyncEngine:
         result["ambiguous"] = ambiguous
 
         for state_a, state_b in pairs:
-            # 基线键用两端 guid 组合，刮削源变化也不会让基线失效
-            key = f"{state_a.guid}|{state_b.guid}"
-            record = self.baseline.get(key)
-            base_a = self._restore(record.get("a")) if record else None
-            base_b = self._restore(record.get("b")) if record else None
+            self._sync_pair(state_a, state_b, result, dry_run, 0)
+        return result
 
-            a_changed = base_a is not None and state_a != base_a
-            b_changed = base_b is not None and state_b != base_b
+    # 需要向下展开的类型：剧集、季、目录、合集
+    _TREE_TYPES = {"tv", "show", "series", "season", "directory", "folder", "collection"}
 
-            if record is None:
-                self.baseline[key] = {
-                    "a": self._snapshot(state_a),
-                    "b": self._snapshot(state_b),
-                    "title": state_a.title,
-                }
-                result["skipped"] += 1
-                continue
+    def _sync_pair(self, state_a: MediaState, state_b: MediaState,
+                   result: dict, dry_run: bool, depth: int) -> None:
+        """条目级配对：能展开的往下展开，分集按季集号对应，其余按标题匹配。"""
+        if depth < 4 and (state_a.media_type in self._TREE_TYPES
+                          or state_b.media_type in self._TREE_TYPES):
+            children_a = self.client_a.get_children(state_a.guid)
+            children_b = self.client_b.get_children(state_b.guid)
+            if children_a and children_b:
+                self._sync_children(children_a, children_b, result, dry_run, depth + 1)
+                return
+        self._sync_leaf(state_a, state_b, result, dry_run)
 
-            if not a_changed and not b_changed:
-                result["skipped"] += 1
-                continue
+    def _sync_children(self, children_a: List[MediaState], children_b: List[MediaState],
+                       result: dict, dry_run: bool, depth: int) -> None:
+        eps_a = {(c.season, c.episode): c for c in children_a
+                 if c.media_type == "episode" and (c.season or c.episode)}
+        eps_b = {(c.season, c.episode): c for c in children_b
+                 if c.media_type == "episode" and (c.season or c.episode)}
+        for key in sorted(set(eps_a) & set(eps_b)):
+            self._sync_leaf(eps_a[key], eps_b[key], result, dry_run)
 
-            if a_changed and b_changed:
-                if state_a == state_b:
-                    result["skipped"] += 1
-                else:
-                    result["conflicts"] += 1
-                    chosen = self._resolve_conflict(state_a, state_b)
-                    if chosen is None:
-                        # 保留冲突：不更新基线，下次仍能识别为同一冲突
-                        result["skipped"] += 1
-                        continue
-                    else:
-                        target, source_state = (
-                            (self.client_b, state_a) if chosen == "a"
-                            else (self.client_a, state_b)
-                        )
-                        if not dry_run:
-                            ok = self._apply(target, source_state, self._restore(record.get("b" if chosen == "a" else "a")))
-                            result["synced" if ok else "failed"] += 1
-                        else:
-                            result["synced"] += 1
-                        result["changes"].append(f"{state_a.title}: 冲突按 {chosen} 端处理")
+        rest_a = [c for c in children_a if c.media_type != "episode"]
+        rest_b = [c for c in children_b if c.media_type != "episode"]
+        if rest_a and rest_b:
+            pairs, _ = self.matcher.match(rest_a, rest_b)
+            for state_a, state_b in pairs:
+                self._sync_pair(state_a, state_b, result, dry_run, depth)
+
+    def _sync_leaf(self, state_a: MediaState, state_b: MediaState,
+                   result: dict, dry_run: bool) -> None:
+        """叶子条目：按基线判断哪一端变了，然后推给对方。"""
+        # 基线键用两端 guid 组合，刮削源变化也不会让基线失效
+        key = f"{state_a.guid}|{state_b.guid}"
+        record = self.baseline.get(key)
+        base_a = self._restore(record.get("a")) if record else None
+        base_b = self._restore(record.get("b")) if record else None
+
+        a_changed = base_a is not None and state_a != base_a
+        b_changed = base_b is not None and state_b != base_b
+
+        if record is None:
+            # 首次遇到：两端不一致时按冲突策略拉齐一次，一致就只记基线
+            if state_a != state_b:
+                self._first_sight_sync(state_a, state_b, key, result, dry_run)
             else:
-                if a_changed:
-                    target, source_state, prev = self.client_b, state_a, base_a
-                    direction = "A→B"
-                else:
-                    target, source_state, prev = self.client_a, state_b, base_b
-                    direction = "B→A"
+                result["skipped"] += 1
+            self._save_baseline(key, state_a, state_b)
+            return
+
+        if not a_changed and not b_changed:
+            result["skipped"] += 1
+            return
+
+        if a_changed and b_changed:
+            if state_a == state_b:
+                result["skipped"] += 1
+            else:
+                result["conflicts"] += 1
+                chosen = self._resolve_conflict(state_a, state_b)
+                if chosen is None:
+                    # 保留冲突：不更新基线，下次仍能识别为同一冲突
+                    result["skipped"] += 1
+                    return
+                target, source_state = (
+                    (self.client_b, state_a) if chosen == "a"
+                    else (self.client_a, state_b)
+                )
                 if not dry_run:
-                    ok = self._apply(target, source_state, prev)
+                    ok = self._apply(target, source_state,
+                                     self._restore(record.get("b" if chosen == "a" else "a")))
                     result["synced" if ok else "failed"] += 1
                 else:
                     result["synced"] += 1
-                result["changes"].append(f"{state_a.title}: {direction} {source_state.ts}秒")
+                result["changes"].append(f"{state_a.title}: 冲突按 {chosen} 端处理")
+        else:
+            if a_changed:
+                target, source_state, prev = self.client_b, state_a, base_a
+                direction = "A→B"
+            else:
+                target, source_state, prev = self.client_a, state_b, base_b
+                direction = "B→A"
+            if not dry_run:
+                ok = self._apply(target, source_state, prev)
+                result["synced" if ok else "failed"] += 1
+            else:
+                result["synced"] += 1
+            result["changes"].append(f"{state_a.title}: {direction} {source_state.ts}秒")
 
-            self.baseline[key] = {
-                "a": self._snapshot(state_a),
-                "b": self._snapshot(state_b),
-                "title": state_a.title,
-            }
-        return result
+        self._save_baseline(key, state_a, state_b)
+
+    def _first_sight_sync(self, state_a: MediaState, state_b: MediaState,
+                          key: str, result: dict, dry_run: bool) -> None:
+        """首次配对且两端状态不同：按冲突策略决定要不要拉齐。"""
+        chosen = self._resolve_conflict(state_a, state_b)
+        if chosen is None:
+            result["skipped"] += 1
+            return
+        target, source_state = (
+            (self.client_b, state_a) if chosen == "a" else (self.client_a, state_b)
+        )
+        if not dry_run:
+            ok = self._apply(target, source_state, None)
+            result["synced" if ok else "failed"] += 1
+        else:
+            result["synced"] += 1
+        result["changes"].append(f"{state_a.title}: 首次拉齐按 {chosen} 端（{source_state.ts}秒）")
+
+    def _save_baseline(self, key: str, state_a: MediaState, state_b: MediaState) -> None:
+        self.baseline[key] = {
+            "a": self._snapshot(state_a),
+            "b": self._snapshot(state_b),
+            "title": state_a.title,
+        }
 
     def _resolve_conflict(self, a: MediaState, b: MediaState) -> Optional[str]:
         if self.conflict_strategy == "a":
