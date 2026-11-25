@@ -41,7 +41,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -240,15 +240,14 @@ class FnVsync(_PluginBase):
                         ],
                     },
                 ],
-            },
-            {
-                "enabled": False,
-                "host_a": "", "user_a": "", "pass_a": "", "code_a": "",
-                "host_b": "", "user_b": "", "pass_b": "", "code_b": "",
-                "direction": "both", "conflict": "keep", "sync_watched": True,
-                "notify": True, "interval": 15,
-            },
-        ]
+            }
+        ], {
+            "enabled": False,
+            "host_a": "", "user_a": "", "pass_a": "", "code_a": "",
+            "host_b": "", "user_b": "", "pass_b": "", "code_b": "",
+            "direction": "both", "conflict": "keep", "sync_watched": True,
+            "notify": True, "interval": 15,
+        }
 
     def get_page(self) -> List[dict]:
         status = self._last_result or {}
