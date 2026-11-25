@@ -57,7 +57,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.6"
+    plugin_version = "1.0.7"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -66,8 +66,10 @@ class FnVsync(_PluginBase):
 
     _enabled = False
     _run_now = False
+    _check_now = False
     _last_result: Optional[dict] = None
     _last_time = ""
+    _conn_status: Optional[dict] = None
     _history: List[dict] = []
     _lock = threading.RLock()
     # init_plugin 收到的原始配置快照，用于 update_config 整份回写时保留全部字段
@@ -95,6 +97,7 @@ class FnVsync(_PluginBase):
         self._config_snapshot = dict(config)
         self._enabled = bool(config.get("enabled"))
         self._run_now = bool(config.get("run_now"))
+        self._check_now = bool(config.get("check_now"))
         self._host_a = config.get("host_a") or ""
         self._user_a = config.get("user_a") or ""
         self._pass_a = config.get("pass_a") or ""
@@ -113,6 +116,7 @@ class FnVsync(_PluginBase):
         self._notify = bool(config.get("notify", True))
         self._last_result = self.get_data("last_result")
         self._history = self.get_data("history") or []
+        self._conn_status = self.get_data("conn_status")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -147,12 +151,18 @@ class FnVsync(_PluginBase):
                 "summary": "同步状态",
                 "description": "返回最近一次同步结果与历史",
             },
+            {
+                "path": "/test",
+                "endpoint": self.api_test,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "检查连接",
+                "description": "只登录两台 NAS 验证地址与账号密码，不同步播放记录",
+            },
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
-        if not self._enabled:
-            return []
-        if self._run_now:
+        if self._run_now and self._enabled:
             return [
                 {
                     "id": "FnVsync.Once",
@@ -162,6 +172,19 @@ class FnVsync(_PluginBase):
                     "kwargs": {},
                 }
             ]
+        # 连接检查只登录不同步，未启用插件时也允许执行，方便先验证地址与账号
+        if self._check_now:
+            return [
+                {
+                    "id": "FnVsync.Check",
+                    "name": "飞牛播放记录同步插件（检查连接）",
+                    "trigger": DateTrigger(run_date=datetime.now() + timedelta(seconds=2)),
+                    "func": self._check_once,
+                    "kwargs": {},
+                }
+            ]
+        if not self._enabled:
+            return []
         return [
             {
                 "id": "FnVsync.Sync",
@@ -172,6 +195,39 @@ class FnVsync(_PluginBase):
             }
         ]
 
+    def _base_config(self) -> Dict[str, Any]:
+        """基于配置快照拼出完整的配置字典，供整份回写使用。"""
+        config = dict(getattr(self, "_config_snapshot", None) or {})
+        config.update({
+            "enabled": self._enabled,
+            "host_a": self._host_a,
+            "user_a": self._user_a,
+            "pass_a": self._pass_a,
+            "code_a": self._code_a,
+            "host_b": self._host_b,
+            "user_b": self._user_b,
+            "pass_b": self._pass_b,
+            "code_b": self._code_b,
+            "direction": self._direction,
+            "sync_watched": self._sync_watched,
+            "conflict": self._conflict,
+            "interval": self._interval,
+            "notify": self._notify,
+        })
+        return config
+
+    def _write_back_config(self) -> None:
+        """把一次性开关关掉并整份回写配置。
+
+        MoviePilot 的 update_config 是整份覆盖，只传开关会把地址、账号、密码一起清空，
+        所以必须带全所有字段。
+        """
+        config = self._base_config()
+        config["run_now"] = False
+        config["check_now"] = False
+        self._config_snapshot = dict(config)
+        self.update_config(config)
+
     def _run_once(self) -> None:
         """立即运行一次后，自动关闭一次性开关，恢复按间隔定时运行。"""
         try:
@@ -179,30 +235,57 @@ class FnVsync(_PluginBase):
         finally:
             self._run_now = False
             try:
-                # MoviePilot 的 update_config 是整份覆盖：必须基于原配置快照回写全部字段，
-                # 只传 run_now 会把 NAS 地址、账号、密码一起清空
-                config = dict(getattr(self, "_config_snapshot", None) or {})
-                config.update({
-                    "enabled": self._enabled,
-                    "run_now": False,
-                    "host_a": self._host_a,
-                    "user_a": self._user_a,
-                    "pass_a": self._pass_a,
-                    "code_a": self._code_a,
-                    "host_b": self._host_b,
-                    "user_b": self._user_b,
-                    "pass_b": self._pass_b,
-                    "code_b": self._code_b,
-                    "direction": self._direction,
-                    "sync_watched": self._sync_watched,
-                    "conflict": self._conflict,
-                    "interval": self._interval,
-                    "notify": self._notify,
-                })
-                self._config_snapshot = dict(config)
-                self.update_config(config)
+                self._write_back_config()
             except Exception as exc:
                 logger.error(f"飞牛播放记录同步：关闭立即运行开关失败 - {exc}")
+
+    def _check_once(self) -> None:
+        """保存后只检查两台 NAS 能否登录，不读写播放记录。"""
+        try:
+            self.test_connection()
+        finally:
+            self._check_now = False
+            try:
+                self._write_back_config()
+            except Exception as exc:
+                logger.error(f"飞牛播放记录同步：关闭连接检查开关失败 - {exc}")
+
+    def test_connection(self) -> Dict[str, Any]:
+        """逐台登录验证，结果写日志并保存到插件数据。"""
+        result: Dict[str, Any] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        for key, name, host, user, password, code in (
+            ("a", "NAS A", self._host_a, self._user_a, self._pass_a, self._code_a),
+            ("b", "NAS B", self._host_b, self._user_b, self._pass_b, self._code_b),
+        ):
+            if not all([host, user, password]):
+                item = {"ok": False, "host": host, "error": "地址、用户名或密码没有填全"}
+            else:
+                client = FnClient(host, user, password, code, logger=_fnv_log)
+                try:
+                    ok = client.login()
+                    item = {
+                        "ok": ok,
+                        "host": client.host,
+                        "error": "" if ok else (client.last_error or "登录失败"),
+                    }
+                except Exception as exc:
+                    item = {"ok": False, "host": client.host, "error": str(exc)}
+                finally:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+            result[key] = item
+            if item["ok"]:
+                logger.info(f"飞牛连接检查：{name} 登录成功 - {item['host']}")
+            else:
+                logger.error(f"飞牛连接检查：{name} 登录失败 - {item['error']}")
+        self._conn_status = result
+        try:
+            self.save_data("conn_status", result)
+        except Exception as exc:
+            logger.error(f"飞牛连接检查：保存检查结果失败 - {exc}")
+        return result
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         def field(model: str, label: str, cols: int = 6, password: bool = False):
@@ -238,7 +321,7 @@ class FnVsync(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [{
                                     "component": "VSwitch",
                                     "props": {"model": "enabled", "label": "启用插件"},
@@ -246,12 +329,22 @@ class FnVsync(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [{
                                     "component": "VSwitch",
                                     "props": {"model": "run_now",
                                               "label": "立即运行一次",
                                               "hint": "勾选并保存后马上同步一次，之后自动恢复按间隔运行"},
+                                }],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "check_now",
+                                              "label": "保存后检查连接",
+                                              "hint": "只登录两台 NAS 验证地址和账号密码，不同步数据；结果写在日志和插件页"},
                                 }],
                             },
                         ],
@@ -321,6 +414,7 @@ class FnVsync(_PluginBase):
         ], {
             "enabled": False,
             "run_now": False,
+            "check_now": False,
             "host_a": "", "user_a": "", "pass_a": "", "code_a": "",
             "host_b": "", "user_b": "", "pass_b": "", "code_b": "",
             "direction": "both", "conflict": "keep", "sync_watched": True,
@@ -343,14 +437,32 @@ class FnVsync(_PluginBase):
             lines.append("尚未执行过同步。保存配置后可在服务中手动触发，或等待定时任务。")
 
         changes = status.get("changes") or []
-        content = [
+        content = []
+        conn = self._conn_status or {}
+        if conn.get("time"):
+            parts = []
+            for key, name in (("a", "NAS A"), ("b", "NAS B")):
+                item = conn.get(key) or {}
+                if item.get("ok"):
+                    parts.append(f"{name} 连接正常")
+                else:
+                    parts.append(f"{name} 连不上：{item.get('error') or '未知原因'}")
+            content.append({
+                "component": "VAlert",
+                "props": {
+                    "type": "success" if all((conn.get(k) or {}).get("ok") for k in ("a", "b")) else "error",
+                    "variant": "tonal", "density": "compact",
+                    "text": f"连接检查 {conn['time']}：" + "；".join(parts),
+                },
+            })
+        content.append(
             {
                 "component": "VAlert",
                 "props": {"type": "info", "variant": "tonal",
                           "text": " ".join(lines) + "。手动同步：设定 → 服务中点运行，或发命令 /fnvsync",
                           "density": "compact"},
-            },
-        ]
+            }
+        )
         if changes:
             content.append({
                 "component": "VCard",
@@ -460,6 +572,11 @@ class FnVsync(_PluginBase):
     def api_run(self) -> dict:
         result = self.sync()
         return {"success": result is not None, "data": result}
+
+    def api_test(self) -> dict:
+        result = self.test_connection()
+        ok = bool(result.get("a", {}).get("ok") and result.get("b", {}).get("ok"))
+        return {"success": ok, "data": result}
 
     def api_status(self) -> dict:
         return {
