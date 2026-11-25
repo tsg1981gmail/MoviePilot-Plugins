@@ -175,6 +175,7 @@ class FnClient:
         method: str = "GET",
         data: Optional[dict] = None,
         retry: bool = True,
+        _tries: int = 0,
     ) -> Optional[Any]:
         """统一请求入口，自动处理签名与令牌过期重试。"""
         if not api.startswith("/"):
@@ -216,6 +217,10 @@ class FnClient:
             code = int(payload.get("code", -1))
             if code == 0:
                 return payload.get("data")
+            if code == -5 and _tries < 2:
+                # 连续写入过快时飞牛会回 -5 Permission Error，退避后重试
+                time.sleep(0.6 + 0.6 * _tries)
+                return self.request(api, method, data, retry=retry, _tries=_tries + 1)
             if retry and code in (-2, -15, -401):
                 self.token = ""
                 if self.login():
@@ -542,15 +547,45 @@ class SyncEngine:
     def _target_of(self, state: MediaState, source: FnClient) -> FnClient:
         return self.client_b if source is self.client_a else self.client_a
 
-    def _apply(self, target: FnClient, source_state: MediaState, base_state: Optional[MediaState]) -> bool:
-        """把来源状态写入目标端，按变化项精确写入。"""
+    @staticmethod
+    def _retarget(state: MediaState, guid: str) -> MediaState:
+        """复制一份状态并换上接收端自己的 guid。
+
+        来源端的 media_guid 是那台机器上的媒体文件标识，带过来在另一台无效，
+        直接提交飞牛会回 -5 Permission Error，必须清空后按接收端重新解析。
+        """
+        return MediaState(
+            guid=guid,
+            title=state.title,
+            media_type=state.media_type,
+            imdb_id=state.imdb_id,
+            tmdb_id=state.tmdb_id,
+            season=state.season,
+            episode=state.episode,
+            watched=state.watched,
+            ts=state.ts,
+            duration=state.duration,
+            media_guid="",
+        )
+
+    def _apply(self, target: FnClient, source_state: MediaState,
+               base_state: Optional[MediaState], target_guid: str) -> bool:
+        """把来源状态写入目标端，按变化项精确写入。
+
+        target_guid 必须是接收端自己的条目标识，不能用来源端的。
+        """
+        if not target_guid:
+            self.log("ERROR", f"缺少接收端标识，跳过写入: {source_state.title}")
+            return False
         ok = True
         if base_state is None or source_state.ts != base_state.ts:
-            ok = target.set_progress(source_state) and ok
+            ok = target.set_progress(self._retarget(source_state, target_guid)) and ok
         if self.sync_watched and (
             base_state is None or source_state.watched != base_state.watched
         ):
-            ok = target.set_watched(source_state.guid, source_state.watched) and ok
+            ok = target.set_watched(target_guid, source_state.watched) and ok
+        # 每条之间留一点间隔，连续高速写入会触发服务端 -5
+        time.sleep(0.15)
         return ok
 
     def run(self, dry_run: bool = False) -> dict:
@@ -626,16 +661,21 @@ class SyncEngine:
         if record is None:
             # 首次遇到：两端不一致时按冲突策略拉齐一次，一致就只记基线
             if state_a != state_b:
-                self._first_sight_sync(state_a, state_b, key, result, dry_run)
+                after = self._first_sight_sync(state_a, state_b, result, dry_run)
+                # 写入失败不记基线，下次还会重试，避免失败被基线掩盖
+                if after:
+                    self._save_baseline(key, *after)
             else:
                 result["skipped"] += 1
-            self._save_baseline(key, state_a, state_b)
+                self._save_baseline(key, state_a, state_b)
             return
 
         if not a_changed and not b_changed:
             result["skipped"] += 1
             return
 
+        applied = True
+        after = (state_a, state_b)
         if a_changed and b_changed:
             if state_a == state_b:
                 result["skipped"] += 1
@@ -646,49 +686,73 @@ class SyncEngine:
                     # 保留冲突：不更新基线，下次仍能识别为同一冲突
                     result["skipped"] += 1
                     return
-                target, source_state = (
-                    (self.client_b, state_a) if chosen == "a"
-                    else (self.client_a, state_b)
-                )
+                if chosen == "a":
+                    target, source_state, target_guid = self.client_b, state_a, state_b.guid
+                else:
+                    target, source_state, target_guid = self.client_a, state_b, state_a.guid
                 if not dry_run:
                     ok = self._apply(target, source_state,
-                                     self._restore(record.get("b" if chosen == "a" else "a")))
+                                     self._restore(record.get("b" if chosen == "a" else "a")),
+                                     target_guid)
                     result["synced" if ok else "failed"] += 1
+                    applied = ok
                 else:
                     result["synced"] += 1
+                after = self._sides_after(state_a, state_b, source_state, chosen)
                 result["changes"].append(f"{state_a.title}: 冲突按 {chosen} 端处理")
         else:
             if a_changed:
-                target, source_state, prev = self.client_b, state_a, base_a
+                target, source_state = self.client_b, state_a
+                target_guid, prev = state_b.guid, base_a
                 direction = "A→B"
             else:
-                target, source_state, prev = self.client_a, state_b, base_b
+                target, source_state = self.client_a, state_b
+                target_guid, prev = state_a.guid, base_b
                 direction = "B→A"
             if not dry_run:
-                ok = self._apply(target, source_state, prev)
+                ok = self._apply(target, source_state, prev, target_guid)
                 result["synced" if ok else "failed"] += 1
+                applied = ok
             else:
                 result["synced"] += 1
+            after = self._sides_after(state_a, state_b, source_state,
+                                      "a" if a_changed else "b")
             result["changes"].append(f"{state_a.title}: {direction} {source_state.ts}秒")
 
-        self._save_baseline(key, state_a, state_b)
+        if applied:
+            self._save_baseline(key, *after)
 
     def _first_sight_sync(self, state_a: MediaState, state_b: MediaState,
-                          key: str, result: dict, dry_run: bool) -> None:
-        """首次配对且两端状态不同：按冲突策略决定要不要拉齐。"""
+                          result: dict, dry_run: bool):
+        """首次配对且两端状态不同：按冲突策略决定要不要拉齐。
+
+        返回写入后两端应有的状态；返回 None 表示本次不记基线。
+        """
         chosen = self._resolve_conflict(state_a, state_b)
         if chosen is None:
             result["skipped"] += 1
-            return
-        target, source_state = (
-            (self.client_b, state_a) if chosen == "a" else (self.client_a, state_b)
-        )
-        if not dry_run:
-            ok = self._apply(target, source_state, None)
-            result["synced" if ok else "failed"] += 1
+            return None
+        if chosen == "a":
+            target, source_state, target_guid = self.client_b, state_a, state_b.guid
         else:
+            target, source_state, target_guid = self.client_a, state_b, state_a.guid
+        if dry_run:
+            ok = True
             result["synced"] += 1
+        else:
+            ok = self._apply(target, source_state, None, target_guid)
+            result["synced" if ok else "failed"] += 1
         result["changes"].append(f"{state_a.title}: 首次拉齐按 {chosen} 端（{source_state.ts}秒）")
+        if not ok:
+            return None
+        return self._sides_after(state_a, state_b, source_state, chosen)
+
+    def _sides_after(self, state_a: MediaState, state_b: MediaState,
+                     source_state: MediaState, chosen: str):
+        """写入成功后两端都应等于来源端的值，各自保留自己的 guid。"""
+        if chosen == "a":
+            return source_state, self._retarget(source_state, state_b.guid)
+        return self._retarget(source_state, state_a.guid), state_b
 
     def _save_baseline(self, key: str, state_a: MediaState, state_b: MediaState) -> None:
         self.baseline[key] = {

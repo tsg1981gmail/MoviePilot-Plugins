@@ -57,7 +57,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.9"
+    plugin_version = "1.0.10"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -67,6 +67,7 @@ class FnVsync(_PluginBase):
     _enabled = False
     _run_now = False
     _check_now = False
+    _reset_baseline = False
     _last_result: Optional[dict] = None
     _last_time = ""
     _conn_status: Optional[dict] = None
@@ -99,6 +100,7 @@ class FnVsync(_PluginBase):
         self._enabled = bool(config.get("enabled"))
         self._run_now = bool(config.get("run_now"))
         self._check_now = bool(config.get("check_now"))
+        self._reset_baseline = bool(config.get("reset_baseline"))
         self._host_a = config.get("host_a") or ""
         self._user_a = config.get("user_a") or ""
         self._pass_a = config.get("pass_a") or ""
@@ -217,6 +219,7 @@ class FnVsync(_PluginBase):
             "interval": self._interval,
             "notify": self._notify,
             "login_mode": self._login_mode,
+            "reset_baseline": self._reset_baseline,
         })
         return config
 
@@ -229,6 +232,8 @@ class FnVsync(_PluginBase):
         config = self._base_config()
         config["run_now"] = False
         config["check_now"] = False
+        config["reset_baseline"] = False
+        self._reset_baseline = False
         self._config_snapshot = dict(config)
         self.update_config(config)
 
@@ -353,6 +358,16 @@ class FnVsync(_PluginBase):
                                               "hint": "只登录两台 NAS 验证地址和账号密码，不同步数据；结果写在日志和插件页"},
                                 }],
                             },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [{
+                                    "component": "VSwitch",
+                                    "props": {"model": "reset_baseline",
+                                              "label": "重置同步基线",
+                                              "hint": "清空历史比对记录，下次运行按首次配对重新拉齐两端；勾选并保存后一次性生效"},
+                                }],
+                            },
                         ],
                     },
                     {
@@ -426,6 +441,7 @@ class FnVsync(_PluginBase):
             "enabled": False,
             "run_now": False,
             "check_now": False,
+            "reset_baseline": False,
             "host_a": "", "user_a": "", "pass_a": "", "code_a": "",
             "host_b": "", "user_b": "", "pass_b": "", "code_b": "",
             "direction": "both", "conflict": "keep", "sync_watched": True,
@@ -542,13 +558,19 @@ class FnVsync(_PluginBase):
             logger.info(f"飞牛双机同步：登录被拒后的冷却期内，{blocked} 之后再试，本次跳过")
             return None
         client_a = client_b = None
+        reset_baseline = bool(self._reset_baseline)
         with self._lock:
             try:
                 client_a, client_b = self._build_clients()
                 if client_a is None or client_b is None:
                     return None
 
-                baseline = self.get_data("baseline") or {}
+                if reset_baseline:
+                    logger.info("飞牛双机同步：按配置重置同步基线，本次按首次配对处理")
+                    baseline = {}
+                    self._reset_baseline = False
+                else:
+                    baseline = self.get_data("baseline") or {}
                 matcher = MediaMatcher(logger=_fnv_log)
                 direction = self._direction
                 # 单向模式下，把对端客户端传成同一实例由引擎策略处理：
@@ -593,17 +615,23 @@ class FnVsync(_PluginBase):
                     client_b.close()
                 except Exception:
                     pass
+                if reset_baseline:
+                    # 重置是勾选生效的一次性开关，用完立刻落盘关掉，避免每次运行都清基线
+                    try:
+                        self._write_back_config()
+                    except Exception as exc:
+                        logger.error(f"飞牛播放记录同步：关闭重置基线开关失败 - {exc}")
 
     def _limit_direction(self, engine: SyncEngine, direction: str) -> None:
-        """单向模式下屏蔽反向写入。"""
+        """单向模式下屏蔽反向写入。a_to_b 只允许写 B，b_to_a 只允许写 A。"""
         original_apply = engine._apply
 
-        def guarded(target, source_state, base_state):
-            if direction == "a_to_b" and target is not engine.client_a:
+        def guarded(target, source_state, base_state, target_guid):
+            if direction == "a_to_b" and target is not engine.client_b:
                 return True
-            if direction == "b_to_a" and target is not engine.client_b:
+            if direction == "b_to_a" and target is not engine.client_a:
                 return True
-            return original_apply(target, source_state, base_state)
+            return original_apply(target, source_state, base_state, target_guid)
 
         engine._apply = guarded
 

@@ -103,11 +103,12 @@
     "name": "飞牛播放记录同步插件",
     "description": "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向、IMDb/TMDB/标题年份匹配。",
     "labels": "飞牛,影视,同步",
-    "version": "1.0.9",
+    "version": "1.0.10",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Moviepilot_A.png",
     "author": "田树刚",
     "level": 1,
     "history": {
+      "v1.0.10": "修复写入时误用来源端条目 ID 导致全部 -5 Permission Error；写入失败不再记基线；新增重置同步基线开关",
       "v1.0.9": "按季集号同步分集进度；目录内影片也展开匹配；首次遇到差异按冲突策略拉齐",
       "v1.0.8": "新增登录方式选择与登录被拒后冷却 30 分钟，避免连续失败锁死账号",
       "v1.0.7": "新增「保存后检查连接」开关与 /test 接口，只登录验证地址账号密码",
