@@ -177,7 +177,8 @@ class FnClient:
         """统一请求入口，自动处理签名与令牌过期重试。"""
         if not api.startswith("/"):
             api = "/" + api
-        api_path = "/api/v1" + api
+        # login 接口已经带完整 /api/v1 或 /api/v2 前缀，其他接口才补 /api/v1
+        api_path = api if api.startswith("/api/") else "/api/v1" + api
         url = self.host + api_path
 
         if method == "GET":
