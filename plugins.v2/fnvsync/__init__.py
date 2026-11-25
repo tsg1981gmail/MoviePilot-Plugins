@@ -57,7 +57,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -89,6 +89,7 @@ class FnVsync(_PluginBase):
     _conflict = "keep"
     _interval = 15
     _notify = True
+    _login_mode = "auto"
 
     def init_plugin(self, config: dict = None):
         config = config or {}
@@ -114,6 +115,8 @@ class FnVsync(_PluginBase):
         except (TypeError, ValueError):
             self._interval = 15
         self._notify = bool(config.get("notify", True))
+        mode = str(config.get("login_mode") or "auto")
+        self._login_mode = mode if mode in ("auto", "v1", "v2") else "auto"
         self._last_result = self.get_data("last_result")
         self._history = self.get_data("history") or []
         self._conn_status = self.get_data("conn_status")
@@ -213,6 +216,7 @@ class FnVsync(_PluginBase):
             "conflict": self._conflict,
             "interval": self._interval,
             "notify": self._notify,
+            "login_mode": self._login_mode,
         })
         return config
 
@@ -260,7 +264,7 @@ class FnVsync(_PluginBase):
             if not all([host, user, password]):
                 item = {"ok": False, "host": host, "error": "地址、用户名或密码没有填全"}
             else:
-                client = FnClient(host, user, password, code, logger=_fnv_log)
+                client = self._client(host, user, password, code)
                 try:
                     ok = client.login()
                     item = {
@@ -282,6 +286,8 @@ class FnVsync(_PluginBase):
                 logger.error(f"飞牛连接检查：{name} 登录失败 - {item['error']}")
         self._conn_status = result
         try:
+            if result.get("a", {}).get("ok") and result.get("b", {}).get("ok"):
+                self.save_data("login_block_until", "")
             self.save_data("conn_status", result)
         except Exception as exc:
             logger.error(f"飞牛连接检查：保存检查结果失败 - {exc}")
@@ -407,6 +413,11 @@ class FnVsync(_PluginBase):
                                 }],
                             },
                             field("interval", "同步间隔（分钟，最小 5）", 6),
+                            select("login_mode", "登录方式", [
+                                {"title": "自动（先试 v1，再试 v2）", "value": "auto"},
+                                {"title": "只用 v1 明文密码", "value": "v1"},
+                                {"title": "只用 v2 SHA256 密码", "value": "v2"},
+                            ]),
                         ],
                     },
                 ],
@@ -418,7 +429,7 @@ class FnVsync(_PluginBase):
             "host_a": "", "user_a": "", "pass_a": "", "code_a": "",
             "host_b": "", "user_b": "", "pass_b": "", "code_b": "",
             "direction": "both", "conflict": "keep", "sync_watched": True,
-            "notify": True, "interval": 15,
+            "notify": True, "interval": 15, "login_mode": "auto",
         }
 
     def get_page(self) -> List[dict]:
@@ -480,21 +491,44 @@ class FnVsync(_PluginBase):
 
     # ---------- 同步执行 ----------
 
+    def _client(self, host: str, user: str, password: str, code: str) -> FnClient:
+        return FnClient(host, user, password, code, logger=_fnv_log,
+                        login_mode=self._login_mode)
+
+    def _login_blocked(self) -> str:
+        """登录被拒后暂停一段时间的截止时间，避免反复失败把账号彻底锁死。"""
+        until = self.get_data("login_block_until") or ""
+        if until and until > datetime.now().strftime("%Y-%m-%d %H:%M:%S"):
+            return until
+        if until:
+            self.save_data("login_block_until", "")
+        return ""
+
+    def _mark_login_blocked(self, error: str) -> None:
+        if "-15" not in str(error):
+            return
+        until = (datetime.now() + timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S")
+        self.save_data("login_block_until", until)
+        logger.error(
+            f"飞牛双机同步：账号密码被拒，暂停登录到 {until}，"
+            f"期间不再重试，避免连续失败把账号锁死。改好配置后勾「保存后检查连接」可立即单独验证"
+        )
+
     def _build_clients(self) -> Tuple[Optional[FnClient], Optional[FnClient]]:
         if not all([self._host_a, self._user_a, self._pass_a,
                     self._host_b, self._user_b, self._pass_b]):
             logger.error("飞牛双机同步：两台 NAS 的地址、账号、密码必须填写完整")
             return None, None
-        client_a = FnClient(self._host_a, self._user_a, self._pass_a,
-                            self._code_a, logger=_fnv_log)
-        client_b = FnClient(self._host_b, self._user_b, self._pass_b,
-                            self._code_b, logger=_fnv_log)
+        client_a = self._client(self._host_a, self._user_a, self._pass_a, self._code_a)
+        client_b = self._client(self._host_b, self._user_b, self._pass_b, self._code_b)
         if not client_a.login():
             logger.error(f"飞牛双机同步：NAS A 登录失败 - {client_a.last_error}")
+            self._mark_login_blocked(client_a.last_error)
             client_a.close()
             return None, None
         if not client_b.login():
             logger.error(f"飞牛双机同步：NAS B 登录失败 - {client_b.last_error}")
+            self._mark_login_blocked(client_b.last_error)
             client_a.close()
             client_b.close()
             return None, None
@@ -502,6 +536,10 @@ class FnVsync(_PluginBase):
 
     def sync(self, dry_run: bool = False) -> Optional[dict]:
         if not self._enabled:
+            return None
+        blocked = self._login_blocked()
+        if blocked:
+            logger.info(f"飞牛双机同步：登录被拒后的冷却期内，{blocked} 之后再试，本次跳过")
             return None
         client_a = client_b = None
         with self._lock:

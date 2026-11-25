@@ -139,6 +139,7 @@ class FnClient:
         use_sha256: bool = False,
         timeout: int = 20,
         logger=None,
+        login_mode: str = "auto",
     ):
         self.host = host.rstrip("/")
         if not self.host.endswith("/v"):
@@ -147,6 +148,7 @@ class FnClient:
         self.password = password
         self.access_code = access_code
         self.use_sha256 = use_sha256
+        self.login_mode = login_mode or "auto"
         self.timeout = timeout
         self.log = logger or self._default_logger
         self.token = ""
@@ -242,10 +244,32 @@ class FnClient:
         return False
 
     def login(self) -> bool:
-        """登录，兼容 v1 明文与 v2 SHA256 两种密码方式。"""
+        """登录，兼容 v1 明文与 v2 SHA256 两种密码方式。
+
+        login_mode: auto 先试 v1 再试 v2；v1 / v2 只试指定方式（省一次失败尝试，避免触发账号锁定）。
+        """
         if not self._verify_access_code():
             self.last_error = "访问码校验失败"
             return False
+        if self.login_mode in ("v1", "v2"):
+            self.use_sha256 = self.login_mode == "v2"
+            return self._login_once()
+        self.use_sha256 = False
+        if self._login_once():
+            return True
+        self.log("INFO", "v1 登录失败，尝试 v2 方式")
+        self.use_sha256 = True
+        if self._login_once():
+            return True
+        self.last_error = (
+            f"{self.last_error or '登录失败'}（地址 {self.host}，账号 {self.username}，"
+            f"请检查地址、账号密码与访问码；连续失败可能触发账号临时锁定）"
+        )
+        self.log("ERROR", self.last_error)
+        return False
+
+    def _login_once(self) -> bool:
+        """按当前 use_sha256 指定的方式登录一次。"""
         password = (
             hashlib.sha256(self.password.encode("utf-8")).hexdigest()
             if self.use_sha256 else self.password
@@ -260,18 +284,9 @@ class FnClient:
         result = self.request(endpoint, "POST", payload, retry=False)
         if isinstance(result, dict) and result.get("token"):
             self.token = result["token"]
+            self.login_mode = "v2" if self.use_sha256 else "v1"
             self.log("INFO", f"登录成功: {self.host}")
             return True
-        # v1 失败时自动尝试 v2，反之亦然
-        if not self.use_sha256:
-            self.log("INFO", "v1 登录失败，尝试 v2 方式")
-            self.use_sha256 = True
-            return self.login()
-        self.last_error = (
-            f"{self.last_error or '登录失败'}（地址 {self.host}，账号 {self.username}，"
-            f"请检查地址、账号密码与访问码）"
-        )
-        self.log("ERROR", self.last_error)
         return False
 
     def close(self) -> None:
