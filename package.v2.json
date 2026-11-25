@@ -125,5 +125,18 @@
       "v1.1.0": "改为按下载器一次性定时全部开始或暂停，仅处理未完成下载任务，失败每5分钟重试",
       "v1.0.0": "初始版本：按下载器展示任务，支持单任务及当前下载器全部任务的开始与暂停"
     }
+  },
+  "FnVsync": {
+    "name": "飞牛播放记录同步插件",
+    "description": "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向、IMDb/TMDB/标题年份匹配。",
+    "labels": "飞牛,影视,同步",
+    "version": "1.0.0",
+    "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Moviepilot_A.png",
+    "author": "田树刚",
+    "level": 1,
+    "system_version": ">=2.12.0,<3",
+    "history": {
+      "v1.0.0": "首版：双 NAS 播放进度与已看完标记双向同步，基线驱动避免互相覆盖"
+    }
   }
 }
