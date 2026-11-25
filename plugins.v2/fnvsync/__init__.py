@@ -57,7 +57,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.4"
+    plugin_version = "1.0.6"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -70,6 +70,8 @@ class FnVsync(_PluginBase):
     _last_time = ""
     _history: List[dict] = []
     _lock = threading.RLock()
+    # init_plugin 收到的原始配置快照，用于 update_config 整份回写时保留全部字段
+    _config_snapshot: Dict[str, Any] = {}
 
     # 配置字段
     _host_a = ""
@@ -88,6 +90,9 @@ class FnVsync(_PluginBase):
 
     def init_plugin(self, config: dict = None):
         config = config or {}
+        # 原样保存一份配置快照：update_config 是整份覆盖，
+        # 后续要改单个开关时必须基于这份快照回写，否则会把其他字段（地址、密码）清空
+        self._config_snapshot = dict(config)
         self._enabled = bool(config.get("enabled"))
         self._run_now = bool(config.get("run_now"))
         self._host_a = config.get("host_a") or ""
@@ -174,7 +179,28 @@ class FnVsync(_PluginBase):
         finally:
             self._run_now = False
             try:
-                self.update_config({"run_now": False})
+                # MoviePilot 的 update_config 是整份覆盖：必须基于原配置快照回写全部字段，
+                # 只传 run_now 会把 NAS 地址、账号、密码一起清空
+                config = dict(getattr(self, "_config_snapshot", None) or {})
+                config.update({
+                    "enabled": self._enabled,
+                    "run_now": False,
+                    "host_a": self._host_a,
+                    "user_a": self._user_a,
+                    "pass_a": self._pass_a,
+                    "code_a": self._code_a,
+                    "host_b": self._host_b,
+                    "user_b": self._user_b,
+                    "pass_b": self._pass_b,
+                    "code_b": self._code_b,
+                    "direction": self._direction,
+                    "sync_watched": self._sync_watched,
+                    "conflict": self._conflict,
+                    "interval": self._interval,
+                    "notify": self._notify,
+                })
+                self._config_snapshot = dict(config)
+                self.update_config(config)
             except Exception as exc:
                 logger.error(f"飞牛播放记录同步：关闭立即运行开关失败 - {exc}")
 

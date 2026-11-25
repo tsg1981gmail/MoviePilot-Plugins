@@ -201,7 +201,16 @@ class FnClient:
                 method, url, headers=headers, data=body if body else None,
                 timeout=self.timeout,
             )
-            payload = response.json()
+            text = response.text or ""
+            try:
+                payload = response.json()
+            except Exception:
+                snippet = " ".join(text.split())[:200]
+                raise ValueError(
+                    f"HTTP {response.status_code} 返回的不是 JSON：{snippet or '<空响应>'}"
+                )
+            if not isinstance(payload, dict):
+                raise ValueError(f"HTTP {response.status_code} 返回结构异常：{str(payload)[:200]}")
             code = int(payload.get("code", -1))
             if code == 0:
                 return payload.get("data")
@@ -258,7 +267,10 @@ class FnClient:
             self.log("INFO", "v1 登录失败，尝试 v2 方式")
             self.use_sha256 = True
             return self.login()
-        self.last_error = self.last_error or "登录失败，请检查地址、账号密码与访问码"
+        self.last_error = (
+            f"{self.last_error or '登录失败'}（地址 {self.host}，账号 {self.username}，"
+            f"请检查地址、账号密码与访问码）"
+        )
         self.log("ERROR", self.last_error)
         return False
 
