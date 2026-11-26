@@ -671,6 +671,7 @@ class SyncEngine:
         direction: str = "both",
         workers: int = 4,
         deep: bool = False,
+        unmapped: Optional[Dict[str, int]] = None,
     ):
         self.client_a = client_a
         self.client_b = client_b
@@ -698,6 +699,8 @@ class SyncEngine:
         self._writes: List[Tuple[str, str, str, MediaState]] = []
         self.children_requests = 0
         self.skipped_expand = 0
+        # 反复配不上对的条目计数：某集在对端压根不存在时，不能每轮都触发全量
+        self.unmapped: Dict[str, int] = unmapped if unmapped is not None else {}
 
     def _can_write(self, target: FnClient) -> bool:
         if self.direction == "a_to_b":
@@ -1017,7 +1020,16 @@ class SyncEngine:
                 changed[tag][state.guid] = state
                 # 这一条在映射表里没有对端，说明是新片或刮削变了，只能走全量重新配对
                 if state.guid not in mapping:
-                    need_full = True
+                    # 连续几次都配不上（例如这一集对端根本没有），就不再为此反复跑全量
+                    miss = int(self.unmapped.get(state.guid) or 0)
+                    if miss < self._unmapped_limit:
+                        self.unmapped[state.guid] = miss + 1
+                        need_full = True
+                    elif miss == self._unmapped_limit:
+                        self.unmapped[state.guid] = miss + 1
+                        self.log("WARN",
+                                 f"放弃为「{state.title}」反复触发全量："
+                                 f"对端可能没有这一条")
         if need_full:
             return result, new_snapshot, True
 
@@ -1071,6 +1083,8 @@ class SyncEngine:
 
     # 需要向下展开的类型：剧集、季、目录、合集
     _TREE_TYPES = {"tv", "show", "series", "season", "directory", "folder", "collection"}
+    # 同一条目连续这么多次配不上对，就不再为它触发全量扫描
+    _unmapped_limit = 3
 
     def _sync_pair(self, state_a: MediaState, state_b: MediaState,
                    result: dict, dry_run: bool, depth: int) -> None:
@@ -1109,6 +1123,9 @@ class SyncEngine:
         # 顺手记下条目对应关系，供下一轮增量轮询直接定位对端
         self.guid_map["a"][state_a.guid] = state_b.guid
         self.guid_map["b"][state_b.guid] = state_a.guid
+        # 已经配上对了，把「配不上」的计数清掉
+        self.unmapped.pop(state_a.guid, None)
+        self.unmapped.pop(state_b.guid, None)
         # 基线键用两端 guid 组合，刮削源变化也不会让基线失效
         key = f"{state_a.guid}|{state_b.guid}"
         record = self.baseline.get(key)

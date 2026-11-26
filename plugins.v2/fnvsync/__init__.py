@@ -59,7 +59,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.16"
+    plugin_version = "1.0.17"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -800,7 +800,14 @@ class FnVsync(_PluginBase):
         return {"a": dict(forward), "b": {v: k for k, v in forward.items()}}
 
     def _save_guid_map(self, mapping: Dict[str, Dict[str, str]]) -> None:
-        self.save_data("guid_map", {"a_to_b": dict(mapping.get("a") or {})})
+        """合并写回条目映射，不能整份覆盖。
+
+        全量轮里被跳过展开的剧集树不会重新登记分集映射，
+        如果整份覆盖，增量轮就再也找不到这些分集的对端，反而每轮都判定「需要全量」。
+        """
+        forward = dict((self.get_data("guid_map") or {}).get("a_to_b") or {})
+        forward.update(mapping.get("a") or {})
+        self.save_data("guid_map", {"a_to_b": forward})
 
     def _run_full(self) -> Optional[dict]:
         """低频全量扫描：补齐「已看完」标记与新片配对。"""
@@ -816,6 +823,18 @@ class FnVsync(_PluginBase):
                 raw, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600.0
         except (TypeError, ValueError):
             return None
+
+    def _save_unmapped(self, mapping: Dict[str, int]) -> None:
+        """保存「配不上对」的计数，只留最近的若干条，避免无限增长。"""
+        if not mapping:
+            return
+        try:
+            data = mapping
+            if len(data) > 300:
+                data = dict(list(data.items())[-300:])
+            self.save_data("unmapped", data)
+        except Exception as exc:
+            logger.error(f"飞牛双机同步：保存未配对记录失败 - {exc}")
 
     def _full_due(self) -> bool:
         """全量扫描是否到期。
@@ -883,6 +902,7 @@ class FnVsync(_PluginBase):
                     self.save_data("play_snapshot", {})
                     self.save_data("last_full_time", "")
                     self.save_data("last_deep_time", "")
+                    self.save_data("unmapped", {})
                 else:
                     baseline = self.get_data("baseline") or {}
 
@@ -902,6 +922,7 @@ class FnVsync(_PluginBase):
                     logger=_fnv_log,
                     direction=self._direction,
                     deep=deep,
+                    unmapped=self.get_data("unmapped") or {},
                 )
 
                 if not full:
@@ -915,6 +936,9 @@ class FnVsync(_PluginBase):
                         return self._wrap_result(result, engine, baseline,
                                                  attempt, dry_run, started)
                     logger.info("飞牛双机同步：出现尚未配对的新条目，本轮改跑全量扫描")
+                    # 这条是映射表里没有的新条目，很可能藏在被跳过展开的剧集树里；
+                    # 不强制深度展开就会「扫了全量却没扫到它」，下一轮又重复触发
+                    engine.deep = True
 
                 result = engine.run(dry_run=dry_run)
                 result["mode"] = "full"
@@ -948,6 +972,7 @@ class FnVsync(_PluginBase):
             verify = engine.verify_samples(2)
             if verify.get("checked"):
                 result["verify"] = verify
+            self._save_unmapped(engine.unmapped)
         # 首次全量可能有几百条变更，全量存下来太占地方，只留足够页面展示的量
         result["items"] = (result.get("items") or [])[:20]
         result["changes"] = (result.get("changes") or [])[:30]
