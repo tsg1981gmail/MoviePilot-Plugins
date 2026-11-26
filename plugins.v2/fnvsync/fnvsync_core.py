@@ -782,6 +782,11 @@ class SyncEngine:
                 if not target_guid:
                     continue
                 peer = peer_index.get(target_guid)
+                if (peer is not None and peer.ts == state.ts
+                        and bool(peer.watched) == bool(state.watched)):
+                    # 对端已经是这个状态（例如刚被手动改回来），不必再写一次
+                    result["skipped"] += 1
+                    continue
                 if target_guid in changed[other]:
                     if peer is None:
                         peer = MediaState(guid=target_guid)
