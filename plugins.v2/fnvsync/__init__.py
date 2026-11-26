@@ -59,7 +59,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.20"
+    plugin_version = "1.0.21"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -984,29 +984,53 @@ class FnVsync(_PluginBase):
         return self._finish(result, engine, baseline, attempt)
 
     def _log_summary(self, result: dict) -> None:
-        """每次运行打一行 JSON，排查时不用再翻零散日志。"""
+        """每次运行打一行中文摘要；细分开销只在调试级输出，免得刷屏看不懂。"""
         stats = result.get("stats") or {}
-        payload = {
-            "mode": result.get("mode") or "incremental",
-            "deep": bool(result.get("deep")),
-            "dry_run": bool(result.get("dry_run")),
-            "elapsed": result.get("elapsed"),
-            "pairs": result.get("total_pairs"),
-            "synced": result.get("synced"),
-            "skipped": result.get("skipped"),
-            "conflicts": result.get("conflicts"),
-            "failed": result.get("failed"),
-            "requests": stats.get("requests"),
-            "kb": stats.get("kb"),
-            "net_ms": stats.get("ms"),
-            "children": stats.get("children_requests"),
-            "skipped_expand": stats.get("skipped_expand"),
-            "login": stats.get("login"),
-            "token_reuse": stats.get("reused_token"),
-            "verify_mismatch": (result.get("verify") or {}).get("mismatch", 0),
-        }
+        mode = result.get("mode") or "incremental"
+        if mode == "full":
+            mode_text = "全量深度核对" if result.get("deep") else "全量核对"
+        else:
+            mode_text = "增量核对"
+
+        parts = [f"配对 {int(result.get('total_pairs') or 0)} 部",
+                 f"同步 {int(result.get('synced') or 0)} 条"]
+        for label, key in (("跳过", "skipped"), ("冲突", "conflicts"),
+                           ("失败", "failed")):
+            val = int(result.get(key) or 0)
+            if val:
+                parts.append(f"{label} {val} 条")
+        elapsed = float(result.get("elapsed") or 0)
+        parts.append(f"用时 {elapsed:.1f} 秒")
+        requests = int(stats.get("requests") or 0)
+        if requests:
+            parts.append(f"共 {requests} 次请求")
+        # 试运行时 _finish 里已单独打过一句，这里不重复刷一行
+        if not result.get("dry_run"):
+            try:
+                logger.info(f"飞牛同步完成（{mode_text}）：" + "，".join(parts))
+            except Exception:
+                pass
+
+        detail = []
+        kb = stats.get("kb")
+        if kb:
+            detail.append(f"数据量 {kb} KB")
+        net_ms = int(stats.get("ms") or 0)
+        if net_ms:
+            detail.append(f"两端网络等待合计 {net_ms / 1000.0:.1f} 秒")
+        detail.append(f"重新登录 {int(stats.get('login') or 0)} 次、"
+                      f"复用上次令牌 {int(stats.get('reused_token') or 0)} 次")
+        detail.append(f"展开剧集分集 {int(stats.get('children_requests') or 0)} 次、"
+                      f"按指纹跳过整部 {int(stats.get('skipped_expand') or 0)} 次")
+        verify = result.get("verify") or {}
+        if verify.get("checked"):
+            detail.append(f"写完抽样回读，不一致 "
+                          f"{int(verify.get('mismatch') or 0)} 条")
+        errors = int(stats.get("errors") or 0)
+        if errors:
+            detail.append(f"接口报错 {errors} 次")
         try:
-            logger.info("飞牛同步统计 " + json.dumps(payload, ensure_ascii=False))
+            logger.debug("飞牛同步明细：" + "；".join(detail))
         except Exception:
             pass
 
