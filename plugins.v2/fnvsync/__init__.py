@@ -59,7 +59,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.19"
+    plugin_version = "1.0.20"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"

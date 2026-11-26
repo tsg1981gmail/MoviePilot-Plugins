@@ -161,6 +161,8 @@ class MediaState:
     media_guid: str = ""
     # 父级标识：写后抽样回读时要按它拉子级列表
     parent_guid: str = ""
+    # 唯一子级标识（剧集 -> 季），用来判断这棵树最近有没有人在看
+    child_guid: str = ""
     # 本地集数：用来判断这一季/这部剧有没有新增集
     ep_count: int = 0
 
@@ -213,6 +215,8 @@ class FnClient:
         self._sessions: List[Any] = []
         self._session_lock = threading.Lock()
         self._media_guid_cache: Dict[str, str] = {}
+        # 播放记录（guid -> 状态）：条目表里的 ts 会滞后，统一以这里为准
+        self._play_cache: Dict[str, MediaState] = {}
         self.last_error = ""
         # 最近一次请求是否成功：写入接口成功时返回 data 可能是空，不能只看返回值
         self.last_ok = False
@@ -458,7 +462,11 @@ class FnClient:
         data = self.request("/play/list")
         if not isinstance(data, list):
             return []
-        return [self._to_state(row) for row in data if row.get("guid")]
+        states = [self._to_state(row) for row in data if row.get("guid")]
+        # 记下来：后面读条目表和子级时用它校正滞后的 ts
+        for state in states:
+            self._play_cache[state.guid] = state
+        return states
 
     def get_children(self, parent_guid: str, page_size: int = 500,
                      max_pages: int = 6) -> List[MediaState]:
@@ -502,7 +510,7 @@ class FnClient:
             ts = max(0, int(ts_value))
         except (TypeError, ValueError):
             ts = 0
-        return MediaState(
+        state = MediaState(
             guid=str(row.get("guid") or ""),
             title=str(row.get("title") or row.get("tv_title") or ""),
             media_type=raw_type,
@@ -516,10 +524,17 @@ class FnClient:
             # 继续观看列表自带媒体文件标识，带上就能省掉写入前的解析请求
             media_guid=str(row.get("media_guid") or ""),
             parent_guid=str(row.get("parent_guid") or ""),
+            child_guid=str(row.get("single_child_guid") or ""),
             # 本地集数用来判断树里有没有新增集，有变化才需要逐集展开
             ep_count=int(row.get("local_number_of_episodes")
                          or row.get("number_of_episodes") or 0),
         )
+        # 条目表里的 ts 会比播放记录滞后几分钟：插件自己写入只更新播放记录，
+        # 条目表要等飞牛后台回填。以播放记录为准，否则会把旧进度当成现状写回去。
+        cached = self._play_cache.get(state.guid)
+        if cached is not None and cached.ts > state.ts:
+            state.ts = cached.ts
+        return state
 
     # ---------- 写入 ----------
 
@@ -701,6 +716,8 @@ class SyncEngine:
         self.skipped_expand = 0
         # 反复配不上对的条目计数：某集在对端压根不存在时，不能每轮都触发全量
         self.unmapped: Dict[str, int] = unmapped if unmapped is not None else {}
+        # 正在被观看的条目与它们的父级：这些树每轮都要完整展开
+        self._active_guids: set = set()
 
     def _can_write(self, target: FnClient) -> bool:
         if self.direction == "a_to_b":
@@ -734,25 +751,38 @@ class SyncEngine:
         return [bool(state_a.watched), int(state_a.ts), int(state_a.ep_count),
                 bool(state_b.watched), int(state_b.ts), int(state_b.ep_count)]
 
+    def _is_active(self, state: MediaState) -> bool:
+        """这棵树最近有没有人在看：自己、子级或父级出现在继续观看列表里都算。
+
+        飞牛的剧集、季这两层顶层状态的 ts 恒为 0、watched 恒为 False，
+        分集怎么变它都不动，光看顶层判断「有没有变化」在剧集上是失效的，
+        必须靠「播放列表里有没有它的人」这个信号来判断要不要展开。
+        """
+        if state.guid and state.guid in self._active_guids:
+            return True
+        return bool(state.child_guid and state.child_guid in self._active_guids)
+
     def _need_expand(self, state_a: MediaState, state_b: MediaState) -> bool:
         """这部剧/这一季要不要往下拉分集。
 
         全量扫描的请求几乎全花在逐季逐集上（实测 89 次里 80 多次是子级）。
-        绝大多数剧在两个库之间早就一致，每轮重拉一遍纯属浪费，这里按四条判断：
+        绝大多数剧在两个库之间早就一致，每轮重拉一遍纯属浪费，这里按五条判断：
 
         1. 本轮是深度轮 —— 无条件完整展开，任何省请求的判断都不能抢先；
         2. 两端整剧都已看完、集数也一致 —— 分集层必然一致，直接跳过；
         3. 两端顶层状态不同 —— 有差异，必须展开定位到分集；
-        4. 上一轮展开后顶层指纹没变 —— 没人动过，跳过。
+        4. 这棵树有人在看 —— 顶层状态不会反映分集变化，必须展开；
+        5. 上一轮展开后顶层指纹没变、也没人在看 —— 跳过。
 
-        代价：分集层的手动改动而顶层毫无变化时，要等深度轮（默认 24 小时）才补上。
+        第 4 条是关键：漏了它，正在追的剧只有 24 小时的深度轮才会同步分集。
         """
-        # 深度轮无条件完整展开，任何省请求的判断都不能抢先
         if self.deep:
             return True
         if state_a.watched and state_b.watched and state_a.ep_count == state_b.ep_count:
             return False
         if state_a.state_tuple() != state_b.state_tuple():
+            return True
+        if self._is_active(state_a) or self._is_active(state_b):
             return True
         record = self.baseline.get(self._parent_key(state_a, state_b)) or {}
         return record.get("sig") != self._expand_signature(state_a, state_b)
@@ -964,13 +994,17 @@ class SyncEngine:
             self._sync_pair(state_a, state_b, result, dry_run, 0)
         return result
 
-    @staticmethod
-    def _merge_play_list(items: List[MediaState], client: FnClient) -> Dict[str, list]:
+    def _merge_play_list(self, items: List[MediaState], client: FnClient) -> Dict[str, list]:
         """把继续观看列表的进度与媒体文件标识并进主列表，同时返回指纹。"""
         index = {item.guid: item for item in items}
         snapshot: Dict[str, list] = {}
         for state in client.get_play_list():
             snapshot[state.guid] = [state.ts, bool(state.watched)]
+            # 记下「谁正在被看」：分集所在的那一季、那一部剧都要算活跃
+            if state.guid:
+                self._active_guids.add(state.guid)
+            if state.parent_guid:
+                self._active_guids.add(state.parent_guid)
             # 分集不在顶层列表里，但这份标识对分集同样有效，先记下省掉解析请求
             client.remember_media_guid(state.guid, state.media_guid)
             item = index.get(state.guid)
@@ -1006,13 +1040,25 @@ class SyncEngine:
                 f"{self.client_a.last_error or self.client_b.last_error or '未知原因'}")
         index_a = {s.guid: s for s in play_a}
         index_b = {s.guid: s for s in play_b}
+        for state in list(play_a) + list(play_b):
+            if state.guid:
+                self._active_guids.add(state.guid)
+            if state.parent_guid:
+                self._active_guids.add(state.parent_guid)
 
         new_snapshot: Dict[str, Dict[str, list]] = {"a": {}, "b": {}}
         changed: Dict[str, Dict[str, MediaState]] = {"a": {}, "b": {}}
         need_full = False
+        vanished = 0
         for tag, states in (("a", play_a), ("b", play_b)):
             before = (snapshot or {}).get(tag) or {}
             mapping = (guid_map or {}).get(tag) or {}
+            current = {s.guid for s in states}
+            # 从继续观看里消失 = 看完了或被清空，这类变化只能靠全量确认
+            for guid in before:
+                if guid not in current:
+                    vanished += 1
+                    break
             for state in states:
                 fingerprint = [state.ts, bool(state.watched)]
                 new_snapshot[tag][state.guid] = fingerprint
@@ -1031,7 +1077,9 @@ class SyncEngine:
                         self.log("WARN",
                                  f"放弃为「{state.title}」反复触发全量："
                                  f"对端可能没有这一条")
-        if need_full:
+        if vanished:
+            self.log("INFO", f"有 {vanished} 端出现条目从继续观看里消失，改跑一次完整扫描确认")
+        if need_full or vanished:
             return result, new_snapshot, True
 
         result["total_pairs"] = len(index_a)
