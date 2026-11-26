@@ -158,6 +158,14 @@ class FnVsync(_PluginBase):
                 "description": "手动触发一次双 NAS 播放记录同步",
             },
             {
+                "path": "/full",
+                "endpoint": self.api_run_full,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "立即全量扫描",
+                "description": "忽略增量，完整扫描两台媒体库并同步一次",
+            },
+            {
                 "path": "/status",
                 "endpoint": self.api_status,
                 "methods": ["GET"],
@@ -673,9 +681,14 @@ class FnVsync(_PluginBase):
             self.post_message(title="飞牛双机同步", text=message)
         return result
 
-    def api_run(self, full: bool = False) -> dict:
-        """默认走增量；带 full=true 强制全量扫描一次。"""
-        result = self.sync(full=bool(full))
+    def api_run(self) -> dict:
+        """立即同步：有映射时走增量，出现未配对的新条目会自动转全量。"""
+        result = self.sync()
+        return {"success": result is not None, "data": result}
+
+    def api_run_full(self) -> dict:
+        """强制完整扫描一次，用于补「已看完」标记或大改刮削后重新对齐。"""
+        result = self.sync(full=True)
         return {"success": result is not None, "data": result}
 
     def api_test(self) -> dict:
