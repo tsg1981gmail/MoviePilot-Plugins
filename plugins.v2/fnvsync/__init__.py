@@ -57,7 +57,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.12"
+    plugin_version = "1.0.13"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -72,6 +72,7 @@ class FnVsync(_PluginBase):
     _last_time = ""
     _conn_status: Optional[dict] = None
     _history: List[dict] = []
+    _last_attempt: Optional[dict] = None
     _lock = threading.RLock()
     # init_plugin 收到的原始配置快照，用于 update_config 整份回写时保留全部字段
     _config_snapshot: Dict[str, Any] = {}
@@ -131,6 +132,7 @@ class FnVsync(_PluginBase):
             if isinstance(record, dict) and len(record.get("changes") or []) > 20:
                 record["changes"] = record["changes"][:20]
         self._conn_status = self.get_data("conn_status")
+        self._last_attempt = self.get_data("last_attempt")
 
     def get_state(self) -> bool:
         return self._enabled
@@ -204,8 +206,8 @@ class FnVsync(_PluginBase):
                 # 继续观看列表看不到「已看完」标记，也没有新片配对信息，靠这个低频全量兜底
                 "id": "FnVsync.Full",
                 "name": "飞牛播放记录同步插件（全量扫描）",
-                "trigger": IntervalTrigger(hours=self._full_interval),
-                "func": self._run_full,
+                "trigger": IntervalTrigger(minutes=30),
+                "func": self._run_full_if_due,
                 "kwargs": {},
             })
         if self._run_now and self._enabled:
@@ -504,6 +506,12 @@ class FnVsync(_PluginBase):
         else:
             lines.append("尚未执行过同步。保存配置后可在服务中手动触发，或等待定时任务。")
 
+        attempt = self._last_attempt or {}
+        if attempt.get("time") and not str(attempt.get("result", "")).startswith("完成"):
+            lines.append(
+                f"最近一次触发 {attempt['time']} 未执行：{attempt.get('result') or '原因未知'}"
+            )
+
         changes = status.get("changes") or []
         content = []
         conn = self._conn_status or {}
@@ -603,12 +611,45 @@ class FnVsync(_PluginBase):
         """低频全量扫描：补齐「已看完」标记与新片配对。"""
         return self.sync(full=True)
 
+    def _run_full_if_due(self) -> Optional[dict]:
+        """短周期轮询，真正到期才跑全量。
+
+        直接用 6 小时间隔的触发器，每次重启 MoviePilot 都会把计时重置，
+        重启频繁就永远等不到全量；这里改成记「上次全量时间」自己算。
+        """
+        last = self.get_data("last_full_time") or ""
+        if last:
+            try:
+                gap = (datetime.now() - datetime.strptime(
+                    last, "%Y-%m-%d %H:%M:%S")).total_seconds()
+                if gap < self._full_interval * 3600:
+                    return None
+            except (TypeError, ValueError):
+                pass
+        return self.sync(full=True)
+
+    def _attempt_done(self, attempt: dict, reason: str) -> None:
+        """记下这一次被调用但没真正执行的原因，便于排查「为什么不自动同步」。"""
+        attempt["result"] = reason
+        self._last_attempt = attempt
+        try:
+            self.save_data("last_attempt", attempt)
+        except Exception:
+            pass
+
     def sync(self, dry_run: bool = False, full: bool = False) -> Optional[dict]:
+        attempt = {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "mode": "全量" if full else "增量",
+            "enabled": bool(self._enabled),
+        }
         if not self._enabled:
+            self._attempt_done(attempt, "插件未启用，未执行")
             return None
         blocked = self._login_blocked()
         if blocked:
             logger.info(f"飞牛双机同步：登录被拒后的冷却期内，{blocked} 之后再试，本次跳过")
+            self._attempt_done(attempt, f"登录冷却中，到 {blocked} 才恢复")
             return None
         client_a = client_b = None
         reset_baseline = bool(self._reset_baseline)
@@ -616,6 +657,7 @@ class FnVsync(_PluginBase):
             try:
                 client_a, client_b = self._build_clients()
                 if client_a is None or client_b is None:
+                    self._attempt_done(attempt, "两台 NAS 的地址/账号/密码不完整或登录失败")
                     return None
 
                 if reset_baseline:
@@ -627,6 +669,7 @@ class FnVsync(_PluginBase):
                     self.save_data("baseline", {})
                     self.save_data("guid_map", {})
                     self.save_data("play_snapshot", {})
+                    self.save_data("last_full_time", "")
                 else:
                     baseline = self.get_data("baseline") or {}
                 engine = SyncEngine(
@@ -644,16 +687,17 @@ class FnVsync(_PluginBase):
                     if not need_full:
                         if result["synced"] or result["failed"] or result["skipped"]:
                             self.save_data("play_snapshot", new_snapshot)
-                        return self._finish(result, engine, baseline)
+                        return self._finish(result, engine, baseline, attempt)
                     logger.info("飞牛双机同步：出现尚未配对的新条目，本轮改跑全量扫描")
 
                 result = engine.run(dry_run=dry_run)
                 result["mode"] = "full"
                 self.save_data("play_snapshot", engine.play_snapshot)
                 self._save_guid_map(engine.guid_map)
-                return self._finish(result, engine, baseline)
+                return self._finish(result, engine, baseline, attempt)
             except Exception as exc:
                 logger.error(f"飞牛双机同步异常：{exc}")
+                self._attempt_done(attempt, f"执行异常：{exc}")
                 return None
             finally:
                 try:
@@ -668,13 +712,17 @@ class FnVsync(_PluginBase):
                     except Exception as exc:
                         logger.error(f"飞牛播放记录同步：关闭重置基线开关失败 - {exc}")
 
-    def _finish(self, result: dict, engine: SyncEngine, baseline: dict) -> dict:
+    def _finish(self, result: dict, engine: SyncEngine, baseline: dict,
+                attempt: Optional[dict] = None) -> dict:
         """统一收尾：落盘、历史、通知。没有写入就不重复写存储。"""
         self._last_result = result
         self._last_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.save_data("last_result", result)
         if getattr(engine, "baseline_dirty", False):
             self.save_data("baseline", baseline)
+
+        if result.get("mode") == "full":
+            self.save_data("last_full_time", self._last_time)
 
         record = dict(result)
         record["time"] = self._last_time
@@ -688,6 +736,13 @@ class FnVsync(_PluginBase):
             f"飞牛双机同步完成（{mode}）：匹配 {result['total_pairs']} 部，"
             f"同步 {result['synced']}，冲突 {result['conflicts']}，失败 {result['failed']}"
         )
+        if attempt is not None:
+            attempt["result"] = f"完成：同步 {result['synced']}，失败 {result['failed']}"
+            self._last_attempt = attempt
+            try:
+                self.save_data("last_attempt", attempt)
+            except Exception:
+                pass
         logger.info(message)
         # 没有实际写入就不发通知，避免每轮都打扰
         if self._notify and (result.get("synced") or result.get("failed")):
@@ -715,6 +770,7 @@ class FnVsync(_PluginBase):
             "data": {
                 "last_time": self._last_time,
                 "last_result": self._last_result,
+                "last_attempt": self._last_attempt,
                 "history": self._history[:20],
             },
         }
