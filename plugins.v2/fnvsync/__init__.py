@@ -57,7 +57,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.10"
+    plugin_version = "1.0.11"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -89,6 +89,7 @@ class FnVsync(_PluginBase):
     _sync_watched = True
     _conflict = "keep"
     _interval = 15
+    _full_interval = 6
     _notify = True
     _login_mode = "auto"
 
@@ -117,10 +118,18 @@ class FnVsync(_PluginBase):
         except (TypeError, ValueError):
             self._interval = 15
         self._notify = bool(config.get("notify", True))
+        try:
+            self._full_interval = max(1, int(config.get("full_interval") or 6))
+        except (TypeError, ValueError):
+            self._full_interval = 6
         mode = str(config.get("login_mode") or "auto")
         self._login_mode = mode if mode in ("auto", "v1", "v2") else "auto"
         self._last_result = self.get_data("last_result")
         self._history = self.get_data("history") or []
+        # 旧版本把每次的全部变更都存进历史，单条能到几十 KB，这里统一截断
+        for record in self._history:
+            if isinstance(record, dict) and len(record.get("changes") or []) > 20:
+                record["changes"] = record["changes"][:20]
         self._conn_status = self.get_data("conn_status")
 
     def get_state(self) -> bool:
@@ -193,11 +202,19 @@ class FnVsync(_PluginBase):
         return [
             {
                 "id": "FnVsync.Sync",
-                "name": "飞牛播放记录同步插件",
+                "name": "飞牛播放记录同步插件（增量）",
                 "trigger": IntervalTrigger(minutes=self._interval),
                 "func": self.sync,
                 "kwargs": {},
-            }
+            },
+            {
+                # 继续观看列表看不到「已看完」标记，也没有新片配对信息，靠这个低频全量兜底
+                "id": "FnVsync.Full",
+                "name": "飞牛播放记录同步插件（全量扫描）",
+                "trigger": IntervalTrigger(hours=self._full_interval),
+                "func": self._run_full,
+                "kwargs": {},
+            },
         ]
 
     def _base_config(self) -> Dict[str, Any]:
@@ -217,6 +234,7 @@ class FnVsync(_PluginBase):
             "sync_watched": self._sync_watched,
             "conflict": self._conflict,
             "interval": self._interval,
+            "full_interval": self._full_interval,
             "notify": self._notify,
             "login_mode": self._login_mode,
             "reset_baseline": self._reset_baseline,
@@ -427,7 +445,8 @@ class FnVsync(_PluginBase):
                                               "label": "同步完成后通知"},
                                 }],
                             },
-                            field("interval", "同步间隔（分钟，最小 5）", 6),
+                            field("interval", "增量检查间隔（分钟，最小 5）", 6),
+                            field("full_interval", "全量扫描间隔（小时，最小 1）", 6),
                             select("login_mode", "登录方式", [
                                 {"title": "自动（先试 v1，再试 v2）", "value": "auto"},
                                 {"title": "只用 v1 明文密码", "value": "v1"},
@@ -445,14 +464,15 @@ class FnVsync(_PluginBase):
             "host_a": "", "user_a": "", "pass_a": "", "code_a": "",
             "host_b": "", "user_b": "", "pass_b": "", "code_b": "",
             "direction": "both", "conflict": "keep", "sync_watched": True,
-            "notify": True, "interval": 15, "login_mode": "auto",
+            "notify": True, "interval": 15, "full_interval": 6, "login_mode": "auto",
         }
 
     def get_page(self) -> List[dict]:
         status = self._last_result or {}
         lines = []
         if self._last_time:
-            lines.append(f"上次同步：{self._last_time}")
+            mode = "全量扫描" if status.get("mode") == "full" else "增量检查"
+            lines.append(f"上次{mode}：{self._last_time}")
             lines.append(
                 f"匹配 {status.get('total_pairs', 0)} 部 · "
                 f"同步 {status.get('synced', 0)} · "
@@ -550,7 +570,19 @@ class FnVsync(_PluginBase):
             return None, None
         return client_a, client_b
 
-    def sync(self, dry_run: bool = False) -> Optional[dict]:
+    def _load_guid_map(self) -> Dict[str, Dict[str, str]]:
+        """条目映射只存 A→B 单向，运行时装成双向，省一半存储。"""
+        forward = (self.get_data("guid_map") or {}).get("a_to_b") or {}
+        return {"a": dict(forward), "b": {v: k for k, v in forward.items()}}
+
+    def _save_guid_map(self, mapping: Dict[str, Dict[str, str]]) -> None:
+        self.save_data("guid_map", {"a_to_b": dict(mapping.get("a") or {})})
+
+    def _run_full(self) -> Optional[dict]:
+        """低频全量扫描：补齐「已看完」标记与新片配对。"""
+        return self.sync(full=True)
+
+    def sync(self, dry_run: bool = False, full: bool = False) -> Optional[dict]:
         if not self._enabled:
             return None
         blocked = self._login_blocked()
@@ -566,46 +598,39 @@ class FnVsync(_PluginBase):
                     return None
 
                 if reset_baseline:
-                    logger.info("飞牛双机同步：按配置重置同步基线，本次按首次配对处理")
+                    logger.info("飞牛双机同步：按配置重置同步基线，本轮按首次配对重新拉齐")
                     baseline = {}
                     self._reset_baseline = False
+                    full = True
+                    # 映射与指纹都是按旧配对建的，一起清掉
+                    self.save_data("baseline", {})
+                    self.save_data("guid_map", {})
+                    self.save_data("play_snapshot", {})
                 else:
                     baseline = self.get_data("baseline") or {}
-                matcher = MediaMatcher(logger=_fnv_log)
-                direction = self._direction
-                # 单向模式下，把对端客户端传成同一实例由引擎策略处理：
-                # 这里通过替换 _apply 目标实现更稳妥，简化为按方向决定是否允许写入
                 engine = SyncEngine(
-                    client_a, client_b, matcher, baseline,
+                    client_a, client_b, MediaMatcher(logger=_fnv_log), baseline,
                     sync_watched=self._sync_watched,
                     conflict_strategy=self._conflict,
                     logger=_fnv_log,
+                    direction=self._direction,
                 )
 
-                if direction != "both":
-                    self._limit_direction(engine, direction)
+                if not full:
+                    snapshot = self.get_data("play_snapshot") or {}
+                    result, new_snapshot, need_full = engine.run_incremental(
+                        snapshot, self._load_guid_map(), dry_run)
+                    if not need_full:
+                        if result["synced"] or result["failed"] or result["skipped"]:
+                            self.save_data("play_snapshot", new_snapshot)
+                        return self._finish(result, engine, baseline)
+                    logger.info("飞牛双机同步：出现尚未配对的新条目，本轮改跑全量扫描")
 
                 result = engine.run(dry_run=dry_run)
-                self._last_result = result
-                self._last_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                self.save_data("last_result", result)
-                self.save_data("baseline", baseline)
-
-                record = dict(result)
-                record["time"] = self._last_time
-                self._history.insert(0, record)
-                self._history = self._history[:50]
-                self.save_data("history", self._history)
-
-                message = (
-                    f"飞牛双机同步完成：匹配 {result['total_pairs']} 部，"
-                    f"同步 {result['synced']}，冲突 {result['conflicts']}，"
-                    f"失败 {result['failed']}"
-                )
-                logger.info(message)
-                if self._notify:
-                    self.post_message(title="飞牛双机同步", text=message)
-                return result
+                result["mode"] = "full"
+                self.save_data("play_snapshot", engine.play_snapshot)
+                self._save_guid_map(engine.guid_map)
+                return self._finish(result, engine, baseline)
             except Exception as exc:
                 logger.error(f"飞牛双机同步异常：{exc}")
                 return None
@@ -622,18 +647,31 @@ class FnVsync(_PluginBase):
                     except Exception as exc:
                         logger.error(f"飞牛播放记录同步：关闭重置基线开关失败 - {exc}")
 
-    def _limit_direction(self, engine: SyncEngine, direction: str) -> None:
-        """单向模式下屏蔽反向写入。a_to_b 只允许写 B，b_to_a 只允许写 A。"""
-        original_apply = engine._apply
+    def _finish(self, result: dict, engine: SyncEngine, baseline: dict) -> dict:
+        """统一收尾：落盘、历史、通知。没有写入就不重复写存储。"""
+        self._last_result = result
+        self._last_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.save_data("last_result", result)
+        if getattr(engine, "baseline_dirty", False):
+            self.save_data("baseline", baseline)
 
-        def guarded(target, source_state, base_state, target_guid):
-            if direction == "a_to_b" and target is not engine.client_b:
-                return True
-            if direction == "b_to_a" and target is not engine.client_a:
-                return True
-            return original_apply(target, source_state, base_state, target_guid)
+        record = dict(result)
+        record["time"] = self._last_time
+        record["changes"] = (result.get("changes") or [])[:20]
+        self._history.insert(0, record)
+        self._history = self._history[:20]
+        self.save_data("history", self._history)
 
-        engine._apply = guarded
+        mode = "全量" if result.get("mode") == "full" else "增量"
+        message = (
+            f"飞牛双机同步完成（{mode}）：匹配 {result['total_pairs']} 部，"
+            f"同步 {result['synced']}，冲突 {result['conflicts']}，失败 {result['failed']}"
+        )
+        logger.info(message)
+        # 没有实际写入就不发通知，避免每轮都打扰
+        if self._notify and (result.get("synced") or result.get("failed")):
+            self.post_message(title="飞牛双机同步", text=message)
+        return result
 
     def api_run(self) -> dict:
         result = self.sync()

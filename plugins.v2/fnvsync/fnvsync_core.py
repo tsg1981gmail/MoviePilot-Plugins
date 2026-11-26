@@ -21,7 +21,9 @@ import hashlib
 import json
 import random
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -152,22 +154,31 @@ class FnClient:
         self.timeout = timeout
         self.log = logger or self._default_logger
         self.token = ""
-        self._session = None
+        # 多线程读目录树时每个线程用自己的连接，requests 的 Session 不是线程安全的
+        self._local = threading.local()
+        self._sessions: List[Any] = []
+        self._session_lock = threading.Lock()
         self._media_guid_cache: Dict[str, str] = {}
         self.last_error = ""
+        # 最近一次请求是否成功：写入接口成功时返回 data 可能是空，不能只看返回值
+        self.last_ok = False
 
     @staticmethod
     def _default_logger(level: str, message: str) -> None:
         print(f"[{level}] {message}")
 
     def _http(self):
-        if self._session is not None:
-            return self._session
+        session = getattr(self._local, "session", None)
+        if session is not None:
+            return session
         if requests is None:
             raise RuntimeError("缺少 requests 库")
-        self._session = requests.Session()
-        self._session.verify = False
-        return self._session
+        session = requests.Session()
+        session.verify = False
+        self._local.session = session
+        with self._session_lock:
+            self._sessions.append(session)
+        return session
 
     def request(
         self,
@@ -178,6 +189,7 @@ class FnClient:
         _tries: int = 0,
     ) -> Optional[Any]:
         """统一请求入口，自动处理签名与令牌过期重试。"""
+        self.last_ok = False
         if not api.startswith("/"):
             api = "/" + api
         # login 接口已经带完整 /api/v1 或 /api/v2 前缀，其他接口才补 /api/v1
@@ -216,16 +228,19 @@ class FnClient:
                 raise ValueError(f"HTTP {response.status_code} 返回结构异常：{str(payload)[:200]}")
             code = int(payload.get("code", -1))
             if code == 0:
+                self.last_ok = True
                 return payload.get("data")
-            if code == -5 and _tries < 2:
-                # 连续写入过快时飞牛会回 -5 Permission Error，退避后重试
-                time.sleep(0.6 + 0.6 * _tries)
+            if code == -5 and method == "GET" and _tries < 2:
+                # 读取偶发失败可以退避重试；写入的 -5 是条目/媒体标识在目标端不存在，
+                # 重试不会变好，只会白等并把真实原因埋掉
+                time.sleep(0.4 + 0.4 * _tries)
                 return self.request(api, method, data, retry=retry, _tries=_tries + 1)
             if retry and code in (-2, -15, -401):
                 self.token = ""
                 if self.login():
                     return self.request(api, method, data, retry=False)
-            self.last_error = f"{method} {api} 返回 {code}: {payload.get('msg', '')}"
+            hint = "（目标端不存在该条目或媒体文件标识）" if code == -5 and method != "GET" else ""
+            self.last_error = f"{method} {api} 返回 {code}: {payload.get('msg', '')}{hint}"
             self.log("ERROR", self.last_error)
         except Exception as exc:
             self.last_error = f"{method} {api} 异常: {exc}"
@@ -295,15 +310,18 @@ class FnClient:
         return False
 
     def close(self) -> None:
-        if self._session is not None:
+        with self._session_lock:
+            sessions, self._sessions = self._sessions, []
+        for session in sessions:
             try:
-                self._session.close()
-            finally:
-                self._session = None
+                session.close()
+            except Exception:
+                pass
+        self._local = threading.local()
 
     # ---------- 读取 ----------
 
-    def get_all_items(self, page_size: int = 200, max_pages: int = 50) -> List[MediaState]:
+    def get_all_items(self, page_size: int = 1000, max_pages: int = 20) -> List[MediaState]:
         """遍历媒体库，返回全部影片与分集的播放状态。"""
         rows: List[MediaState] = []
         seen = set()
@@ -339,8 +357,8 @@ class FnClient:
             return []
         return [self._to_state(row) for row in data if row.get("guid")]
 
-    def get_children(self, parent_guid: str, page_size: int = 200,
-                     max_pages: int = 10) -> List[MediaState]:
+    def get_children(self, parent_guid: str, page_size: int = 500,
+                     max_pages: int = 6) -> List[MediaState]:
         """按父级标识取下一层：剧集取到季，季取到分集，目录取到里面的影片。"""
         if not parent_guid:
             return []
@@ -392,9 +410,16 @@ class FnClient:
             watched=bool(watched_value) and int(watched_value or 0) != 0,
             ts=ts,
             duration=int(row.get("duration") or 0),
+            # 继续观看列表自带媒体文件标识，带上就能省掉写入前的解析请求
+            media_guid=str(row.get("media_guid") or ""),
         )
 
     # ---------- 写入 ----------
+
+    def remember_media_guid(self, item_guid: str, media_guid: str) -> None:
+        """记下条目对应的媒体文件标识，后续写入不用再查流列表。"""
+        if item_guid and media_guid:
+            self._media_guid_cache[item_guid] = media_guid
 
     def _resolve_media_guid(self, item_guid: str) -> Optional[str]:
         """分集或有多文件时，解析出用于上报进度的媒体文件标识。"""
@@ -429,25 +454,25 @@ class FnClient:
         if not media_guid:
             self.log("ERROR", f"无法解析媒体文件标识: {state.guid} {state.title}")
             return False
-        result = self.request("/play/record", "POST", {
+        self.request("/play/record", "POST", {
             "media_guid": media_guid,
             "item_guid": state.guid,
             "ts": int(state.ts),
         })
-        return result is not None
+        return self.last_ok
 
     def clear_progress(self, item_guid: str) -> bool:
         """清空播放进度。"""
-        result = self.request("/play/record", "DELETE", {"item_guid": item_guid})
-        return result is not None
+        self.request("/play/record", "DELETE", {"item_guid": item_guid})
+        return self.last_ok
 
     def set_watched(self, item_guid: str, watched: bool) -> bool:
         """设置或取消已看完标记。"""
-        result = self.request(
+        self.request(
             "/item/watched", "POST" if watched else "DELETE",
             {"item_guid": item_guid},
         )
-        return result is not None
+        return self.last_ok
 
 
 class MediaMatcher:
@@ -483,13 +508,16 @@ class MediaMatcher:
         keys = self.keys_of(state)
         return keys[0] if keys else ""
 
-    def build_index(self, items: List[MediaState]) -> Dict[str, List[MediaState]]:
-        index: Dict[str, List[MediaState]] = {}
+    def build_index(self, items: List[MediaState]) -> Dict[str, Dict[str, MediaState]]:
+        """键 -> {条目 ID: 条目}。
+
+        必须按条目 ID 去重：MediaState 的相等只比较「已看完 + 进度」，
+        两条不同条目只要状态相同就会被判成同一条，导致本该模糊跳过的被错配。
+        """
+        index: Dict[str, Dict[str, MediaState]] = {}
         for item in items:
             for key in self.keys_of(item):
-                bucket = index.setdefault(key, [])
-                if item not in bucket:
-                    bucket.append(item)
+                index.setdefault(key, {})[item.guid] = item
         return index
 
     def match(self, list_a: List[MediaState], list_b: List[MediaState]) -> Tuple[
@@ -505,13 +533,12 @@ class MediaMatcher:
         ambiguous = 0
         matched_b = set()
         for item_a in list_a:
-            candidates = []
+            candidates: Dict[str, MediaState] = {}
             for key in self.keys_of(item_a):
-                for candidate in index_b.get(key, []):
-                    if candidate not in candidates:
-                        candidates.append(candidate)
+                for guid, candidate in index_b.get(key, {}).items():
+                    candidates[guid] = candidate
             if len(candidates) == 1:
-                target = candidates[0]
+                target = next(iter(candidates.values()))
                 if target.guid in matched_b:
                     ambiguous += 1
                     continue
@@ -534,6 +561,8 @@ class SyncEngine:
         sync_watched: bool = True,
         conflict_strategy: str = "keep",
         logger=None,
+        direction: str = "both",
+        workers: int = 4,
     ):
         self.client_a = client_a
         self.client_b = client_b
@@ -543,6 +572,75 @@ class SyncEngine:
         self.sync_watched = sync_watched
         self.conflict_strategy = conflict_strategy
         self.log = logger or FnClient._default_logger
+        self.direction = direction or "both"
+        self.workers = max(1, int(workers or 1))
+        # 基线是否有改动，没有改动就不必整份写回存储
+        self.baseline_dirty = False
+        # 条目映射：全量轮填充，增量轮据此把变化的条目对到另一端
+        self.guid_map: Dict[str, Dict[str, str]] = {"a": {}, "b": {}}
+        # 全量轮结束时两端的继续观看指纹，直接给下一轮增量用
+        self.play_snapshot: Dict[str, Dict[str, list]] = {"a": {}, "b": {}}
+        # 一轮内已取过的子级，避免重复请求
+        self._children_cache: Dict[Tuple[str, str], List[MediaState]] = {}
+        # 写入节流：连续成功就缩短间隔，失败后拉长
+        self._write_gap = 0.05
+
+    def _can_write(self, target: FnClient) -> bool:
+        if self.direction == "a_to_b":
+            return target is self.client_b
+        if self.direction == "b_to_a":
+            return target is self.client_a
+        return True
+
+    def _children(self, tag: str, state: MediaState) -> List[MediaState]:
+        """取子级，优先命中本轮预取结果。"""
+        cached = self._children_cache.get((tag, state.guid))
+        if cached is not None:
+            return cached
+        children = self._children_of(tag, state.guid)
+        self._children_cache[(tag, state.guid)] = children
+        return children
+
+    def _children_of(self, tag: str, guid: str) -> List[MediaState]:
+        client = self.client_a if tag == "a" else self.client_b
+        return client.get_children(guid)
+
+    def prefetch_children(self, pairs: List[Tuple[MediaState, MediaState]],
+                          depth: int = 3) -> int:
+        """并发预取需要展开的子级。
+
+        目录树结构在两次运行之间基本不变，逐层串行读是纯等待；
+        这里按层并发取，请求数不变，墙钟时间降到 1/4 左右。
+        返回发出的请求数。
+        """
+        pending: Dict[str, List[str]] = {"a": [], "b": []}
+        for state_a, state_b in pairs:
+            if state_a.media_type in self._TREE_TYPES:
+                pending["a"].append(state_a.guid)
+            if state_b.media_type in self._TREE_TYPES:
+                pending["b"].append(state_b.guid)
+        requested = 0
+        for _ in range(max(0, depth)):
+            jobs = [(tag, guid) for tag in ("a", "b") for guid in pending[tag]
+                    if (tag, guid) not in self._children_cache]
+            if not jobs:
+                break
+            if len(jobs) == 1 or self.workers <= 1:
+                results = [(job, self._children_of(*job)) for job in jobs]
+            else:
+                with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                    results = list(pool.map(lambda job: (job, self._children_of(*job)), jobs))
+            requested += len(jobs)
+            for job, children in results:
+                self._children_cache[job] = children
+            # 下一层：子项仍在树里的，按它所属的那一端继续展开
+            pending = {"a": [], "b": []}
+            for (tag, _guid), children in list(self._children_cache.items()):
+                for child in children:
+                    if (child.media_type in self._TREE_TYPES
+                            and (tag, child.guid) not in self._children_cache):
+                        pending[tag].append(child.guid)
+        return requested
 
     def _target_of(self, state: MediaState, source: FnClient) -> FnClient:
         return self.client_b if source is self.client_a else self.client_a
@@ -569,11 +667,14 @@ class SyncEngine:
         )
 
     def _apply(self, target: FnClient, source_state: MediaState,
-               base_state: Optional[MediaState], target_guid: str) -> bool:
+               base_state: Optional[MediaState], target_guid: str) -> Optional[bool]:
         """把来源状态写入目标端，按变化项精确写入。
 
         target_guid 必须是接收端自己的条目标识，不能用来源端的。
+        返回 True 成功 / False 失败 / None 被单向同步规则拦下（未写、也不该记基线）。
         """
+        if not self._can_write(target):
+            return None
         if not target_guid:
             self.log("ERROR", f"缺少接收端标识，跳过写入: {source_state.title}")
             return False
@@ -584,8 +685,12 @@ class SyncEngine:
             base_state is None or source_state.watched != base_state.watched
         ):
             ok = target.set_watched(target_guid, source_state.watched) and ok
-        # 每条之间留一点间隔，连续高速写入会触发服务端 -5
-        time.sleep(0.15)
+        # 节流自适应：连续成功就加快，遇到失败再拉长间隔，兼顾速度与服务端压力
+        if ok:
+            self._write_gap = max(0.02, self._write_gap * 0.8)
+        else:
+            self._write_gap = min(0.5, max(0.2, self._write_gap * 3))
+        time.sleep(self._write_gap)
         return ok
 
     def run(self, dry_run: bool = False) -> dict:
@@ -593,27 +698,117 @@ class SyncEngine:
             "total_pairs": 0, "synced": 0, "skipped": 0,
             "conflicts": 0, "ambiguous": 0, "failed": 0, "changes": [],
         }
+        self.guid_map = {"a": {}, "b": {}}
         items_a = self.client_a.get_all_items()
         items_b = self.client_b.get_all_items()
-        # 继续观看列表补全：部分版本 item/list 不返回进度
-        for state in self.client_a.get_play_list():
-            for idx, item in enumerate(items_a):
-                if item.guid == state.guid:
-                    items_a[idx].ts = state.ts
-                    break
-        for state in self.client_b.get_play_list():
-            for idx, item in enumerate(items_b):
-                if item.guid == state.guid:
-                    items_b[idx].ts = state.ts
-                    break
+        # 继续观看列表补全：部分版本 item/list 不返回进度，另外带上媒体文件标识
+        self.play_snapshot["a"] = self._merge_play_list(items_a, self.client_a)
+        self.play_snapshot["b"] = self._merge_play_list(items_b, self.client_b)
 
         pairs, ambiguous = self.matcher.match(items_a, items_b)
         result["total_pairs"] = len(pairs)
         result["ambiguous"] = ambiguous
 
+        # 先把要展开的目录树并发取回来，后面逐条同步时直接命中缓存
+        self.prefetch_children(pairs)
+
         for state_a, state_b in pairs:
             self._sync_pair(state_a, state_b, result, dry_run, 0)
         return result
+
+    @staticmethod
+    def _merge_play_list(items: List[MediaState], client: FnClient) -> Dict[str, list]:
+        """把继续观看列表的进度与媒体文件标识并进主列表，同时返回指纹。"""
+        index = {item.guid: item for item in items}
+        snapshot: Dict[str, list] = {}
+        for state in client.get_play_list():
+            snapshot[state.guid] = [state.ts, bool(state.watched)]
+            # 分集不在顶层列表里，但这份标识对分集同样有效，先记下省掉解析请求
+            client.remember_media_guid(state.guid, state.media_guid)
+            item = index.get(state.guid)
+            if item is None:
+                continue
+            item.ts = state.ts
+            # 列表自带媒体文件标识，写入时就不用再查一次流列表
+            if not item.media_guid and state.media_guid:
+                item.media_guid = state.media_guid
+        return snapshot
+
+    def run_incremental(self, snapshot: dict, guid_map: dict,
+                        dry_run: bool = False) -> Tuple[dict, dict, bool]:
+        """轻量轮询：只读两端「继续观看」列表，不动整库。
+
+        snapshot: {"a": {guid: [进度, 已看完]}, "b": {...}} 上一轮的指纹
+        guid_map: {"a": {A 条目: B 条目}, "b": {B 条目: A 条目}}，全量轮维护
+        返回 (结果, 新指纹, 是否需要改跑一次全量)
+        说明：手动点「已看完」不会出现在继续观看列表里，必须靠低频全量兜底。
+        """
+        result = {
+            "total_pairs": 0, "synced": 0, "skipped": 0,
+            "conflicts": 0, "ambiguous": 0, "failed": 0, "changes": [],
+            "mode": "incremental",
+        }
+        play_a = self.client_a.get_play_list()
+        play_b = self.client_b.get_play_list()
+        index_a = {s.guid: s for s in play_a}
+        index_b = {s.guid: s for s in play_b}
+
+        new_snapshot: Dict[str, Dict[str, list]] = {"a": {}, "b": {}}
+        changed: Dict[str, Dict[str, MediaState]] = {"a": {}, "b": {}}
+        need_full = False
+        for tag, states in (("a", play_a), ("b", play_b)):
+            before = (snapshot or {}).get(tag) or {}
+            mapping = (guid_map or {}).get(tag) or {}
+            for state in states:
+                fingerprint = [state.ts, bool(state.watched)]
+                new_snapshot[tag][state.guid] = fingerprint
+                if before.get(state.guid) == fingerprint:
+                    continue
+                changed[tag][state.guid] = state
+                # 这一条在映射表里没有对端，说明是新片或刮削变了，只能走全量重新配对
+                if state.guid not in mapping:
+                    need_full = True
+        if need_full:
+            return result, new_snapshot, True
+
+        result["total_pairs"] = len(index_a)
+        for tag in ("a", "b"):
+            other = "b" if tag == "a" else "a"
+            peer_index = index_b if other == "b" else index_a
+            target = self.client_b if tag == "a" else self.client_a
+            mapping = (guid_map or {}).get(tag) or {}
+            for guid, state in changed[tag].items():
+                target_guid = mapping.get(guid)
+                if not target_guid:
+                    continue
+                peer = peer_index.get(target_guid)
+                if target_guid in changed[other]:
+                    if peer is None:
+                        peer = MediaState(guid=target_guid)
+                    chosen = (self._resolve_conflict(state, peer) if tag == "a"
+                              else self._resolve_conflict(peer, state))
+                    if chosen != tag:
+                        result["skipped"] += 1
+                        continue
+                    result["conflicts"] += 1
+                before = ((snapshot or {}).get(tag) or {}).get(guid)
+                base = (MediaState(guid=guid, ts=int(before[0]), watched=bool(before[1]))
+                        if before else None)
+                if dry_run:
+                    result["synced"] += 1
+                    result["changes"].append(f"{state.title}: {tag.upper()}→{other.upper()} {state.ts}秒")
+                    continue
+                applied = self._count(result, self._apply(target, state, base, target_guid))
+                if not applied:
+                    continue
+                result["changes"].append(f"{state.title}: {tag.upper()}→{other.upper()} {state.ts}秒")
+                # 写入后两端都等于来源值，各自保留自己的条目标识
+                if tag == "a":
+                    a_state, b_state = state, self._retarget(state, target_guid)
+                else:
+                    a_state, b_state = self._retarget(state, target_guid), state
+                self._save_baseline(f"{a_state.guid}|{b_state.guid}", a_state, b_state)
+        return result, new_snapshot, False
 
     # 需要向下展开的类型：剧集、季、目录、合集
     _TREE_TYPES = {"tv", "show", "series", "season", "directory", "folder", "collection"}
@@ -623,8 +818,8 @@ class SyncEngine:
         """条目级配对：能展开的往下展开，分集按季集号对应，其余按标题匹配。"""
         if depth < 4 and (state_a.media_type in self._TREE_TYPES
                           or state_b.media_type in self._TREE_TYPES):
-            children_a = self.client_a.get_children(state_a.guid)
-            children_b = self.client_b.get_children(state_b.guid)
+            children_a = self._children("a", state_a)
+            children_b = self._children("b", state_b)
             if children_a and children_b:
                 self._sync_children(children_a, children_b, result, dry_run, depth + 1)
                 return
@@ -649,6 +844,9 @@ class SyncEngine:
     def _sync_leaf(self, state_a: MediaState, state_b: MediaState,
                    result: dict, dry_run: bool) -> None:
         """叶子条目：按基线判断哪一端变了，然后推给对方。"""
+        # 顺手记下条目对应关系，供下一轮增量轮询直接定位对端
+        self.guid_map["a"][state_a.guid] = state_b.guid
+        self.guid_map["b"][state_b.guid] = state_a.guid
         # 基线键用两端 guid 组合，刮削源变化也不会让基线失效
         key = f"{state_a.guid}|{state_b.guid}"
         record = self.baseline.get(key)
@@ -691,11 +889,10 @@ class SyncEngine:
                 else:
                     target, source_state, target_guid = self.client_a, state_b, state_a.guid
                 if not dry_run:
-                    ok = self._apply(target, source_state,
-                                     self._restore(record.get("b" if chosen == "a" else "a")),
-                                     target_guid)
-                    result["synced" if ok else "failed"] += 1
-                    applied = ok
+                    applied = self._count(result, self._apply(
+                        target, source_state,
+                        self._restore(record.get("b" if chosen == "a" else "a")),
+                        target_guid))
                 else:
                     result["synced"] += 1
                 after = self._sides_after(state_a, state_b, source_state, chosen)
@@ -710,9 +907,7 @@ class SyncEngine:
                 target_guid, prev = state_a.guid, base_b
                 direction = "B→A"
             if not dry_run:
-                ok = self._apply(target, source_state, prev, target_guid)
-                result["synced" if ok else "failed"] += 1
-                applied = ok
+                applied = self._count(result, self._apply(target, source_state, prev, target_guid))
             else:
                 result["synced"] += 1
             after = self._sides_after(state_a, state_b, source_state,
@@ -737,13 +932,12 @@ class SyncEngine:
         else:
             target, source_state, target_guid = self.client_a, state_b, state_a.guid
         if dry_run:
-            ok = True
+            applied = True
             result["synced"] += 1
         else:
-            ok = self._apply(target, source_state, None, target_guid)
-            result["synced" if ok else "failed"] += 1
+            applied = self._count(result, self._apply(target, source_state, None, target_guid))
         result["changes"].append(f"{state_a.title}: 首次拉齐按 {chosen} 端（{source_state.ts}秒）")
-        if not ok:
+        if not applied:
             return None
         return self._sides_after(state_a, state_b, source_state, chosen)
 
@@ -754,7 +948,17 @@ class SyncEngine:
             return source_state, self._retarget(source_state, state_b.guid)
         return self._retarget(source_state, state_a.guid), state_b
 
+    @staticmethod
+    def _count(result: dict, outcome: Optional[bool]) -> bool:
+        """按写入结果计数，返回是否应该记基线。None 表示被单向规则拦下。"""
+        if outcome is None:
+            result["skipped"] += 1
+            return False
+        result["synced" if outcome else "failed"] += 1
+        return bool(outcome)
+
     def _save_baseline(self, key: str, state_a: MediaState, state_b: MediaState) -> None:
+        self.baseline_dirty = True
         self.baseline[key] = {
             "a": self._snapshot(state_a),
             "b": self._snapshot(state_b),
