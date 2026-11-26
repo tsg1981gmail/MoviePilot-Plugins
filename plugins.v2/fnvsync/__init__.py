@@ -158,7 +158,7 @@ class FnVsync(_PluginBase):
                 "description": "手动触发一次双 NAS 播放记录同步",
             },
             {
-                "path": "/full",
+                "path": "/syncall",
                 "endpoint": self.api_run_full,
                 "methods": ["POST"],
                 "auth": "bear",
