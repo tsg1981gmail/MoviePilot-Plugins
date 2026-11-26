@@ -678,12 +678,19 @@ class FnVsync(_PluginBase):
             trust_cert=self._trust_cert,
         )
 
+    @staticmethod
+    def _norm_host(host: str) -> str:
+        """统一地址写法：客户端会补 /v，配置里通常没有，比对前先拉齐。"""
+        text = str(host or "").strip().rstrip("/")
+        return text[:-2] if text.endswith("/v") else text
+
     def _saved_token(self, tag: str, host: str, user: str) -> str:
         """取可复用的登录令牌；换了地址或账号就当没有。"""
         if not tag:
             return ""
         record = (self.get_data("tokens") or {}).get(tag) or {}
-        if record.get("host") != host or record.get("user") != user:
+        if (self._norm_host(record.get("host")) != self._norm_host(host)
+                or record.get("user") != user):
             return ""
         saved_at = record.get("ts") or 0
         if not saved_at or (time.time() - float(saved_at)) > self._token_ttl * 3600:
@@ -694,7 +701,7 @@ class FnVsync(_PluginBase):
         if not tag:
             return ""
         record = (self.get_data("tls_fp") or {}).get(tag) or {}
-        if record.get("host") != host:
+        if self._norm_host(record.get("host")) != self._norm_host(host):
             return ""
         return record.get("fp") or ""
 
@@ -705,12 +712,14 @@ class FnVsync(_PluginBase):
         try:
             if client.token:
                 tokens = dict(self.get_data("tokens") or {})
-                tokens[tag] = {"host": client.host, "user": client.username,
+                tokens[tag] = {"host": self._norm_host(client.host),
+                               "user": client.username,
                                "token": client.token, "ts": time.time()}
                 self.save_data("tokens", tokens)
             if client.learned_fingerprint:
                 fps = dict(self.get_data("tls_fp") or {})
-                fps[tag] = {"host": client.host, "fp": client.learned_fingerprint}
+                fps[tag] = {"host": self._norm_host(client.host),
+                            "fp": client.learned_fingerprint}
                 self.save_data("tls_fp", fps)
         except Exception as exc:
             logger.error(f"飞牛双机同步：保存登录令牌失败 - {exc}")
