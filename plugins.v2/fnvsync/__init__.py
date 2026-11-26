@@ -673,8 +673,9 @@ class FnVsync(_PluginBase):
             self.post_message(title="飞牛双机同步", text=message)
         return result
 
-    def api_run(self) -> dict:
-        result = self.sync()
+    def api_run(self, full: bool = False) -> dict:
+        """默认走增量；带 full=true 强制全量扫描一次。"""
+        result = self.sync(full=bool(full))
         return {"success": result is not None, "data": result}
 
     def api_test(self) -> dict:
