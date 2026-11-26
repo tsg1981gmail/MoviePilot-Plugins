@@ -59,7 +59,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.15"
+    plugin_version = "1.0.16"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -135,6 +135,7 @@ class FnVsync(_PluginBase):
         mode = str(config.get("login_mode") or "auto")
         self._login_mode = mode if mode in ("auto", "v1", "v2") else "auto"
         self._last_result = self.get_data("last_result")
+        self._last_time = (self._last_result or {}).get("time") or ""
         self._history = self.get_data("history") or []
         # 旧版本把每次的全部变更都存进历史，单条能到几十 KB，这里统一截断
         for record in self._history:
@@ -1015,6 +1016,8 @@ class FnVsync(_PluginBase):
 
         self._last_result = result
         self._last_time = now
+        # 时间戳跟着结果一起存，重载插件后页面不会又变回「尚未执行过同步」
+        result["time"] = now
         self.save_data("last_result", result)
         if getattr(engine, "baseline_dirty", False):
             self.save_data("baseline", baseline)
