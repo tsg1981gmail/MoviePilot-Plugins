@@ -845,21 +845,20 @@ class SyncEngine:
             self.log("ERROR", f"缺少接收端标识，跳过写入: {source_state.title}")
             return False
         ok = True
-        wrote_watched = False
         if base_state is None or source_state.ts != base_state.ts:
             ok = target.set_progress(self._retarget(source_state, target_guid)) and ok
         if self.sync_watched and (
             base_state is None or source_state.watched != base_state.watched
         ):
             ok = target.set_watched(target_guid, source_state.watched) and ok
-            wrote_watched = True
         # 节流自适应：连续成功就加快，遇到失败再拉长间隔，兼顾速度与服务端压力
         if ok:
             self._write_gap = max(0.02, self._write_gap * 0.8)
         else:
             self._write_gap = min(0.5, max(0.2, self._write_gap * 3))
-        if ok and wrote_watched and target_parent:
-            # 「已看完」写错最难发现（条目直接从继续观看里消失），留一条待回读
+        if ok and target_parent:
+            # 留一条待回读：分集写入最难肉眼发现，尤其「已看完」写错会让条目
+            # 直接从继续观看列表里消失，看不出异常
             tag = "b" if target is self.client_b else "a"
             self._writes.append(
                 (tag, target_guid, target_parent,
