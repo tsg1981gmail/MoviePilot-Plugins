@@ -632,6 +632,8 @@ class FnVsync(_PluginBase):
             parts.append(f"{stats['kb']} KB")
         if status.get("elapsed"):
             parts.append(f"{status['elapsed']} 秒")
+        if stats.get("ms"):
+            parts.append(f"其中网络 {stats['ms']} 毫秒")
         if stats.get("children_requests"):
             parts.append(f"其中展开分集 {stats['children_requests']} 次")
         if stats.get("skipped_expand"):
@@ -706,21 +708,29 @@ class FnVsync(_PluginBase):
         return record.get("fp") or ""
 
     def _persist_client(self, tag: str, client: FnClient) -> None:
-        """把令牌与证书指纹存下来，下一轮就不用重新登录、也能比对证书。"""
+        """把令牌与证书指纹存下来，下一轮就不用重新登录、也能比对证书。
+
+        只在真的换了新令牌或新指纹时才写存储：复用令牌的那一轮写进去等于没变，
+        但每次 save_data 都要整份重写插件数据，白白增加开销。
+        """
         if not tag or client is None:
             return
         try:
             if client.token:
                 tokens = dict(self.get_data("tokens") or {})
-                tokens[tag] = {"host": self._norm_host(client.host),
-                               "user": client.username,
-                               "token": client.token, "ts": time.time()}
-                self.save_data("tokens", tokens)
+                stored = tokens.get(tag) or {}
+                if stored.get("token") != client.token:
+                    tokens[tag] = {"host": self._norm_host(client.host),
+                                   "user": client.username,
+                                   "token": client.token, "ts": time.time()}
+                    self.save_data("tokens", tokens)
             if client.learned_fingerprint:
                 fps = dict(self.get_data("tls_fp") or {})
-                fps[tag] = {"host": self._norm_host(client.host),
-                            "fp": client.learned_fingerprint}
-                self.save_data("tls_fp", fps)
+                stored_fp = fps.get(tag) or {}
+                if stored_fp.get("fp") != client.learned_fingerprint:
+                    fps[tag] = {"host": self._norm_host(client.host),
+                                "fp": client.learned_fingerprint}
+                    self.save_data("tls_fp", fps)
         except Exception as exc:
             logger.error(f"飞牛双机同步：保存登录令牌失败 - {exc}")
 
@@ -952,6 +962,7 @@ class FnVsync(_PluginBase):
             "failed": result.get("failed"),
             "requests": stats.get("requests"),
             "kb": stats.get("kb"),
+            "net_ms": stats.get("ms"),
             "children": stats.get("children_requests"),
             "skipped_expand": stats.get("skipped_expand"),
             "login": stats.get("login"),

@@ -219,6 +219,7 @@ class FnClient:
         # 运行统计，供结构化日志使用
         self.stats: Dict[str, int] = {
             "requests": 0, "bytes": 0, "errors": 0, "login": 0, "reused_token": 0,
+            "ms": 0,
         }
 
     @staticmethod
@@ -271,10 +272,12 @@ class FnClient:
         try:
             session = self._http()
             self.stats["requests"] += 1
+            started = time.time()
             response = session.request(
                 method, url, headers=headers, data=body if body else None,
                 timeout=self.timeout,
             )
+            self.stats["ms"] += int((time.time() - started) * 1000)
             self.stats["bytes"] += len(response.content or b"")
             text = response.text or ""
             try:
@@ -919,6 +922,7 @@ class SyncEngine:
             "requests": int(stat_a.get("requests", 0)) + int(stat_b.get("requests", 0)),
             "bytes": total_bytes,
             "kb": round(total_bytes / 1024.0, 1),
+            "ms": int(stat_a.get("ms", 0)) + int(stat_b.get("ms", 0)),
             "errors": int(stat_a.get("errors", 0)) + int(stat_b.get("errors", 0)),
             "login": int(stat_a.get("login", 0)) + int(stat_b.get("login", 0)),
             "reused_token": int(stat_a.get("reused_token", 0)) + int(stat_b.get("reused_token", 0)),
