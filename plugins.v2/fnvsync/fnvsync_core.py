@@ -740,17 +740,18 @@ class SyncEngine:
         全量扫描的请求几乎全花在逐季逐集上（实测 89 次里 80 多次是子级）。
         绝大多数剧在两个库之间早就一致，每轮重拉一遍纯属浪费，这里按四条判断：
 
-        1. 两端整剧都已看完、集数也一致 —— 分集层必然一致，直接跳过；
-        2. 本轮是深度轮 —— 无条件完整展开，防止下面两条漏掉东西；
+        1. 本轮是深度轮 —— 无条件完整展开，任何省请求的判断都不能抢先；
+        2. 两端整剧都已看完、集数也一致 —— 分集层必然一致，直接跳过；
         3. 两端顶层状态不同 —— 有差异，必须展开定位到分集；
         4. 上一轮展开后顶层指纹没变 —— 没人动过，跳过。
 
         代价：分集层的手动改动而顶层毫无变化时，要等深度轮（默认 24 小时）才补上。
         """
-        if state_a.watched and state_b.watched and state_a.ep_count == state_b.ep_count:
-            return False
+        # 深度轮无条件完整展开，任何省请求的判断都不能抢先
         if self.deep:
             return True
+        if state_a.watched and state_b.watched and state_a.ep_count == state_b.ep_count:
+            return False
         if state_a.state_tuple() != state_b.state_tuple():
             return True
         record = self.baseline.get(self._parent_key(state_a, state_b)) or {}
