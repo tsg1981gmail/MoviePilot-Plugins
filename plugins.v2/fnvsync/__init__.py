@@ -57,7 +57,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.11"
+    plugin_version = "1.0.12"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -184,46 +184,48 @@ class FnVsync(_PluginBase):
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
-        if self._run_now and self._enabled:
-            return [
-                {
-                    "id": "FnVsync.Once",
-                    "name": "飞牛播放记录同步插件（立即运行一次）",
-                    "trigger": DateTrigger(run_date=datetime.now() + timedelta(seconds=3)),
-                    "func": self._run_once,
-                    "kwargs": {},
-                }
-            ]
-        # 连接检查只登录不同步，未启用插件时也允许执行，方便先验证地址与账号
-        if self._check_now:
-            return [
-                {
-                    "id": "FnVsync.Check",
-                    "name": "飞牛播放记录同步插件（检查连接）",
-                    "trigger": DateTrigger(run_date=datetime.now() + timedelta(seconds=2)),
-                    "func": self._check_once,
-                    "kwargs": {},
-                }
-            ]
-        if not self._enabled:
-            return []
-        return [
-            {
+        """返回本插件要注册的定时任务。
+
+        定时任务必须始终返回，不能和「立即运行一次」互斥：
+        MoviePilot 只在插件加载时调用一次本方法，勾一次一次性开关后如果只注册了
+        一次性任务，那个任务执行完、开关自动关闭时也没有任何回调会重新注册定时任务，
+        结果就是整天不再自动同步（实测踩过）。
+        """
+        services: List[Dict[str, Any]] = []
+        if self._enabled:
+            services.append({
                 "id": "FnVsync.Sync",
                 "name": "飞牛播放记录同步插件（增量）",
                 "trigger": IntervalTrigger(minutes=self._interval),
                 "func": self.sync,
                 "kwargs": {},
-            },
-            {
+            })
+            services.append({
                 # 继续观看列表看不到「已看完」标记，也没有新片配对信息，靠这个低频全量兜底
                 "id": "FnVsync.Full",
                 "name": "飞牛播放记录同步插件（全量扫描）",
                 "trigger": IntervalTrigger(hours=self._full_interval),
                 "func": self._run_full,
                 "kwargs": {},
-            },
-        ]
+            })
+        if self._run_now and self._enabled:
+            services.append({
+                "id": "FnVsync.Once",
+                "name": "飞牛播放记录同步插件（立即运行一次）",
+                "trigger": DateTrigger(run_date=datetime.now() + timedelta(seconds=3)),
+                "func": self._run_once,
+                "kwargs": {},
+            })
+        # 连接检查只登录不同步，未启用插件时也允许执行，方便先验证地址与账号
+        if self._check_now:
+            services.append({
+                "id": "FnVsync.Check",
+                "name": "飞牛播放记录同步插件（检查连接）",
+                "trigger": DateTrigger(run_date=datetime.now() + timedelta(seconds=2)),
+                "func": self._check_once,
+                "kwargs": {},
+            })
+        return services
 
     def _base_config(self) -> Dict[str, Any]:
         """基于配置快照拼出完整的配置字典，供整份回写使用。"""
@@ -488,6 +490,17 @@ class FnVsync(_PluginBase):
                 f"模糊跳过 {status.get('ambiguous', 0)} · "
                 f"失败 {status.get('failed', 0)}"
             )
+            # 定时服务如果没注册，这里能第一时间看出来，保存一次配置即可重新注册
+            try:
+                gap_hours = (datetime.now() - datetime.strptime(
+                    self._last_time, "%Y-%m-%d %H:%M:%S")).total_seconds() / 3600
+                if gap_hours > max(1.0, self._interval * 3 / 60):
+                    lines.append(
+                        f"注意：距上次同步已 {gap_hours:.1f} 小时，"
+                        f"若长时间不再自动运行，请在本页点一次「保存」重新注册定时服务"
+                    )
+            except (TypeError, ValueError):
+                pass
         else:
             lines.append("尚未执行过同步。保存配置后可在服务中手动触发，或等待定时任务。")
 
