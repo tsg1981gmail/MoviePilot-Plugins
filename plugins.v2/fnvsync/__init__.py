@@ -59,7 +59,7 @@ class FnVsync(_PluginBase):
     plugin_name = "飞牛播放记录同步插件"
     plugin_desc = "同步两台飞牛影视中相同影片的播放进度和已看完标记，支持双向。"
     plugin_icon = "Moviepilot_A.png"
-    plugin_version = "1.0.18"
+    plugin_version = "1.0.19"
     plugin_author = "田树刚"
     author_url = ""
     plugin_config_prefix = "fnvsync_"
@@ -978,7 +978,8 @@ class FnVsync(_PluginBase):
         result["changes"] = (result.get("changes") or [])[:30]
         result["stats"] = engine.collect_stats()
         result["elapsed"] = round(time.time() - started, 2)
-        result["deep"] = bool(deep)
+        # 以引擎实际状态为准：新条目缺失映射时会被强制升级成深度轮
+        result["deep"] = bool(engine.deep)
         result["dry_run"] = bool(dry_run)
         return self._finish(result, engine, baseline, attempt)
 
