@@ -603,7 +603,7 @@ class FnVsync(_PluginBase):
             {
                 "component": "VAlert",
                 "props": {"type": "info", "variant": "tonal",
-                          "text": " ".join(lines) + "。手动同步：设定 → 服务中点运行，或发命令 /fnvsync",
+                          "text": "；".join(lines) + "。手动同步：设定 → 服务中点运行，或发命令 /fnvsync",
                           "density": "compact"},
             }
         )
@@ -611,14 +611,15 @@ class FnVsync(_PluginBase):
         items = status.get("items") or []
         if items:
             content.append(self._changes_card(
-                f"上次同步的变更（显示片名，最多 15 条）", items, "text-caption"))
+                "上次同步的变更（显示片名，最多 15 条）", items, "text-caption"))
 
         dry = self._last_dryrun or {}
-        if dry.get("items") or dry.get("time"):
+        if dry.get("time"):
+            dry_items = dry.get("items") or []
             content.append(self._changes_card(
-                f"最近一次试运行 {dry.get('time', '')}：预计同步 "
+                f"最近一次试运行 {dry['time']}：预计同步 "
                 f"{dry.get('synced', 0)} 条，未写入任何数据",
-                dry.get("items") or [], "text-caption font-italic"))
+                dry_items, "text-caption font-italic"))
         return content
 
     @staticmethod
@@ -655,6 +656,14 @@ class FnVsync(_PluginBase):
 
         rows = [{"component": "div", "props": {"class": "text-subtitle-2 mb-2"},
                  "content": [title]}]
+        if not items:
+            rows.append({"component": "div", "props": {"class": text_class},
+                         "content": ["两端状态一致，没有需要写入的条目。"]})
+            return {
+                "component": "VCard",
+                "props": {"variant": "tonal", "class": "mb-3"},
+                "content": [{"component": "VCardText", "content": rows}],
+            }
         rows.append(row(("片名", "方向", "进度")))
         for item in items[:15]:
             ts = int(item.get("ts") or 0)
