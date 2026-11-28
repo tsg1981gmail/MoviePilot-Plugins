@@ -39,6 +39,36 @@ import statistics
 from pathlib import Path
 
 lock = threading.RLock()
+traffic_notify_lock = threading.RLock()
+notify_dedupe_lock = threading.RLock()
+
+
+def parse_notify_time_parts(value: Any) -> Optional[Tuple[int, int]]:
+    """把 7:30 / 07:30 解析成 (hour, minute)，非法返回 None。"""
+    match = re.match(r"^\s*(\d{1,2})\s*:\s*(\d{1,2})\s*$", str(value or ""))
+    if not match:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if 0 <= hour <= 23 and 0 <= minute <= 59:
+        return hour, minute
+    return None
+
+
+def parse_notify_times(value: Any, default: Tuple[str, ...] = ("07:30", "21:00")) -> List[str]:
+    """解析逗号/分号/空格分隔的推送时间，归一化、排序、去重，全非法时回落默认值。"""
+    times: List[str] = []
+    for part in re.split(r"[,，;；\s]+", str(value or "")):
+        parsed = parse_notify_time_parts(part)
+        if not parsed:
+            continue
+        text = f"{parsed[0]:02d}:{parsed[1]:02d}"
+        if text not in times:
+            times.append(text)
+    return sorted(times) or list(default)
+
+
+def normalize_notify_times(value: Any) -> str:
+    return ",".join(parse_notify_times(value))
 
 
 class DiagnosticRecorder:
@@ -1835,6 +1865,15 @@ class BrushConfig:
     def __init__(self, config: dict, process_site_config=True):
         self.enabled = config.get("enabled", False)
         self.notify = config.get("notify", True)
+        self.notify_version = config.get("notify_version", True)
+        self.notify_error = config.get("notify_error", True)
+        self.notify_torrent_add = config.get("notify_torrent_add", True)
+        self.notify_torrent_delete = config.get("notify_torrent_delete", True)
+        self.notify_torrent_status = config.get("notify_torrent_status", True)
+        self.notify_traffic = config.get("notify_traffic", True)
+        self.notify_traffic_times = normalize_notify_times(
+            config.get("notify_traffic_times", "07:30,21:00")
+        )
         self.onlyonce = config.get("onlyonce", False)
         self.brushsites = config.get("brushsites", [])
         self.downloader = config.get("downloader")
@@ -2449,7 +2488,7 @@ class BrushFlowLowFreq(_PluginBase):
     # 插件图标
     plugin_icon = "brush.jpg"
     # 插件版本
-    plugin_version = "4.4.3"
+    plugin_version = "4.5.0"
     # 插件作者
     plugin_author = "jxxghp,InfinityPacer"
     # 作者主页
@@ -2629,10 +2668,11 @@ class BrushFlowLowFreq(_PluginBase):
                         config["brushflowlowfreq_plugin_version"] = "current"
                     self.update_config(config)
                     logger.info("插件版本已切换至 " + target_ver + "，重启 MoviePilot 后生效")
-                    try:
-                        self.post_message(mtype=NotificationType.SiteMessage, title="【插件版本切换】", text="已切换至 " + target_ver + "，请重启 MoviePilot 使新版本生效")
-                    except Exception:
-                        pass
+                    if config.get("notify", True) and config.get("notify_version", True):
+                        try:
+                            self.post_message(mtype=NotificationType.SiteMessage, title="【插件版本切换】", text="已切换至 " + target_ver + "，请重启 MoviePilot 使新版本生效")
+                        except Exception:
+                            pass
                     return False
                 except Exception as e:
                     logger.error("版本切换失败: " + str(e))
@@ -3220,6 +3260,21 @@ class BrushFlowLowFreq(_PluginBase):
                 "func": self.check,
                 "kwargs": {"seconds": check_interval_seconds}
             })
+
+        if brush_config.enabled and brush_config.notify and brush_config.notify_traffic:
+            for time_text in parse_notify_times(brush_config.notify_traffic_times):
+                parsed_time = parse_notify_time_parts(time_text)
+                if not parsed_time:
+                    continue
+                hour, minute = parsed_time
+                services.append({
+                    "id": f"BrushFlowLowFreqTrafficDaily_{hour:02d}{minute:02d}",
+                    "name": f"shualiu流量日报（{time_text}）",
+                    "trigger": "cron",
+                    "func": self.notify_daily_traffic,
+                    "kwargs": {"hour": hour, "minute": minute},
+                    "func_kwargs": {"slot": time_text},
+                })
 
         if not services:
             self.__log_status("站点刷流服务未开启")
@@ -5952,6 +6007,13 @@ class BrushFlowLowFreq(_PluginBase):
         defaults = {
             "enabled": False,
             "notify": True,
+            "notify_version": True,
+            "notify_error": True,
+            "notify_torrent_add": True,
+            "notify_torrent_delete": True,
+            "notify_torrent_status": True,
+            "notify_traffic": True,
+            "notify_traffic_times": "07:30,21:00",
             "onlyonce": False,
             "clear_task": False,
             "brush_interval_minutes": 10,
@@ -6023,6 +6085,7 @@ class BrushFlowLowFreq(_PluginBase):
         }
         self.__prepare_multi_downloader_form(form=form, defaults=defaults)
         self.__prepare_upload_protection_form(form=form, defaults=defaults)
+        self.__prepare_notification_form(form=form, defaults=defaults)
         return form, defaults
 
     @staticmethod
@@ -6327,6 +6390,138 @@ class BrushFlowLowFreq(_PluginBase):
             window_content.insert(insert_index, self.__build_upload_protection_tab())
         self.__organize_form_tabs(window_content)
         self.__prune_empty_form_layout(window_content)
+
+    def __prepare_notification_form(self, form: List[dict], defaults: Dict[str, Any]) -> None:
+        """
+        插入「通知」标签页：6 类通知开关 + 每日流量推送时间。
+        """
+        for key, value in (
+            ("notify_version", True),
+            ("notify_error", True),
+            ("notify_torrent_add", True),
+            ("notify_torrent_delete", True),
+            ("notify_torrent_status", True),
+            ("notify_traffic", True),
+            ("notify_traffic_times", "07:30,21:00"),
+        ):
+            defaults.setdefault(key, value)
+
+        form_content = (form[0].get("content") or []) if form else []
+        tabs = self.__find_component(form_content, "VTabs")
+        window = self.__find_component(form_content, "VWindow")
+        if not tabs or not window:
+            return
+
+        tab_content = tabs.setdefault("content", [])
+        if not any(tab.get("props", {}).get("value") == "notify_tab" for tab in tab_content):
+            insert_index = self.__find_tab_insert_index(tab_content, before_value="other_tab")
+            tab_content.insert(insert_index, {
+                "component": "VTab",
+                "props": {"value": "notify_tab"},
+                "text": "通知"
+            })
+
+        window_content = window.setdefault("content", [])
+        if not any(item.get("props", {}).get("value") == "notify_tab" for item in window_content):
+            insert_index = self.__find_tab_insert_index(window_content, before_value="other_tab")
+            window_content.insert(insert_index, self.__build_notification_tab())
+        self.__prune_empty_form_layout(window_content)
+
+    def __build_notification_tab(self) -> dict:
+        def switch(model: str, label: str) -> dict:
+            return {
+                "component": "VCol",
+                "props": {"cols": 12, "md": 4},
+                "content": [{
+                    "component": "VSwitch",
+                    "props": {"model": model, "label": label}
+                }]
+            }
+
+        def text_field(model: str, label: str, placeholder: str = "") -> dict:
+            return {
+                "component": "VCol",
+                "props": {"cols": 12, "md": 4},
+                "content": [{
+                    "component": "VTextField",
+                    "props": {
+                        "model": model,
+                        "label": label,
+                        "placeholder": placeholder
+                    }
+                }]
+            }
+
+        def section_label(text: str) -> dict:
+            return {
+                "component": "VCol",
+                "props": {"cols": 12},
+                "content": [{
+                    "component": "div",
+                    "props": {"class": "text-subtitle-2 font-weight-bold mt-2 mb-1"},
+                    "text": text
+                }]
+            }
+
+        return {
+            "component": "VWindowItem",
+            "props": {"value": "notify_tab"},
+            "content": [
+                {
+                    "component": "VRow",
+                    "content": [{
+                        "component": "VCol",
+                        "props": {"cols": 12},
+                        "content": [{
+                            "component": "VAlert",
+                            "props": {
+                                "type": "info",
+                                "variant": "tonal",
+                                "text": "顶部「发送通知」是总开关，关闭后本页所有通知都不会发送。"
+                            }
+                        }]
+                    }]
+                },
+                {
+                    "component": "VRow",
+                    "content": [section_label("通知类型")]
+                },
+                {
+                    "component": "VRow",
+                    "content": [
+                        switch("notify_version", "插件版本切换"),
+                        switch("notify_error", "运行错误（30 分钟内相同内容只发一次）"),
+                        switch("notify_torrent_add", "种子下载"),
+                        switch("notify_torrent_delete", "删种结果（含失败）"),
+                        switch("notify_torrent_status", "任务状态变更"),
+                    ]
+                },
+                {
+                    "component": "VRow",
+                    "content": [section_label("每日流量推送")]
+                },
+                {
+                    "component": "VRow",
+                    "content": [
+                        switch("notify_traffic", "启用每日流量推送"),
+                        text_field("notify_traffic_times", "推送时间",
+                                   "多个时间用英文逗号分隔，如 07:30,21:00"),
+                    ]
+                },
+                {
+                    "component": "VRow",
+                    "content": [{
+                        "component": "VCol",
+                        "props": {"cols": 12},
+                        "content": [{
+                            "component": "div",
+                            "props": {"class": "text-caption text-medium-emphasis"},
+                            "text": "每天在设定时间推送本日/昨日/本月的上传与下载；本日为 00:00 至本次推送时刻。"
+                        }]
+                    }]
+                }
+            ]
+        }
 
     def __organize_form_tabs(self, window_content: List[dict]) -> None:
         items_by_tab = {
@@ -9456,6 +9651,9 @@ class BrushFlowLowFreq(_PluginBase):
             return
 
         brush_config = self.__get_brush_config()
+
+        if downloader_name is None:
+            self.__maybe_notify_traffic_daily()
 
         if downloader_name is None and (
                 brush_config.multi_downloader_enabled or brush_config.dynamic_scheduler_enabled):
@@ -12989,7 +13187,7 @@ class BrushFlowLowFreq(_PluginBase):
                     "hashes": list(dict.fromkeys(need_delete_hashes))
                 })
             else:
-                self.__send_message(title="【刷流任务种子删除】", text=msg)
+                self.__send_message(title="【刷流任务种子删除】", text=msg, kind="torrent_delete")
 
         # 返回所有需要删除的种子的哈希列表
         return need_delete_hashes
@@ -13149,7 +13347,8 @@ class BrushFlowLowFreq(_PluginBase):
                 continue
             summary_text = summary_message.get("text", "")
             summary_text = f"{summary_text}\n结果：下载器已完成 {success_count} 个种子彻底删除（含下载文件）"
-            self.__send_message(title=summary_message.get("title", "【刷流任务种子删除】"), text=summary_text)
+            self.__send_message(title=summary_message.get("title", "【刷流任务种子删除】"),
+                               text=summary_text, kind="torrent_delete")
 
     def __send_delete_failed_message(self, failed_hashes: List[str], torrent_tasks: Dict[str, dict]):
         """
@@ -13171,7 +13370,7 @@ class BrushFlowLowFreq(_PluginBase):
             msg_text = f"{msg_text}\n示例：{title_preview}"
         msg_text = (f"{msg_text}\n原因：下载器未成功执行“删除种子并删除文件”，"
                     f"请检查下载器权限、保存路径权限或连接状态后重试")
-        self.__send_message(title="【刷流任务删种失败】", text=msg_text)
+        self.__send_message(title="【刷流任务删种失败】", text=msg_text, kind="torrent_delete")
 
     def __update_undeleted_torrents_missing_in_downloader(self, torrent_tasks, torrent_check_hashes, torrents):
         """
@@ -13432,6 +13631,154 @@ class BrushFlowLowFreq(_PluginBase):
         if isinstance(now, datetime):
             return int(now.timestamp())
         return int(time.time())
+
+    def __load_traffic_daily_state(self, today: str) -> dict:
+        """
+        读取当天的流量日报状态，跨天自动重置。
+        """
+        state = self.get_data("notify_traffic_daily") or {}
+        if not isinstance(state, dict) or state.get("date") != today:
+            state = {"date": today, "slots": {}}
+        if not isinstance(state.get("slots"), dict):
+            state["slots"] = {}
+        return state
+
+    def __traffic_slot_sent(self, slot: str, today: str) -> bool:
+        state = self.get_data("notify_traffic_daily") or {}
+        if not isinstance(state, dict) or state.get("date") != today:
+            return False
+        info = (state.get("slots") or {}).get(slot) or {}
+        return bool(isinstance(info, dict) and info.get("sent"))
+
+    def __mark_traffic_slot_skipped(self, slot: str, today: str) -> None:
+        """
+        补发时，更早的时点直接标记为已跳过，避免同一天重复推送。
+        """
+        with traffic_notify_lock:
+            state = self.__load_traffic_daily_state(today)
+            state["slots"][slot] = {
+                "sent": True,
+                "skipped": True,
+                "attempts": 0,
+                "attempt_at": None,
+            }
+            self.save_data("notify_traffic_daily", state)
+
+    def __build_traffic_daily_text(self, now: datetime) -> str:
+        """
+        构建每日流量汇报文本：本日/昨日/本月的上传与下载。
+        """
+        today = now.strftime("%Y-%m-%d")
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        month = now.strftime("%Y-%m")
+        daily_statistic = self.__get_daily_statistic_info()
+        monthly_statistic = self.__get_monthly_statistic_info()
+        monthly_statistic = self.__ensure_monthly_statistic_from_daily(
+            daily_statistic=daily_statistic,
+            monthly_statistic=monthly_statistic,
+        )
+
+        def read_stat(stat: Dict[str, dict], key: str) -> Tuple[int, int]:
+            record = stat.get(key) or {}
+            if not isinstance(record, dict):
+                return 0, 0
+            try:
+                uploaded = int(record.get("uploaded") or 0)
+                downloaded = int(record.get("downloaded") or 0)
+            except (TypeError, ValueError):
+                return 0, 0
+            return uploaded, downloaded
+
+        today_uploaded, today_downloaded = read_stat(daily_statistic, today)
+        yesterday_uploaded, yesterday_downloaded = read_stat(daily_statistic, yesterday)
+        month_uploaded, month_downloaded = read_stat(monthly_statistic, month)
+        month_label = f"本月（{now.day}天）"
+
+        return (
+            f"统计时间：{now.strftime('%Y-%m-%d %H:%M')}\n\n"
+            f"本日上传：{StringUtils.str_filesize(today_uploaded)}    "
+            f"本日下载：{StringUtils.str_filesize(today_downloaded)}\n"
+            f"昨日上传：{StringUtils.str_filesize(yesterday_uploaded)}    "
+            f"昨日下载：{StringUtils.str_filesize(yesterday_downloaded)}\n"
+            f"{month_label}上传：{StringUtils.str_filesize(month_uploaded)}    "
+            f"{month_label}下载：{StringUtils.str_filesize(month_downloaded)}"
+        )
+
+    def notify_daily_traffic(self, slot: str, now: Optional[datetime] = None) -> None:
+        """
+        发送指定时点的流量日报；同一天同一时点最多尝试 3 次，间隔至少 10 分钟。
+        """
+        parsed_slot = parse_notify_time_parts(slot)
+        if not parsed_slot:
+            logger.warning(f"刷流流量日报时间格式非法：{slot}")
+            return
+        brush_config = self.__get_brush_config()
+        if not brush_config or not brush_config.enabled:
+            return
+        if not self.__notify_allowed("traffic"):
+            return
+        now = now or datetime.now(tz=pytz.timezone(settings.TZ))
+        today = now.strftime("%Y-%m-%d")
+
+        with traffic_notify_lock:
+            state = self.__load_traffic_daily_state(today)
+            info = state["slots"].get(slot) or {}
+            if not isinstance(info, dict):
+                info = {}
+            if info.get("sent"):
+                return
+            attempts = int(info.get("attempts") or 0)
+            if attempts >= 3:
+                return
+            attempt_at = info.get("attempt_at")
+            now_ts = now.timestamp()
+            if attempts > 0 and isinstance(attempt_at, (int, float)) and now_ts - float(attempt_at) < 600:
+                return
+            state["slots"][slot] = {
+                "sent": False,
+                "attempts": attempts + 1,
+                "attempt_at": now_ts,
+            }
+            self.save_data("notify_traffic_daily", state)
+
+        title = f"【刷流流量日报】{today}"
+        text = self.__build_traffic_daily_text(now)
+        delivered = self.__deliver_notification(kind="traffic", title=title, text=text)
+        if delivered:
+            with traffic_notify_lock:
+                state = self.__load_traffic_daily_state(today)
+                info = state["slots"].get(slot) or {}
+                if not isinstance(info, dict):
+                    info = {}
+                info["sent"] = True
+                state["slots"][slot] = info
+                self.save_data("notify_traffic_daily", state)
+
+    def __maybe_notify_traffic_daily(self, now: Optional[datetime] = None) -> None:
+        """
+        补发最近一个已到点但未发送的时点；更早的时点直接标记跳过。
+        """
+        brush_config = self.__get_brush_config()
+        if not brush_config or not brush_config.enabled:
+            return
+        if not self.__notify_allowed("traffic"):
+            return
+        now = now or datetime.now(tz=pytz.timezone(settings.TZ))
+        today = now.strftime("%Y-%m-%d")
+        current = (now.hour, now.minute)
+        times = parse_notify_times(brush_config.notify_traffic_times)
+        due = [
+            slot_text for slot_text in times
+            if parse_notify_time_parts(slot_text) <= current
+            and not self.__traffic_slot_sent(slot_text, today)
+        ]
+        if not due:
+            return
+        latest = max(due, key=lambda item: parse_notify_time_parts(item))
+        for slot_text in due:
+            if slot_text != latest:
+                self.__mark_traffic_slot_skipped(slot_text, today)
+        self.notify_daily_traffic(latest, now)
 
     def __get_daily_statistic_info(self) -> Dict[str, dict]:
         """
@@ -14141,6 +14488,15 @@ class BrushFlowLowFreq(_PluginBase):
             config["free_remaining_time_skip_range"] = None
             found_error = True  # 更新错误标志
 
+        notify_traffic_times_raw = config.get("notify_traffic_times")
+        if notify_traffic_times_raw not in (None, ""):
+            normalized_times = normalize_notify_times(notify_traffic_times_raw)
+            if normalized_times != str(notify_traffic_times_raw).strip():
+                logger.warning(
+                    f"站点刷流任务通知推送时间已规范化：{notify_traffic_times_raw} -> {normalized_times}"
+                )
+                config["notify_traffic_times"] = normalized_times
+
         # 如果发现任何错误，返回False；否则返回True
         return not found_error
 
@@ -14247,6 +14603,13 @@ class BrushFlowLowFreq(_PluginBase):
             "onlyonce": brush_config.onlyonce,
             "enabled": brush_config.enabled,
             "notify": brush_config.notify,
+            "notify_version": brush_config.notify_version,
+            "notify_error": brush_config.notify_error,
+            "notify_torrent_add": brush_config.notify_torrent_add,
+            "notify_torrent_delete": brush_config.notify_torrent_delete,
+            "notify_torrent_status": brush_config.notify_torrent_status,
+            "notify_traffic": brush_config.notify_traffic,
+            "notify_traffic_times": brush_config.notify_traffic_times,
             "brushsites": brush_config.brushsites,
             "downloader": brush_config.downloader,
             "multi_downloader_enabled": brush_config.multi_downloader_enabled,
@@ -15111,21 +15474,83 @@ class BrushFlowLowFreq(_PluginBase):
             "tracker": tracker
         }
 
+    def __notify_allowed(self, kind: str) -> bool:
+        """
+        判断某类通知是否允许发送：总开关 + 分类开关。
+        """
+        brush_config = self.__get_brush_config()
+        if not brush_config:
+            return True
+        if not getattr(brush_config, "notify", True):
+            return False
+        return bool(getattr(brush_config, f"notify_{kind}", True))
+
+    def __notify_dedupe_passed(self, title: str, text: str, minutes: int) -> bool:
+        """
+        相同标题+内容的通知在窗口内只发送一次，避免下载器离线时刷屏。
+        """
+        if minutes <= 0:
+            return True
+        if not callable(getattr(self, "get_data", None)) or not callable(getattr(self, "save_data", None)):
+            return True
+        key = hashlib.md5(f"{title}\n{text}".encode("utf-8")).hexdigest()
+        now_ts = time.time()
+        with notify_dedupe_lock:
+            records = self.get_data("notify_dedupe") or {}
+            if not isinstance(records, dict):
+                records = {}
+            cutoff = now_ts - 24 * 3600
+            records = {
+                record_key: record_ts
+                for record_key, record_ts in records.items()
+                if isinstance(record_ts, (int, float)) and record_ts >= cutoff
+            }
+            last_ts = records.get(key)
+            if last_ts and now_ts - last_ts < minutes * 60:
+                return False
+            records[key] = now_ts
+            self.save_data("notify_dedupe", records)
+        return True
+
+    def __deliver_notification(self, kind: str, title: str, text: str,
+                               dedupe_minutes: int = 0) -> bool:
+        """
+        统一通知出口：分类门禁 -> 去重 -> 发送，失败时回退到系统消息。
+        """
+        if not self.__notify_allowed(kind):
+            return False
+        if not self.__notify_dedupe_passed(title=title, text=text, minutes=dedupe_minutes):
+            return False
+        try:
+            self.post_message(mtype=NotificationType.SiteMessage, title=title, text=text)
+            return True
+        except Exception as err:
+            logger.error(f"发送通知失败：{err}")
+            try:
+                self.systemmessage.put(text, title=title)
+                return True
+            except Exception as fallback_err:
+                logger.error(f"写入系统消息失败：{fallback_err}")
+                return False
+
     def __log_and_notify_error(self, message):
         """
-        记录错误日志并发送系统通知
+        记录错误日志并发送系统通知（30 分钟内相同内容只发一次）
         """
         logger.error(message)
-        self.systemmessage.put(message, title="shualiu")
+        self.__deliver_notification(
+            kind="error",
+            title="【刷流任务异常】",
+            text=message,
+            dedupe_minutes=30,
+        )
 
     def __send_delete_message(self, site_name: str, torrent_title: str, torrent_desc: str, reason: str,
+                              kind: str = "torrent_delete",
                               title: str = "【刷流任务种子删除】"):
         """
         发送删除种子的消息
         """
-        brush_config = self.__get_brush_config()
-        if not brush_config.notify:
-            return
         msg_text = ""
         if site_name:
             msg_text = f"站点：{site_name}"
@@ -15136,7 +15561,7 @@ class BrushFlowLowFreq(_PluginBase):
         if reason:
             msg_text = f"{msg_text}\n原因：{reason}"
 
-        self.post_message(mtype=NotificationType.SiteMessage, title=title, text=msg_text)
+        self.__deliver_notification(kind=kind, title=title, text=msg_text)
 
     @staticmethod
     def __build_add_message_text(torrent):
@@ -15173,30 +15598,24 @@ class BrushFlowLowFreq(_PluginBase):
 
         return "\n".join(msg_parts)
 
-    def __send_add_message(self, torrent, title: str = "【刷流任务种子下载】"):
+    def __send_add_message(self, torrent, title: str = "【刷流任务种子下载】",
+                           kind: str = "torrent_add"):
         """
         发送添加下载的消息
         """
-        brush_config = self.__get_brush_config()
-        if not brush_config.notify:
-            return
-
         # 使用辅助方法构建消息文本
         msg_text = self.__build_add_message_text(torrent)
-        self.post_message(mtype=NotificationType.SiteMessage, title=title, text=msg_text)
+        self.__deliver_notification(kind=kind, title=title, text=msg_text)
 
-    def __send_message(self, title: str, text: str):
+    def __send_message(self, title: str, text: str, kind: str = "torrent_status"):
         """
         发送消息
         """
-        brush_config = self.__get_brush_config()
-        if not brush_config.notify:
-            return
-
-        self.post_message(mtype=NotificationType.SiteMessage, title=title, text=text)
+        self.__deliver_notification(kind=kind, title=title, text=text)
 
     def __log_and_send_torrent_task_update_message(self, title: str, status: str, reason: str,
-                                                   torrent_tasks: List[dict]):
+                                                   torrent_tasks: List[dict],
+                                                   kind: str = "torrent_status"):
         """
         记录和发送刷流任务更新消息
         """
@@ -15206,7 +15625,7 @@ class BrushFlowLowFreq(_PluginBase):
             count = len(torrent_tasks)
             msg = f"站点：{sites_names}\n内容：{first_title} 等 {count} 个种子已经{status}\n原因：{reason}"
             logger.info(f"{title}，{msg}")
-            self.__send_message(title=title, text=msg)
+            self.__send_message(title=title, text=msg, kind=kind)
 
     def __get_torrents_size(self) -> int:
         """

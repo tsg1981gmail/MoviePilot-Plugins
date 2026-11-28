@@ -37,7 +37,7 @@ def _install_moviepilot_stubs():
             self.upload_size = 0
 
     schemas.DownloaderInfo = DownloaderInfo
-    schemas.NotificationType = type("NotificationType", (), {})
+    schemas.NotificationType = type("NotificationType", (), {"SiteMessage": "SiteMessage"})
     schemas.TorrentInfo = type("TorrentInfo", (), {})
     schemas.MediaType = type("MediaType", (), {})
     schemas.ServiceInfo = type("ServiceInfo", (), {})
@@ -9993,6 +9993,205 @@ class BrushFlowLowFreqFeatureTests(unittest.TestCase):
         paths = [item["path"] for item in plugin.get_api()]
         self.assertIn("/diagnostic/scheduler-policy", paths)
         self.assertIn("/diagnostic/downloader-torrent-limits", paths)
+
+
+    # ---------- 通知开关与每日流量日报 ----------
+
+    def _notify_plugin(self, config=None, store=None):
+        plugin = self._new_plugin({
+            "enabled": True,
+            "notify": True,
+            "notify_traffic": True,
+            "notify_traffic_times": "07:30,21:00",
+            "downloader": "qb",
+            "brushsites": [1],
+            **(config or {}),
+        })
+        memory = self._attach_memory_store(plugin, store)
+        sent = []
+        plugin.post_message = lambda **kwargs: sent.append(kwargs)
+        return plugin, memory, sent
+
+    def test_parse_notify_times_normalizes_and_drops_invalid(self):
+        self.assertEqual(
+            self.module.parse_notify_times("21:00, 7:30,25:00,abc,07:30"),
+            ["07:30", "21:00"],
+        )
+        self.assertEqual(self.module.normalize_notify_times("9:5"), "09:05")
+        self.assertEqual(self.module.parse_notify_times("abc"), ["07:30", "21:00"])
+
+    def test_notify_defaults_are_enabled(self):
+        config = self.module.BrushConfig({})
+        for attr in (
+            "notify", "notify_version", "notify_error", "notify_torrent_add",
+            "notify_torrent_delete", "notify_torrent_status", "notify_traffic",
+        ):
+            self.assertTrue(getattr(config, attr), attr)
+        self.assertEqual(config.notify_traffic_times, "07:30,21:00")
+
+    def test_get_service_registers_two_traffic_cron_jobs(self):
+        plugin = self._new_qb_plugin({
+            "enabled": True,
+            "notify": True,
+            "notify_traffic": True,
+            "notify_traffic_times": "07:30,21:00",
+            "brushsites": [1],
+            "brush_interval_seconds": 45,
+            "check_interval_seconds": 240,
+        })
+        plugin._task_brush_enable = True
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        services = plugin.get_service()
+        traffic = {item["id"]: item for item in services if "TrafficDaily" in item["id"]}
+        self.assertEqual(
+            sorted(traffic),
+            ["BrushFlowLowFreqTrafficDaily_0730", "BrushFlowLowFreqTrafficDaily_2100"],
+        )
+        morning = traffic["BrushFlowLowFreqTrafficDaily_0730"]
+        self.assertEqual(morning["trigger"], "cron")
+        self.assertEqual(morning["kwargs"], {"hour": 7, "minute": 30})
+        self.assertEqual(morning["func_kwargs"], {"slot": "07:30"})
+
+    def test_get_service_skips_traffic_jobs_when_switch_off(self):
+        plugin = self._new_qb_plugin({
+            "enabled": True,
+            "notify": True,
+            "notify_traffic": False,
+            "brushsites": [1],
+            "brush_interval_seconds": 45,
+            "check_interval_seconds": 240,
+        })
+        plugin._task_brush_enable = True
+        plugin._BrushFlowLowFreq__check_and_resolve_plugin_conflict = lambda: True
+        services = plugin.get_service()
+        self.assertFalse(any("TrafficDaily" in item["id"] for item in services))
+
+    def test_traffic_message_contains_today_yesterday_month(self):
+        plugin, _, _ = self._notify_plugin()
+        now = datetime(2026, 11, 28, 7, 30)
+        text = plugin._BrushFlowLowFreq__build_traffic_daily_text(now)
+        self.assertIn("统计时间：2026-11-28 07:30", text)
+        self.assertIn("本日上传：", text)
+        self.assertIn("本日下载：", text)
+        self.assertIn("昨日上传：", text)
+        self.assertIn("昨日下载：", text)
+        self.assertIn("本月（28天）上传：", text)
+        self.assertIn("本月（28天）下载：", text)
+        self.assertNotIn("统计口径", text)
+        self.assertNotIn("00:00 至今", text)
+
+    def test_notify_daily_traffic_sends_once_per_slot(self):
+        plugin, _, sent = self._notify_plugin()
+        now = datetime(2026, 11, 28, 7, 30)
+        plugin.notify_daily_traffic("07:30", now=now)
+        plugin.notify_daily_traffic("07:30", now=now)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["title"], "【刷流流量日报】2026-11-28")
+
+    def test_notify_daily_traffic_respects_class_switch(self):
+        plugin, _, sent = self._notify_plugin({"notify_traffic": False})
+        plugin.notify_daily_traffic("07:30", now=datetime(2026, 11, 28, 7, 30))
+        self.assertEqual(sent, [])
+
+    def test_notify_daily_traffic_respects_master_switch(self):
+        plugin, _, sent = self._notify_plugin({"notify": False})
+        plugin.notify_daily_traffic("07:30", now=datetime(2026, 11, 28, 7, 30))
+        self.assertEqual(sent, [])
+
+    def test_notify_daily_traffic_stops_after_three_attempts(self):
+        plugin, store, _ = self._notify_plugin()
+        plugin.post_message = lambda **kwargs: (_ for _ in ()).throw(RuntimeError("offline"))
+        base = datetime(2026, 11, 28, 7, 30)
+        for minute in (0, 11, 22, 33):
+            plugin.notify_daily_traffic("07:30", now=base + timedelta(minutes=minute))
+        state = store["notify_traffic_daily"]["slots"]["07:30"]
+        self.assertEqual(state["attempts"], 3)
+        self.assertFalse(state["sent"])
+
+    def test_maybe_notify_traffic_daily_catches_latest_slot(self):
+        plugin, store, sent = self._notify_plugin()
+        plugin._BrushFlowLowFreq__maybe_notify_traffic_daily(
+            now=datetime(2026, 11, 28, 21, 5)
+        )
+        self.assertEqual(len(sent), 1)
+        slots = store["notify_traffic_daily"]["slots"]
+        self.assertTrue(slots["07:30"]["skipped"])
+        self.assertTrue(slots["21:00"]["sent"])
+
+    def test_maybe_notify_traffic_daily_skips_when_all_slots_sent(self):
+        plugin, store, sent = self._notify_plugin(store={
+            "notify_traffic_daily": {
+                "date": "2026-11-28",
+                "slots": {
+                    "07:30": {"sent": True, "attempts": 1},
+                    "21:00": {"sent": True, "attempts": 1},
+                },
+            }
+        })
+        plugin._BrushFlowLowFreq__maybe_notify_traffic_daily(
+            now=datetime(2026, 11, 28, 22, 0)
+        )
+        self.assertEqual(sent, [])
+
+    def test_error_notification_deduped_within_window(self):
+        plugin, _, sent = self._notify_plugin()
+        plugin._BrushFlowLowFreq__log_and_notify_error("下载器未连接")
+        plugin._BrushFlowLowFreq__log_and_notify_error("下载器未连接")
+        self.assertEqual(len(sent), 1)
+
+    def test_error_notification_uses_abnormal_title(self):
+        plugin, _, sent = self._notify_plugin()
+        plugin._BrushFlowLowFreq__log_and_notify_error("配置错误")
+        self.assertEqual(sent[0]["title"], "【刷流任务异常】")
+
+    def test_delete_notification_respects_class_switch(self):
+        plugin, _, sent = self._notify_plugin({"notify_torrent_delete": False})
+        plugin._BrushFlowLowFreq__send_delete_message(
+            site_name="站点", torrent_title="标题", torrent_desc="内容", reason="原因"
+        )
+        self.assertEqual(sent, [])
+
+    def test_add_notification_respects_class_switch(self):
+        plugin, _, sent = self._notify_plugin({"notify_torrent_add": False})
+        plugin._BrushFlowLowFreq__send_add_message(
+            {"site_name": "站点", "title": "标题", "size": 1024}
+        )
+        self.assertEqual(sent, [])
+
+    def test_validate_normalizes_notify_traffic_times(self):
+        plugin, _, _ = self._notify_plugin()
+        config = {
+            "downloader": "qb",
+            "brushsites": [1],
+            "notify_traffic_times": "21:00, 7:30,25:00,abc",
+        }
+        self.assertTrue(plugin._BrushFlowLowFreq__validate_and_fix_config(config))
+        self.assertEqual(config["notify_traffic_times"], "07:30,21:00")
+
+    def test_update_config_persists_notify_keys(self):
+        plugin, _, _ = self._notify_plugin({"notify_traffic_times": "08:00,20:00"})
+        captured = {}
+        plugin.update_config = lambda value: captured.update(value)
+        plugin._BrushFlowLowFreq__update_config()
+        for key in (
+            "notify", "notify_version", "notify_error", "notify_torrent_add",
+            "notify_torrent_delete", "notify_torrent_status", "notify_traffic",
+            "notify_traffic_times",
+        ):
+            self.assertIn(key, captured)
+        self.assertEqual(captured["notify_traffic_times"], "08:00,20:00")
+
+    def test_notification_tab_is_inserted_before_other_tab(self):
+        plugin = self.module.BrushFlowLowFreq()
+        plugin.sites_helper = SimpleNamespace(get_indexers=lambda: [])
+        plugin.downloader_helper = SimpleNamespace(get_configs=lambda: {})
+        form, defaults = plugin.get_form()
+        form_text = str(form)
+        self.assertIn("notify_tab", form_text)
+        self.assertIn("通知类型", form_text)
+        self.assertIn("每日流量推送", form_text)
+        self.assertEqual(defaults["notify_traffic_times"], "07:30,21:00")
+        self.assertTrue(defaults["notify_error"])
 
 
 if __name__ == "__main__":
